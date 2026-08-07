@@ -7,6 +7,7 @@ const worldArt = $('#worldArt');
 const zoneName = $('#zoneName');
 const terrainLayer = $('#terrainLayer');
 const decoLayer = $('#decoLayer');
+const auraLayer = $('#auraLayer');
 const player = $('#player');
 const nearby = $('#nearby');
 const contextHint = $('#contextHint');
@@ -35,7 +36,7 @@ const toast = $('#toast');
 const appBasePath = location.pathname.endsWith('/') ? location.pathname : location.pathname.replace(/[^/]+$/, '');
 
 const HOME_CAPACITY = 12;
-const RAW_EVENT_CAP = 300;
+const RAW_EVENT_CAP = 600;
 const daySeed = Math.floor(Date.now() / 86400000);
 
 function mulberry32(seed) {
@@ -151,7 +152,26 @@ const objectTargets = {
   seabench: { wx: 400, wy: 860, label: '看海长椅', hint: 'E 坐下来看一会儿海' },
   neighbor: { wx: 1750, wy: 140, label: '陌生人的长椅', hint: 'E 拜访一个公开空间' },
   anomaly: { wx: -2400, wy: 240, label: '回声水洼', hint: 'E 回应今日异象，或直接走开' },
+  clothesline: { wx: -350, wy: -720, label: '胶片晾衣绳', hint: 'E 把口袋里的副本挂上去' },
+  doublewall: { wx: 2200, wy: -650, label: '双面放映墙', hint: 'E 左右各放一段，一起看' },
+  mixtable: { wx: -2050, wy: -60, label: '混剪桌', hint: 'E 把最多三段副本排成一段' },
+  swapbox: { wx: -100, wy: 520, label: '交换箱', hint: 'E 留下一枚副本，带走一枚别人的' },
+  shopcafe: { wx: 1700, wy: -500, label: '咖啡店橱窗', hint: 'E 给橱窗挑一段合适的' },
+  shoppet: { wx: 2400, wy: -180, label: '宠物店橱窗', hint: 'E 给橱窗挑一段合适的' },
+  frame: { wx: -2600, wy: -500, label: '空白画框', hint: 'E 这里好像缺了一段什么' },
 };
+
+const NAMELESS_REGIONS = [
+  { id: 'r-hill', x: 1100, y: -2300, r: 430 },
+  { id: 'r-forest', x: -3200, y: 60, r: 420 },
+];
+
+const SHOP_META = {
+  cafe: { name: '咖啡店', hint: '橱窗适合早餐、午后和蒸汽' },
+  pet: { name: '宠物店', hint: '橱窗适合会跑会叫的东西' },
+};
+
+const AURA_CLASS = { '海岸': 'aura-coast', '城市': 'aura-night', '商业': 'aura-shop', '山林': 'aura-forest', '城镇': 'aura-warm' };
 
 const TAG_PLANTS = [
   { tag: '治愈', wx: -1620, wy: -240 },
@@ -178,9 +198,9 @@ function generateWorldVideos() {
   const used = new Set();
   const items = [];
   Object.entries(ZONE_SPAWN).forEach(([zoneId, spec]) => {
-    const preferred = pool.filter((item) => (SCENE_ZONE_PREF[item.scene] || []).includes(zoneId) && !used.has(item.id));
-    const rest = pool.filter((item) => !used.has(item.id));
     for (let i = 0; i < spec.slots; i += 1) {
+      const preferred = pool.filter((item) => (SCENE_ZONE_PREF[item.scene] || []).includes(zoneId) && !used.has(item.id));
+      const rest = pool.filter((item) => !used.has(item.id));
       const candidate = preferred.length ? preferred : rest;
       if (!candidate.length) break;
       const pick = candidate[Math.floor(rand() * candidate.length)];
@@ -232,6 +252,13 @@ const defaultState = {
   bottleState: null,
   pocketWords: [],
   exploreSteps: 0,
+  line: [null, null, null],
+  wall: { a: null, b: null },
+  mix: [],
+  exchangeOffer: null,
+  shops: { cafe: null, pet: null },
+  frameSlot: null,
+  namedZones: {},
   profile: { nickname: '路过的风', username: 'visitor', bio: '收集不太确定的影像', interests: '海、树、慢节奏', spaceName: '礁石小窝', avatar: 0 },
 };
 
@@ -680,6 +707,12 @@ function creatorLevel() {
 
 function currentZoneName() {
   if (state.worldMode === 'cottage') return `${state.profile.spaceName || '小窝'}内`;
+  for (const region of NAMELESS_REGIONS) {
+    if (Math.hypot(state.wx - region.x, state.wy - region.y) < region.r) {
+      const name = state.namedZones[region.id];
+      return name ? `「${name}」` : '无名处';
+    }
+  }
   return zoneAt(state.wx, state.wy).name;
 }
 
@@ -693,6 +726,7 @@ function nearestTarget() {
   state.notes.forEach((note) => consider(Math.hypot(state.wx - note.wx, state.wy - note.wy), { type: 'note', note }));
   Object.entries(objectTargets).forEach(([id, item]) => consider(Math.hypot(state.wx - item.wx, state.wy - item.wy), { type: 'object', id, hint: item.hint }));
   TAG_PLANTS.forEach((plant, index) => consider(Math.hypot(state.wx - plant.wx, state.wy - plant.wy), { type: 'tagplant', index, tag: plant.tag }));
+  NAMELESS_REGIONS.forEach((region) => consider(Math.hypot(state.wx - region.x, state.wy - region.y), { type: 'nameless', region }));
   if (state.bottleState?.open === false) consider(Math.hypot(state.wx - state.bottleState.wx, state.wy - state.bottleState.wy), { type: 'bottle' });
   return result;
 }
@@ -726,6 +760,9 @@ function updateNearby() {
     contextHint.innerHTML = `一株标签植物「${state.nearest.tag}」 · <kbd>E</kbd> 拔下来带走`;
   } else if (state.nearest?.type === 'bottle') {
     contextHint.innerHTML = '一只漂流瓶被冲到了这里 · <kbd>E</kbd> 打开';
+  } else if (state.nearest?.type === 'nameless') {
+    const name = state.namedZones[state.nearest.region.id];
+    contextHint.innerHTML = name ? `「${escapeHtml(name)}」 · <kbd>E</kbd> 改个名字` : '一处无名之地 · <kbd>E</kbd> 给它起个名字';
   } else if (state.nearest?.type === 'object') {
     contextHint.innerHTML = state.nearest.hint.replace('E ', '<kbd>E</kbd> ');
   } else if (state.carryTag) {
@@ -803,10 +840,21 @@ function flushImpressions() {
 function renderWorld() {
   updatePlayer();
   renderTerrain();
+  renderAuras();
   renderStaticDecos();
   $$('.world-object').forEach((node) => {
     const target = objectTargets[node.dataset.object];
     if (target) placeWorldNode(node, target.wx, target.wy);
+    const id = node.dataset.object;
+    const filled = {
+      shopcafe: !!state.shops.cafe,
+      shoppet: !!state.shops.pet,
+      frame: !!state.frameSlot,
+      clothesline: state.line.some(Boolean),
+      doublewall: !!(state.wall.a || state.wall.b),
+      mixtable: state.mix.length > 0,
+    }[id];
+    node.classList.toggle('is-filled', !!filled);
   });
   $$('.media-screen').forEach((node) => {
     const video = allVideos().find((candidate) => candidate.id === node.dataset.videoId);
@@ -821,6 +869,7 @@ function renderWorld() {
   renderTagPlants();
   renderBidPlants();
   renderDecos();
+  renderNameless();
   updateNearby();
   updateWayfinder();
 }
@@ -1082,7 +1131,7 @@ function npcCounter(video) {
   if (!bid || bid.settled) return;
   const room = bid.reserve - bid.price - 1;
   if (bid.highest === 'player' && room >= 3 && Math.random() < 0.62) {
-    const amount = 3 + Math.floor(Math.random() * Math.min(7, room - 2));
+    const amount = Math.min(3 + Math.floor(Math.random() * 7), room);
     bid.price += amount;
     bid.highest = 'npc';
     bid.bids.push({ name: '慢半拍的鹿', amount, type: 'npc' });
@@ -1494,6 +1543,469 @@ function showPersonalSpace() {
   });
 }
 
+function copyTitle(assetId) {
+  const video = allVideos().find((candidate) => candidate.id === assetId);
+  return video ? video.title : '一段副本';
+}
+
+function usedAssetIds() {
+  const ids = new Set();
+  state.line.forEach((id) => id && ids.add(id));
+  if (state.wall.a) ids.add(state.wall.a);
+  if (state.wall.b) ids.add(state.wall.b);
+  state.mix.forEach((id) => ids.add(id));
+  Object.values(state.shops).forEach((id) => id && ids.add(id));
+  if (state.frameSlot) ids.add(state.frameSlot);
+  return ids;
+}
+
+function availableCopies() {
+  const used = usedAssetIds();
+  return state.copies.filter((copy) => !used.has(copy.assetId));
+}
+
+function openCopyPicker(titleText, subtitle, onPick, onCancel) {
+  const copies = availableCopies();
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(titleText)}</h2>
+      <p class="sheet-subtitle">${escapeHtml(subtitle)}</p>
+      <div class="list-stack">
+        ${copies.length ? copies.map((copy, index) => `<div class="list-row"><div><b>${escapeHtml(copyTitle(copy.assetId))}</b><span>竞价获得 · ${new Date(copy.acquiredAt).toLocaleDateString('zh-CN')}</span></div><button class="text-button" data-pick="${index}">选这枚</button></div>`).join('') : '<div class="empty-state">口袋里没有可用的副本。到视频旁按 G 参与竞价，赢了就有了。</div>'}
+      </div>
+      <div class="media-actions"><button class="text-button" id="pickerCancel">返回</button></div>
+    </div>
+  `, () => {
+    $$('[data-pick]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const copy = copies[Number(button.dataset.pick)];
+      closeSheet();
+      onPick(copy.assetId);
+    }));
+    $('#pickerCancel').addEventListener('click', () => {
+      closeSheet();
+      onCancel?.();
+    });
+  });
+}
+
+function showClothesline() {
+  const slotRow = (assetId, index) => {
+    if (!assetId) return `<div class="list-row"><div><b>空的位置 ${index + 1}</b><span>风把这里吹得很响</span></div><button class="text-button" data-line-hang="${index}">挂一枚副本</button></div>`;
+    return `<div class="list-row"><div><b>${escapeHtml(copyTitle(assetId))}</b><span>位置 ${index + 1}</span></div><div class="row-actions">${index > 0 ? `<button class="text-button" data-line-left="${index}">◀</button>` : ''}${index < 2 ? `<button class="text-button" data-line-right="${index}">▶</button>` : ''}<button class="text-button" data-line-down="${index}">取下</button></div></div>`;
+  };
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">胶片晾衣绳</h2>
+      <p class="sheet-subtitle">把副本挂上去，左右挪、交换、并在一起。你如何安排它们，会被记录为内容之间的关系——但不会有人问你为什么。</p>
+      <div class="list-stack">${[0, 1, 2].map((index) => slotRow(state.line[index], index)).join('')}</div>
+      <div class="status-banner">绳上的副本仍属于你，随时可以取回小窝。原视频和世界都没有被改动。</div>
+    </div>
+  `, () => {
+    const changed = () => {
+      logEvent('line_change', { order: state.line });
+      persist();
+      renderWorld();
+      showClothesline();
+    };
+    $$('[data-line-hang]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const index = Number(button.dataset.lineHang);
+      openCopyPicker('挑一枚挂上去', '绳上有三个位置。挂上去之后可以左右挪动。', (assetId) => {
+        state.line[index] = assetId;
+        showToast('挂好了');
+        changed();
+      }, showClothesline);
+    }));
+    $$('[data-line-left]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const index = Number(button.dataset.lineLeft);
+      [state.line[index - 1], state.line[index]] = [state.line[index], state.line[index - 1]];
+      changed();
+    }));
+    $$('[data-line-right]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const index = Number(button.dataset.lineRight);
+      [state.line[index + 1], state.line[index]] = [state.line[index], state.line[index + 1]];
+      changed();
+    }));
+    $$('[data-line-down]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const index = Number(button.dataset.lineDown);
+      state.line[index] = null;
+      showToast('取下来了，回到你的口袋');
+      changed();
+    }));
+  });
+}
+
+function showDoubleWall() {
+  const slot = (key) => {
+    const id = state.wall[key];
+    const label = key === 'a' ? '左边' : '右边';
+    return `<div class="list-row"><div><b>${label}</b><span>${id ? escapeHtml(copyTitle(id)) : '空着'}</span></div><div class="row-actions">${id ? `<button class="text-button" data-wall-clear="${key}">取下</button>` : ''}<button class="text-button" data-wall-pick="${key}">${id ? '换一段' : '放一段'}</button></div></div>`;
+  };
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">双面放映墙</h2>
+      <p class="sheet-subtitle">左右各放一段。这里不出现“哪个更好”——只是把它们放在一起看，顺序和并置本身就是答案。</p>
+      <div class="list-stack">${slot('a')}${slot('b')}</div>
+      <div class="media-actions">
+        ${state.wall.a && state.wall.b ? '<button class="primary-button" id="wallPlayBoth">一起播放</button><button class="paper-button" id="wallSwap">左右互换</button>' : ''}
+      </div>
+    </div>
+  `, () => {
+    $$('[data-wall-pick]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const key = button.dataset.wallPick;
+      openCopyPicker(`挑一枚放到${key === 'a' ? '左边' : '右边'}`, '墙的两面各自放一段。', (assetId) => {
+        state.wall[key] = assetId;
+        persist();
+        renderWorld();
+        showDoubleWall();
+      }, showDoubleWall);
+    }));
+    $$('[data-wall-clear]', sheet).forEach((button) => button.addEventListener('click', () => {
+      state.wall[button.dataset.wallClear] = null;
+      persist();
+      renderWorld();
+      showDoubleWall();
+    }));
+    const swap = $('#wallSwap', sheet);
+    if (swap) swap.addEventListener('click', () => {
+      [state.wall.a, state.wall.b] = [state.wall.b, state.wall.a];
+      logEvent('wall_swap', { a: state.wall.a, b: state.wall.b });
+      persist();
+      showDoubleWall();
+    });
+    const playBoth = $('#wallPlayBoth', sheet);
+    if (playBoth) playBoth.addEventListener('click', () => {
+      const a = state.wall.a;
+      const b = state.wall.b;
+      openSheet(`
+        <div class="sheet-inner">
+          <h2 class="sheet-title" id="sheetTitle" tabindex="-1">两面一起亮起来</h2>
+          <p class="sheet-subtitle">左边是《${escapeHtml(copyTitle(a))}》，右边是《${escapeHtml(copyTitle(b))}》。不评判，只是并置。</p>
+          <div class="wall-duo">
+            <div><div class="video-frame is-playing"><span class="video-status">${escapeHtml(copyTitle(a))}</span></div></div>
+            <div><div class="video-frame is-playing"><span class="video-status">${escapeHtml(copyTitle(b))}</span></div></div>
+          </div>
+          <div class="media-actions"><button class="text-button" id="wallPairBack">回到放映墙</button></div>
+        </div>
+      `, () => {
+        logEvent('wall_pair_view', { a, b });
+        $('#wallPairBack').addEventListener('click', () => showDoubleWall());
+      });
+    });
+  });
+}
+
+function showMixTable() {
+  const rows = state.mix.length
+    ? state.mix.map((id, index) => `<div class="list-row"><div><b>${index + 1}. ${escapeHtml(copyTitle(id))}</b></div><div class="row-actions">${index > 0 ? `<button class="text-button" data-mix-up="${index}">▲</button>` : ''}${index < state.mix.length - 1 ? `<button class="text-button" data-mix-down="${index}">▼</button>` : ''}<button class="text-button" data-mix-remove="${index}">删掉</button></div></div>`).join('')
+    : '<div class="empty-state">桌上还什么都没有。最多可以放三段。</div>';
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">混剪桌</h2>
+      <p class="sheet-subtitle">把最多三段副本排成一段：A → B → C。系统只记录顺序和衔接关系，不会替你剪。</p>
+      <div class="note-section"><h3>桌上的顺序</h3>${rows}</div>
+      <div class="media-actions">
+        ${state.mix.length < 3 ? '<button class="primary-button" id="mixAdd">加一枚进来</button>' : ''}
+        ${state.mix.length >= 2 ? '<button class="paper-button" id="mixSave">保存成组合，放进小窝</button>' : ''}
+      </div>
+    </div>
+  `, () => {
+    const changed = () => {
+      logEvent('mix_change', { order: state.mix });
+      persist();
+      showMixTable();
+    };
+    $$('[data-mix-up]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const index = Number(button.dataset.mixUp);
+      [state.mix[index - 1], state.mix[index]] = [state.mix[index], state.mix[index - 1]];
+      changed();
+    }));
+    $$('[data-mix-down]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const index = Number(button.dataset.mixDown);
+      [state.mix[index + 1], state.mix[index]] = [state.mix[index], state.mix[index + 1]];
+      changed();
+    }));
+    $$('[data-mix-remove]', sheet).forEach((button) => button.addEventListener('click', () => {
+      state.mix.splice(Number(button.dataset.mixRemove), 1);
+      changed();
+    }));
+    const add = $('#mixAdd', sheet);
+    if (add) add.addEventListener('click', () => {
+      openCopyPicker('挑一枚放到桌上', '顺序可以随时调。', (assetId) => {
+        state.mix.push(assetId);
+        changed();
+      }, showMixTable);
+    });
+    const save = $('#mixSave', sheet);
+    if (save) save.addEventListener('click', () => {
+      if (state.placed.length >= HOME_CAPACITY) return showToast('小窝摆满了，先收起一些');
+      const parts = [...state.mix];
+      parts.forEach((assetId) => {
+        const idx = state.copies.findIndex((copy) => copy.assetId === assetId);
+        if (idx >= 0) state.copies.splice(idx, 1);
+      });
+      state.placed.push({ type: 'combo', parts, assetId: parts[0], x: 26, y: 40, since: Date.now() });
+      state.mix = [];
+      persist();
+      logEvent('mix_save', { order: parts });
+      renderWorld();
+      closeSheet();
+      showToast('组合已保存，去小窝就能看到');
+    });
+  });
+}
+
+function seedExchangeOffer() {
+  if (state.exchangeOffer) return;
+  const seeded = mulberry32(daySeed * 23 + 5);
+  const video = worldVideos[Math.floor(seeded() * worldVideos.length)];
+  state.exchangeOffer = { assetId: video.id, note: '换一个你觉得适合雨夜的东西。', by: '南枝' };
+  persist();
+}
+
+function showSwapBox() {
+  seedExchangeOffer();
+  const offer = state.exchangeOffer;
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">交换箱</h2>
+      <p class="sheet-subtitle">箱子里现在有《${escapeHtml(copyTitle(offer.assetId))}》，还有一张写着话的纸条。</p>
+      <div class="status-banner">“${escapeHtml(offer.note)}” —— ${escapeHtml(offer.by)}</div>
+      <div class="media-actions">
+        <button class="primary-button" id="swapTake">留下一枚，带走它</button>
+        <button class="text-button" id="swapLeave">只是看看</button>
+      </div>
+    </div>
+  `, () => {
+    $('#swapTake').addEventListener('click', () => {
+      openCopyPicker('留下哪一枚？', '想带走箱子里的东西，要放一枚自己的进来。也可以给下一个人写句话。', (assetId) => {
+        openSwapNote(assetId);
+      }, showSwapBox);
+    });
+    $('#swapLeave').addEventListener('click', closeSheet);
+  });
+}
+
+function openSwapNote(assetId) {
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">给下一个人留一句话</h2>
+      <p class="sheet-subtitle">不写也行，心意在就好。</p>
+      <form id="swapNoteForm">
+        <label>一句话<input name="note" maxlength="40" placeholder="换一个你觉得……" /></label>
+        <button class="primary-button" type="submit">放进箱子</button>
+      </form>
+    </div>
+  `, () => $('#swapNoteForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const text = event.currentTarget.elements.note.value.trim();
+    const gained = state.exchangeOffer.assetId;
+    const leftIndex = state.copies.findIndex((copy) => copy.assetId === assetId);
+    if (leftIndex >= 0) state.copies.splice(leftIndex, 1);
+    state.exchangeOffer = { assetId, note: text || '没有留话，但心意在。', by: state.profile.nickname || '路过的风' };
+    state.copies.push({ assetId: gained, acquiredAt: Date.now() });
+    updateCounters();
+    persist();
+    logEvent('exchange_take', { gained, left: assetId, note: text, substitution: true });
+    closeSheet();
+    renderWorld();
+    say(`你带走了《${copyTitle(gained)}》，箱子里换成了《${copyTitle(assetId)}》。`, '木秋');
+  }));
+}
+
+function showShop(shopId) {
+  const meta = SHOP_META[shopId];
+  const current = state.shops[shopId];
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(meta.name)}橱窗</h2>
+      <p class="sheet-subtitle">${escapeHtml(meta.hint)}。放进橱窗会记录一段「视频 → 商业场景」的匹配，用于商业适配研究；不产生真实交易。</p>
+      ${current
+        ? `<div class="status-banner">橱窗里现在是《${escapeHtml(copyTitle(current))}》</div>
+          <div class="media-actions">
+            <button class="primary-button" id="shopReplace">换一段</button>
+            <button class="text-button" id="shopRemove">取下</button>
+          </div>`
+        : '<div class="media-actions"><button class="primary-button" id="shopPick">挑一枚副本放进橱窗</button></div>'}
+    </div>
+  `, () => {
+    const pick = (afterEmpty) => openCopyPicker('挑一枚放进橱窗', meta.hint + '。', (assetId) => {
+      state.shops[shopId] = assetId;
+      persist();
+      logEvent('business_scene_place', { shop_id: shopId, asset_id: assetId });
+      renderWorld();
+      closeSheet();
+      showToast(`《${copyTitle(assetId)}》进了${meta.name}橱窗`);
+    }, afterEmpty);
+    const pickButton = $('#shopPick', sheet);
+    if (pickButton) pickButton.addEventListener('click', () => pick(showShop.bind(null, shopId)));
+    const replace = $('#shopReplace', sheet);
+    if (replace) replace.addEventListener('click', () => {
+      openCopyPicker('换哪一枚进橱窗？', '原来那段会回到你的口袋。', (assetId) => {
+        const old = state.shops[shopId];
+        state.shops[shopId] = assetId;
+        persist();
+        logEvent('business_scene_place', { shop_id: shopId, asset_id: assetId, replaced: old });
+        renderWorld();
+        showShop(shopId);
+      }, showShop.bind(null, shopId));
+    });
+    const remove = $('#shopRemove', sheet);
+    if (remove) remove.addEventListener('click', () => {
+      const old = state.shops[shopId];
+      state.shops[shopId] = null;
+      persist();
+      logEvent('business_scene_remove', { shop_id: shopId, asset_id: old });
+      renderWorld();
+      showShop(shopId);
+    });
+  });
+}
+
+function showFrame() {
+  const current = state.frameSlot;
+  const target = objectTargets.frame;
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">空白画框</h2>
+      <p class="sheet-subtitle">框上只刻着一行小字：“这里好像缺了一段什么。”你可以放进去一段，也可以留下一句话。</p>
+      ${current
+        ? `<div class="status-banner">框里现在是《${escapeHtml(copyTitle(current))}》</div>
+          <div class="media-actions"><button class="text-button" id="frameRemove">取下来</button></div>`
+        : `<div class="media-actions">
+            <button class="primary-button" id="framePick">放一枚副本进去</button>
+            <button class="paper-button" id="frameWord">留一句话</button>
+          </div>`}
+    </div>
+  `, () => {
+    const pick = $('#framePick', sheet);
+    if (pick) pick.addEventListener('click', () => {
+      openCopyPicker('放哪一枚进画框？', '放进画框代表：你觉得这段属于这里。', (assetId) => {
+        state.frameSlot = assetId;
+        persist();
+        logEvent('environment_match', { asset_id: assetId });
+        renderWorld();
+        showFrame();
+      }, showFrame);
+    });
+    const word = $('#frameWord', sheet);
+    if (word) word.addEventListener('click', () => {
+      openSheet(`
+        <div class="sheet-inner">
+          <h2 class="sheet-title" id="sheetTitle" tabindex="-1">在画框下留一句话</h2>
+          <p class="sheet-subtitle">它会变成一张世界里的纸条，别人路过能看到。</p>
+          <form id="frameWordForm">
+            <label>一句话<input name="text" maxlength="40" required placeholder="这里缺的也许是……" /></label>
+            <button class="primary-button" type="submit">留下</button>
+          </form>
+        </div>
+      `, () => $('#frameWordForm').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const text = event.currentTarget.elements.text.value.trim();
+        if (!text) return;
+        const note = {
+          id: `n-frame-${Date.now()}`,
+          title: text,
+          description: '',
+          type: 'personal',
+          by: state.profile.nickname || '路过的风',
+          wx: target.wx + 30,
+          wy: target.wy + 40,
+          zone: zoneAt(target.wx, target.wy).id,
+          refAsset: null,
+          responses: [],
+          createdAt: '刚刚',
+        };
+        state.notes.push(note);
+        persist();
+        logEvent('publish_demand', { demand_id: note.id, demand_type: 'personal', source: 'blank_frame' });
+        closeSheet();
+        renderCreations();
+        renderWorld();
+        showToast('这句话钉在了画框下');
+      }));
+    });
+    const remove = $('#frameRemove', sheet);
+    if (remove) remove.addEventListener('click', () => {
+      const old = state.frameSlot;
+      state.frameSlot = null;
+      persist();
+      logEvent('environment_unmatch', { asset_id: old });
+      renderWorld();
+      showFrame();
+    });
+  });
+}
+
+function renderNameless() {
+  NAMELESS_REGIONS.forEach((region) => {
+    let node = $(`[data-nameless="${region.id}"]`, decoLayer);
+    if (!node) {
+      node = document.createElement('button');
+      node.className = 'nameless-marker';
+      node.dataset.nameless = region.id;
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        showNameless(region);
+      });
+      decoLayer.append(node);
+    }
+    const name = state.namedZones[region.id];
+    node.textContent = name ? `「${name}」` : '？无名处';
+    node.classList.toggle('is-named', !!name);
+    placeWorldNode(node, region.x, region.y);
+  });
+}
+
+function showNameless(region) {
+  const current = state.namedZones[region.id];
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">一处没有名字的地方</h2>
+      <p class="sheet-subtitle">风、路和光线在这里交汇，但还没有人叫出它的名字。${current ? `你曾叫它「${escapeHtml(current)}」。` : '你可以给它起个名字，以后这里会慢慢长出内容。'}</p>
+      <form id="namelessForm">
+        <label>它的名字<input name="name" maxlength="12" required placeholder="凌晨三点 / 想跑路 / 安静得危险" value="${escapeHtml(current || '')}" /></label>
+        <div class="media-actions">
+          <button class="primary-button" type="submit">${current ? '改个名字' : '就叫这个'}</button>
+          ${current ? '<button class="text-button" id="namelessClear" type="button">忘掉这个名字</button>' : ''}
+        </div>
+      </form>
+    </div>
+  `, () => {
+    $('#namelessForm').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const name = event.currentTarget.elements.name.value.trim();
+      if (!name) return;
+      state.namedZones[region.id] = name;
+      persist();
+      logEvent('free_semantic_cluster', { region_id: region.id, name });
+      closeSheet();
+      renderNameless();
+      updateNearby();
+      showToast(`从现在开始，这里叫「${name}」`);
+    });
+    const clear = $('#namelessClear', sheet);
+    if (clear) clear.addEventListener('click', () => {
+      delete state.namedZones[region.id];
+      persist();
+      logEvent('free_semantic_cluster_clear', { region_id: region.id });
+      closeSheet();
+      renderNameless();
+    });
+  });
+}
+
+function renderAuras() {
+  auraLayer.replaceChildren();
+  allVideos().forEach((video) => {
+    const cls = AURA_CLASS[video.scene];
+    if (!cls) return;
+    const div = document.createElement('span');
+    div.className = `aura ${cls}`;
+    auraLayer.append(div);
+    placeWorldNode(div, video.wx, video.wy + 10);
+  });
+}
+
 function showTelescope() {
   logEvent('telescope_open');
   const far = worldVideos
@@ -1724,7 +2236,7 @@ function showAbout() {
       <p class="sheet-subtitle">公共视频是持续存在的共享对象，不会消失。副本只通过虚拟竞价产生；收藏不等于购买。你在任何地方都能发布视频和纸条。</p>
       <div class="choice-grid">
         <div class="choice-button"><b>随地发生</b><span>发布视频、留纸条、竞价，都发生在你站着的地方</span></div>
-        <div class="choice-button"><b>没有大厅</b><span>世界用装置代替功能菜单：望远镜、漂流瓶、长椅、标签植物</span></div>
+        <div class="choice-button"><b>没有大厅</b><span>望远镜、漂流瓶、晾衣绳、放映墙、混剪桌、交换箱、橱窗、画框、无名处——都是世界里的东西，不是菜单</span></div>
         <div class="choice-button"><b>曝光被完整记录</b><span>看到与没看到会被区分，原始事件保留、派生结论后算</span></div>
         <div class="choice-button"><b>一切都是虚拟</b><span>灵感币无现金价值；NPC 始终被标记</span></div>
       </div>
@@ -1835,6 +2347,10 @@ function showHelpFeedback() {
     ['纸条是什么？', '在世界任意位置按 N 留下的需求；站在视频旁按 N 会自动引用那段视频。'],
     ['标签植物怎么用？', '按 E 拔下一株，走到视频旁按 F 贴上去。'],
     ['为什么内容会变化？', '每个区域的内容按推荐分与低曝光补偿动态选取；世界每天也会换一批。'],
+    ['晾衣绳、放映墙、混剪桌做什么？', '把口袋里的副本挂上、并排或排成顺序。记录的是你如何安排内容之间的关系，不会有人问你为什么。'],
+    ['交换箱怎么用？', '留下一枚副本和一句话，带走别人留下的一枚。交换关系会被记录。'],
+    ['橱窗和画框是什么？', '商业街的橱窗记录「视频→商业场景」的匹配；林子里的画框可以放一段视频或留一句话。'],
+    ['无名处怎么命名？', '走到标着「？无名处」的地方按 E，给它起个名字。'],
   ];
   openSheet(`
     <div class="sheet-inner">
@@ -1950,8 +2466,14 @@ function observe() {
   if (state.nearest.type === 'video') return showVideo(state.nearest.video);
   if (state.nearest.type === 'note') return showNoteDetail(state.nearest.note);
   if (state.nearest.type === 'tagplant') return pluckTagPlant(state.nearest.index);
+  if (state.nearest.type === 'nameless') return showNameless(state.nearest.region);
   if (state.nearest.type === 'bottle') return openBottle();
-  const actions = { cottage: enterCottage, board: showBoard, workshop: showWorkshop, telescope: showTelescope, sound: showSoundDock, seabench: showSeabench, neighbor: showNeighbor, anomaly: showAnomaly };
+  const actions = {
+    cottage: enterCottage, board: showBoard, workshop: showWorkshop, telescope: showTelescope,
+    sound: showSoundDock, seabench: showSeabench, neighbor: showNeighbor, anomaly: showAnomaly,
+    clothesline: showClothesline, doublewall: showDoubleWall, mixtable: showMixTable,
+    swapbox: showSwapBox, shopcafe: () => showShop('cafe'), shoppet: () => showShop('pet'), frame: showFrame,
+  };
   actions[state.nearest.id]?.();
 }
 

@@ -49,7 +49,14 @@
 | 漂流瓶 | 打开得一句话/视频指引/标签/纸条方向；可回复、扔回、带走 | bottle_exposure / bottle_open / bottle_keep / bottle_return / bottle_reply |
 | 标签植物 | 拔下携带，F 贴到视频旁 | tag_pluck / tag_add(source=tag_plant) / tag_remove |
 | 看海长椅 | 坐下看海、读上一位留言、留一句 | bench_sit / bench_reply |
-| 交换箱/晾衣绳/放映墙 | 未实现（下一阶段） | — |
+| 胶片晾衣绳 | 三槽挂副本、左右挪动/互换/取下 | line_change（含三槽顺序） |
+| 双面放映墙 | 左右各放一段，并置播放、互换、取下 | wall_pair_view / wall_swap |
+| 混剪桌 | 最多三段排成 A→B→C 顺序，保存为小窝组合 | mix_change / mix_save |
+| 交换箱 | 留下一枚副本 + 一句话，带走别人留下的一枚 | exchange_take / substitution |
+| 咖啡店/宠物店橱窗 | 放副本进模拟商业店铺窗口、换或取下 | business_scene_place / business_scene_remove |
+| 空白画框 | 放一段或留一句话→世界纸条 | environment_match / publish_demand(source=blank_frame) |
+| 无名处 | 给森林或山坡中没名字的地方起名/改名/忘掉 | free_semantic_cluster |
+| 视频光环 | 按视频场景类别(海岸/城市/商业/山林/城镇)渲染环境色 | —（纯视觉效果） |
 
 ## 纯娱乐对象（无推荐数据目的）
 
@@ -62,7 +69,7 @@
 ## 数据与隐私约束
 
 - 所有事件带 event_id / raw_event / details / experiment_id=‘open-world-v1’ / experiment_group=‘mixed-biome’，derived_signals 恒为空（派生后算）。
-- rawEvents 本地容量 300 条；曝光为批量事件。
+- rawEvents 本地容量 600 条；曝光为批量事件。
 - 抽屉保留数据与隐私面板：研究开关、导出、匿名化删除请求。
 
 ## 生产实现时必须替换的模拟层
