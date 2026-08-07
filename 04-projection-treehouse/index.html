@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Zhere 影像树屋完整体验设计原型" />
+    <title>Zhere | 树冠聚落</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='%2368783a' stroke='%23302216' stroke-width='6'/%3E%3Cpath d='M22 38c12-2 18-10 20-20 3 12-2 24-17 28' fill='none' stroke='%23fff2c9' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="preload" href="./assets/treehouse-settlement-map-v2.png" as="image" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!--
+      THESIS: Zhere is a world that grows from player attention, not a room-sized feature hub.
+      OWN-WORLD: Flat forest cartoon map, inked outlines, paper controls, one brick-red action color.
+      STORY: Wander the public canopy, discover distant districts, publish objects into the world, return home by choice.
+      FIRST VIEWPORT: A quiet fragment of an unbounded world; one or two signals, then open ground in every direction.
+      FORM: Camera-following procedural field with sparse authored landmarks; no overview-map frame and no world edge.
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+    -->
+    <div class="loading" id="loading" aria-live="polite">
+      <div class="loading-mark">ZHERE</div>
+      <div class="loading-line"><span></span></div>
+      <p>正在展开树冠聚落</p>
+    </div>
+
+    <main class="game" id="game" aria-label="Zhere 树冠聚落">
+      <header class="topbar">
+        <button class="wordmark" id="aboutButton" aria-label="打开世界说明">ZHERE</button>
+        <div class="place-name" aria-live="polite">
+          <span id="worldName">无界树冠公域</span>
+          <strong id="zoneName">共创营地附近</strong>
+        </div>
+        <div class="hud">
+          <button class="hud-button event-button" id="eventButton">今日异象</button>
+          <button class="hud-button" id="favoritesButton">收藏 <b id="favoritesCount">0</b></button>
+          <button class="hud-button" id="ledgerButton">账本</button>
+          <div class="counter"><span>树果币</span><b id="walletCount">76</b></div>
+          <div class="counter"><span>影子</span><b id="shadowCount">0</b></div>
+          <button class="avatar-button" id="profileButton" aria-label="打开角色与账户"><span id="topAvatar">秋</span></button>
+        </div>
+      </header>
+
+      <section class="world-shell" id="worldShell" aria-label="无边界公共探索世界">
+        <div class="world-stage" id="worldStage">
+          <div class="terrain-layer" id="terrainLayer" aria-hidden="true"></div>
+          <img class="world-art" id="worldArt" src="./assets/treehouse-settlement-map-v2.png" alt="我的私人小屋内部" draggable="false" hidden />
+
+          <div id="screenLayer" class="screen-layer" aria-label="公共影像对象"></div>
+          <div id="placedLayer" class="placed-layer" aria-label="个人空间摆放内容"></div>
+          <div id="creationLayer" class="creation-layer" aria-label="玩家发布到世界的内容"></div>
+
+          <button class="world-object personal-object" data-object="cottage" data-label="我的小屋" aria-label="我的小屋入口"><svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M16 40 60 9l44 31v35H16Z" fill="#d7ab65"/><path d="M11 42 60 5l49 37" fill="none"/><path d="M51 49h19v26H51z" fill="#fff2c9"/></svg></button>
+          <button class="world-object sound-object" data-object="sound" data-label="听风码头" aria-label="声音码头"><svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M10 65h100v12H10zM25 17v48m70-48v48M25 21h70" fill="#8f653d"/><path d="M43 24v24m17-24v34m17-34v24"/><circle cx="43" cy="52" r="5" fill="#d7ab65"/><circle cx="60" cy="62" r="5" fill="#d7ab65"/><circle cx="77" cy="52" r="5" fill="#d7ab65"/></svg></button>
+          <button class="world-object auction-object" data-object="auction" data-label="枝头竞价集" aria-label="竞价台"><svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M15 20h90l-8 22H23Z" fill="#fff2c9"/><path d="M30 20h15l-3 22H26Zm30 0h15l3 22H57Zm30 0h15l-8 22H82Z" fill="#c95f43"/><path d="M28 42v33m64-33v33M17 75h86" fill="none"/><path d="M51 57h18v18H51z" fill="#d7ab65"/><circle cx="60" cy="53" r="8" fill="#d7ab65"/></svg></button>
+          <button class="world-object board-object" data-object="board" data-label="需求纸树" aria-label="社区公告树"><svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M51 13h18v65H51z" fill="#8f653d"/><path d="M14 12h92v56H14z" fill="#d7ab65"/><path d="M24 21h30v18H24zm42 5h28v25H66zM29 48h25v12H29z" fill="#fff2c9"/></svg></button>
+          <button class="world-object workshop-object" data-object="workshop" data-label="共创工作台" aria-label="创作工坊"><svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M12 50h96v16H12zM24 66v13m72-13v13" fill="#8f653d"/><circle cx="42" cy="34" r="21" fill="#4f8d83"/><circle cx="42" cy="34" r="7" fill="#fff2c9"/><path d="m63 39 20-14 12 17-24 10Z" fill="#c95f43"/></svg></button>
+          <button class="world-object neighbor-object" data-object="neighbor" data-label="陌生人的长椅" aria-label="邻居入口"><svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M18 28h84v24H18zM13 52h94v13H13zM25 65v14m70-14v14" fill="#8f653d"/><path d="M32 35h56" fill="none"/></svg></button>
+          <button class="world-object anomaly-object" data-object="anomaly" data-label="回声水洼" aria-label="今日世界异象"><svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M10 52c8-22 30-32 54-27 18 3 38 12 46 29-12 18-33 24-55 21-22-2-38-8-45-23Z" fill="#8fb9ad"/><path d="M29 51c12-12 43-15 61 1-13 11-43 15-61-1Z" fill="#d6dfa7"/><circle cx="61" cy="51" r="7" fill="#fff2c9"/></svg></button>
+          <button class="cottage-exit" id="cottageExit" hidden>推门回到公共世界</button>
+
+          <div class="player" id="player" aria-label="玩家角色">
+            <span class="player-head"></span>
+            <span class="player-body"></span>
+            <span class="player-feet"></span>
+          </div>
+          <div class="nearby" id="nearby" hidden>E</div>
+          <div class="context-hint" id="contextHint">WASD 向任意方向漫游 · 世界没有边界</div>
+          <div class="wayfinder" id="wayfinder" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="dialogue" id="dialogue" aria-live="polite">
+        <button class="dialogue-toggle" id="dialogueToggle" aria-label="收起对话">收起</button>
+        <div class="dialogue-copy">
+          <div class="speaker" id="speaker">木秋</div>
+          <p id="dialogueText">公共世界向所有方向继续生长。跟随近处信号，或一直走进没有名字的枝区。</p>
+          <div class="dialogue-actions" id="dialogueActions"></div>
+        </div>
+        <img class="portrait" src="./assets/muqiu-flat.png" alt="树屋管理员木秋" draggable="false" />
+        <div class="controls"><kbd>WASD</kbd> 行走 <kbd>E</kbd> 观察 <kbd>F</kbd> 拾取或摆放 <kbd>Space</kbd> 播放</div>
+      </section>
+    </main>
+
+    <section class="entry" id="entry" aria-label="进入 Zhere">
+      <div class="entry-map" aria-hidden="true"></div>
+      <div class="entry-book">
+        <button class="entry-back" id="entryBack" hidden>返回</button>
+
+        <div class="entry-page is-active" data-entry-page="welcome">
+          <span class="entry-kicker">一个由影像组成的公共世界</span>
+          <h1>树冠聚落</h1>
+          <p>没有任务列表。你可以观看、回应、组合、竞价，也可以什么都不做。</p>
+          <div class="entry-actions">
+            <button class="primary-button" data-entry-target="login">登录进入</button>
+            <button class="paper-button" data-entry-target="register">注册角色</button>
+            <button class="text-button" id="guestButton">直接体验设计</button>
+          </div>
+          <p class="entry-note">浏览与互动会被记录，用于推荐研究。虚拟币没有现金价值。</p>
+        </div>
+
+        <form class="entry-page" data-entry-page="login" id="loginForm" novalidate>
+          <h2>欢迎回来</h2>
+          <label>邮箱或手机号<input name="identity" autocomplete="username" required /></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" minlength="8" required /></label>
+          <p class="form-error" id="loginError" role="alert"></p>
+          <button class="primary-button" type="submit">进入聚落</button>
+          <button class="text-button" type="button" data-entry-target="forgot">忘记密码</button>
+        </form>
+
+        <form class="entry-page register-page" data-entry-page="register" id="registerForm" novalidate>
+          <h2>创建树屋角色</h2>
+          <div class="field-grid">
+            <label>邮箱或手机号<input name="identity" autocomplete="username" required /></label>
+            <label>用户名<input name="username" autocomplete="nickname" required /></label>
+            <label>昵称<input name="nickname" value="木叶来客" required /></label>
+            <label>空间名称<input name="spaceName" value="左枝小屋" required /></label>
+            <label>密码<input name="password" type="password" minlength="8" required /></label>
+            <label>确认密码<input name="confirmPassword" type="password" minlength="8" required /></label>
+          </div>
+          <label class="check-label"><input type="checkbox" name="age" required /> 我已满 16 周岁</label>
+          <label class="check-label"><input type="checkbox" name="terms" required /> 我同意使用条款与隐私说明</label>
+          <label class="check-label"><input type="checkbox" name="research" checked /> 我愿意参与推荐与模型研究，可随时退出且保留账户</label>
+          <p class="form-error" id="registerError" role="alert"></p>
+          <button class="primary-button" type="submit">创建并进入</button>
+        </form>
+
+        <form class="entry-page" data-entry-page="forgot" id="forgotForm">
+          <h2>申请重置密码</h2>
+          <p>当前阶段由管理员人工核验并发送重置指引。</p>
+          <label>邮箱或手机号<input name="identity" required /></label>
+          <label>补充说明<textarea name="note" rows="3" placeholder="例如最近一次登录时间"></textarea></label>
+          <button class="primary-button" type="submit">提交申请</button>
+        </form>
+      </div>
+    </section>
+
+    <div class="scrim" id="scrim" hidden></div>
+    <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" hidden>
+      <button class="sheet-close" id="sheetClose" aria-label="关闭">关闭</button>
+      <div id="sheetContent"></div>
+    </section>
+
+    <aside class="profile-drawer" id="profileDrawer" aria-label="角色与账户" hidden>
+      <button class="sheet-close" id="profileClose" aria-label="关闭角色与账户">关闭</button>
+      <div class="profile-head"><span class="large-avatar" id="drawerAvatar">秋</span><div><h2 id="drawerName">木叶来客</h2><p id="drawerTitle">左枝小屋的整理者</p></div></div>
+      <nav class="drawer-nav">
+        <button data-panel="profile">角色与空间</button>
+        <button data-panel="favorites">我的收藏</button>
+        <button data-panel="publications">我的发布</button>
+        <button data-panel="data">数据与成长</button>
+        <button data-panel="balance">虚拟账本</button>
+        <button data-panel="security">安全与认证</button>
+        <button data-panel="help">帮助与反馈</button>
+        <button data-panel="privacy">数据与隐私</button>
+        <button data-panel="admin">树屋维护簿</button>
+        <button id="logoutButton">退出登录</button>
+      </nav>
+      <div class="drawer-note">所有玩家拥有相同基础能力。管理员入口仅用于原型审查。</div>
+    </aside>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="./prototype.js"></script>
+  </body>
+</html>

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>Zhere 内容动物园</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <section class="gate" id="gate">
+      <div class="gate-copy">
+        <p class="brand">ZHERE</p>
+        <h1>内容<br />动物园</h1>
+        <p class="lead">这里的影像闲不住。它们会散步、认错标签，也会把评论养成小东西。</p>
+        <form id="gate-form">
+          <label for="visitor-name">访客名字</label>
+          <div class="name-line">
+            <input id="visitor-name" value="乔木" maxlength="12" autocomplete="off" />
+            <button>开门</button>
+          </div>
+        </form>
+        <p class="fineprint">公共素材始终留在园内。你拿走的是一只可以布置的影像影子。</p>
+      </div>
+      <div class="gate-creature" aria-hidden="true">
+        <div class="creature-screen"><i></i><i></i><i></i></div>
+        <div class="leg left-leg"></div>
+        <div class="leg right-leg"></div>
+        <div class="paper-tag">可能很贵</div>
+        <div class="comment-bug">这像广告吗</div>
+      </div>
+    </section>
+
+    <div class="app" id="app" aria-hidden="true">
+      <aside class="rail">
+        <span class="rail-brand">Z</span>
+        <nav aria-label="原型场景">
+          <button class="scene-button is-active" data-scene="public"><b>园</b><span>公共园</span></button>
+          <button class="scene-button" data-scene="home"><b>屋</b><span>我的屋</span></button>
+          <button class="scene-button" data-scene="auction"><b>秤</b><span>竞价场</span></button>
+        </nav>
+        <span class="visitor-mark" id="visitor-mark">乔</span>
+      </aside>
+
+      <main class="viewport" id="viewport" tabindex="0" aria-label="内容动物园世界">
+        <div class="world" id="world">
+          <div class="ground" aria-hidden="true">
+            <div class="tape tape-a">别急着分类</div>
+            <div class="tape tape-b">它也许会自己改口</div>
+            <div class="pen pen-a"></div>
+            <div class="pen pen-b"></div>
+            <div class="feeding-hole">?</div>
+            <div class="big-word">碰</div>
+          </div>
+          <div id="objects"></div>
+          <div class="player" id="player">
+            <span class="player-shadow"></span>
+            <span class="player-head"></span>
+            <span class="player-body"></span>
+            <span class="carry-shadow"></span>
+          </div>
+        </div>
+
+        <section class="context" id="context" aria-live="polite">
+          <strong id="context-title">先追一只看看</strong>
+          <span id="context-copy">点击地面或用 WASD 移动</span>
+        </section>
+
+        <section class="viewer" id="viewer" aria-hidden="true">
+          <button id="close-viewer" aria-label="关闭预览">收起来</button>
+          <div class="viewer-stage" id="viewer-stage">
+            <i></i><i></i><i></i><i></i>
+            <span>视频位置保留</span>
+          </div>
+          <div class="viewer-info">
+            <h2 id="viewer-title">一只认真上班的猫</h2>
+            <p id="viewer-status">空格键播放。播放时它会试着逃跑。</p>
+          </div>
+        </section>
+
+        <section class="auction" id="auction" aria-hidden="true">
+          <p>虚拟竞价</p>
+          <h2>这段影像<br />有多重</h2>
+          <div class="weight"><span id="price">12</span> 枚</div>
+          <button id="bid">加 4 枚重量</button>
+          <small id="bid-note">没有倒计时，不产生真实购买。</small>
+        </section>
+
+        <div class="toast" id="toast"></div>
+        <footer>
+          <span><b>点击地面</b> 或 WASD 移动</span>
+          <span><b>E</b> 看</span>
+          <span><b>F</b> 带走或放下</span>
+          <span><b>空格</b> 播放</span>
+          <span class="inventory" id="inventory">影子 0</span>
+        </footer>
+      </main>
+    </div>
+    <script src="./prototype.js"></script>
+  </body>
+</html>

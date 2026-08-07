@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>Zhere 白潮</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <section class="entry" id="entry">
+      <p class="brand">ZHERE</p>
+      <div class="entry-copy">
+        <h1>白潮</h1>
+        <p>影像散落在一片缓慢变化的空地上。没有路线，也没有必须抵达的地方。</p>
+        <form id="entry-form">
+          <label for="name">留下一个名字</label>
+          <div><input id="name" value="闻川" maxlength="12" autocomplete="off" /><button>走进去</button></div>
+        </form>
+        <small>正式版本会在进入前说明行为记录、匿名化与退出研究方式。</small>
+      </div>
+      <div class="entry-field" aria-hidden="true">
+        <i class="memory memory-a"></i>
+        <i class="memory memory-b"></i>
+        <i class="memory memory-c"></i>
+        <span class="entry-person"></span>
+        <p>靠近时，影像才会显出重量</p>
+      </div>
+    </section>
+
+    <div class="app" id="app" aria-hidden="true">
+      <header>
+        <span class="wordmark">ZHERE</span>
+        <nav aria-label="原型场景">
+          <button class="scene-button is-active" data-scene="public">白原</button>
+          <button class="scene-button" data-scene="home">我的空地</button>
+          <button class="scene-button" data-scene="auction">潮汐竞价</button>
+        </nav>
+        <span id="visitor">闻川</span>
+      </header>
+
+      <main class="viewport" id="viewport" tabindex="0" aria-label="白潮世界">
+        <div class="world" id="world">
+          <div class="field" aria-hidden="true">
+            <div class="horizon"></div>
+            <div class="quiet-ring ring-a"></div>
+            <div class="quiet-ring ring-b"></div>
+            <div class="long-mark mark-a"></div>
+            <div class="long-mark mark-b"></div>
+            <div class="field-word word-a">听</div>
+            <div class="field-word word-b">远</div>
+          </div>
+          <div id="objects"></div>
+          <div class="player" id="player"><i></i><span></span><b></b></div>
+        </div>
+
+        <section class="context" id="context" aria-live="polite">
+          <strong id="context-title">向任意方向走</strong>
+          <span id="context-copy">点击空地或使用 WASD</span>
+        </section>
+
+        <section class="viewer" id="viewer" aria-hidden="true">
+          <button id="close-viewer" aria-label="关闭预览">返回空地</button>
+          <div class="viewer-image" id="viewer-image"><i></i><i></i><i></i><span>视频位置保留</span></div>
+          <div class="viewer-title"><h2 id="viewer-title">风穿过没有人的房间</h2><p id="viewer-status">空格键播放</p></div>
+        </section>
+
+        <section class="auction" id="auction" aria-hidden="true">
+          <p>虚拟竞价</p>
+          <h2>把多少潮汐<br />留给它</h2>
+          <div><span id="price">9</span><small> 枚</small></div>
+          <button id="bid">投入 3 枚</button>
+          <small id="bid-note">只表达虚拟预算选择，不产生真实交易。</small>
+        </section>
+
+        <div class="toast" id="toast"></div>
+        <footer>
+          <span>点击空地或 WASD 移动</span>
+          <span>E 观看</span>
+          <span>F 带走或放下</span>
+          <span>空格 播放</span>
+          <span id="inventory">余像 0</span>
+        </footer>
+      </main>
+    </div>
+    <script src="./prototype.js"></script>
+  </body>
+</html>
