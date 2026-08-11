@@ -1,20 +1,28 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+const game = $('#game');
 const worldStage = $('#worldStage');
 const worldShell = $('#worldShell');
 const worldArt = $('#worldArt');
 const zoneName = $('#zoneName');
 const terrainLayer = $('#terrainLayer');
 const decoLayer = $('#decoLayer');
+const resourceLayer = $('#resourceLayer');
 const auraLayer = $('#auraLayer');
 const player = $('#player');
 const nearby = $('#nearby');
 const contextHint = $('#contextHint');
+const contextWheel = $('#contextWheel');
+const contextWheelTitle = $('#contextWheelTitle');
+const contextObserveHint = $('#contextObserveHint');
 const screenLayer = $('#screenLayer');
 const placedLayer = $('#placedLayer');
 const creationLayer = $('#creationLayer');
 const cottageExit = $('#cottageExit');
+const homesteadLayer = $('#homesteadLayer');
+const plotGrid = $('#plotGrid');
+const homeBuildings = $('#homeBuildings');
 const wayfinder = $('#wayfinder');
 const dialogue = $('#dialogue');
 const dialogueText = $('#dialogueText');
@@ -33,11 +41,67 @@ const sheetContent = $('#sheetContent');
 const scrim = $('#scrim');
 const profileDrawer = $('#profileDrawer');
 const toast = $('#toast');
+const energyBar = $('#energyBar');
+const energyCount = $('#energyCount');
+const dayCount = $('#dayCount');
+const seasonName = $('#seasonName');
+const weatherName = $('#weatherName');
+const woodCount = $('#woodCount');
+const stoneCount = $('#stoneCount');
+const seedCount = $('#seedCount');
+const produceCount = $('#produceCount');
 const appBasePath = location.pathname.endsWith('/') ? location.pathname : location.pathname.replace(/[^/]+$/, '');
+const STORAGE_KEY = 'zhere-v8-design-state';
+const LEGACY_STORAGE_KEY = 'zhere-v7-design-state';
+const SESSION_KEY = 'zhere-v8-prototype-session';
+const LEGACY_SESSION_KEY = 'zhere-v7-prototype-session';
 
 const HOME_CAPACITY = 12;
 const RAW_EVENT_CAP = 600;
+const TELEMETRY_SCHEMA_VERSION = 2;
+const TELEMETRY_SESSION_ID = crypto.randomUUID ? crypto.randomUUID() : `session-${Date.now()}-${Math.random()}`;
+const ESSENTIAL_EVENTS = new Set(['register', 'login', 'logout', 'research_consent_change', 'deletion_request', 'data_export']);
 const daySeed = Math.floor(Date.now() / 86400000);
+const RESOURCE_RESPAWN_DAYS = 1;
+const PLOT_COUNT = 16;
+
+const RESOURCE_META = {
+  branch: { label: '落枝', reward: { wood: 2 }, energy: 4 },
+  stump: { label: '老树桩', reward: { wood: 4, seeds: 1 }, energy: 8 },
+  stone: { label: '松动的石块', reward: { stone: 3 }, energy: 6 },
+  grass: { label: '高草丛', reward: { fiber: 2, seeds: 1 }, energy: 4 },
+  shell: { label: '海边漂流物', reward: { fiber: 2, stone: 1 }, energy: 3 },
+};
+
+const STARTER_GATHERABLES = [
+  { id: 'starter-branch', type: 'branch', wx: -470, wy: 250 },
+  { id: 'starter-grass', type: 'grass', wx: -120, wy: 210 },
+];
+
+const BUILDING_META = {
+  workbench: { name: '露天工作台', cost: { wood: 12, stone: 6 }, description: '解锁地块装饰和种子压制。' },
+  well: { name: '石砌水井', cost: { wood: 4, stone: 14 }, description: '每天免费为所有作物浇水一次。' },
+  greenhouse: { name: '玻璃温室', cost: { wood: 24, stone: 18, produce: 3 }, description: '作物即使没有浇水也会缓慢生长。' },
+  cabin: { name: '扩建小屋', cost: { wood: 18, stone: 12 }, description: '体力上限提高到 120，视频副本摆放上限提高到 16。' },
+};
+
+function freshPlots() {
+  return Array.from({ length: PLOT_COUNT }, (_, index) => ({ state: index < 4 ? 'cleared' : 'wild', stage: 0, watered: false }));
+}
+
+const HOMESTEAD_DEFAULT = {
+  day: 1,
+  season: '初春',
+  weather: '晴',
+  energy: 100,
+  resources: { wood: 10, stone: 6, fiber: 4, seeds: 4, produce: 0 },
+  plots: freshPlots(),
+  buildings: { workbench: 0, well: 0, greenhouse: 0, cabin: 0 },
+  construction: {},
+  decor: [],
+  forageDays: {},
+  wellUsedDay: 0,
+};
 
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -161,6 +225,44 @@ const objectTargets = {
   frame: { wx: -2600, wy: -500, label: '空白画框', hint: 'E 这里好像缺了一段什么' },
 };
 
+const WORLD_GUIDE_ITEMS = [
+  { id: 'walk', category: 'start', title: '走动与靠近', summary: '世界没有关卡边界，角色始终在画面中央，地图从脚下延伸。', how: '使用 WASD 或方向键行走；点击地图也能朝那个方向移动。', key: 'WASD' },
+  { id: 'observe', category: 'start', title: '观察与身边行动', summary: '靠近物件后，左上方会说明它是什么以及当前能做什么。', how: '按 E 执行主要动作；点击角色或按 Q 查看身边的全部动作。', key: 'E / Q' },
+  { id: 'publish', category: 'start', title: '随走随发布', summary: '公域里的素材和需求不用送到固定大厅，能直接留在你站着的位置。', how: '按 P 发布视频或需求；按 N 直接留需求纸条。', key: 'P / N', action: 'publish' },
+  { id: 'journal', category: 'start', title: '探索手账', summary: '真正看过的素材、纸条、地点和素材关系会成为可回访的个人足迹。', how: '按 J 打开手账；可以置顶记录，或沿地点记录回到附近。', key: 'J', action: 'journal' },
+  { id: 'home-loop', category: 'start', title: '探索与家园循环', summary: '公共世界负责发现和采集，只有自己的地块能被永久开荒、种植、建造和摆放。', how: '按 H 回地块；完成一天的劳动后按 R 进入明天。', key: 'H / R', action: 'home' },
+
+  { id: 'cottage', category: 'landmarks', title: '我的小屋', summary: '你唯一能够永久改变的空间，包含农田、建筑、制作和副本摆放。', how: '靠近门口按 E，或随时按 H 回去。', target: 'cottage' },
+  { id: 'board', category: 'landmarks', title: '公告树', summary: '世界里的需求与素材目录，也能管理自己的需求、草稿和已关闭纸条。', how: '靠近按 E；搜索结果可以直接打开，不受当天地图摆放限制。', target: 'board' },
+  { id: 'workshop', category: 'landmarks', title: '共创台', summary: '把本地素材先放进背包的公共工作台；它不是唯一发布入口。', how: '靠近按 E 上传；之后走到喜欢的位置按 P 发布。', target: 'workshop' },
+  { id: 'telescope', category: 'landmarks', title: '山坡望远镜', summary: '随机望见世界另一端的低曝光内容，帮助不常出现的素材被发现。', how: '靠近按 E；看到内容后可以直接打开。', target: 'telescope' },
+  { id: 'sound', category: 'landmarks', title: '听风码头', summary: '一处没有任务、没有奖励的声音体验。', how: '靠近按 E，停下来听一段环境声音。', target: 'sound' },
+  { id: 'seabench', category: 'landmarks', title: '看海长椅', summary: '坐下看海、阅读留下的话，也能为后来的人留一句。', how: '靠近按 E；离开不会产生未完成任务。', target: 'seabench' },
+  { id: 'neighbor', category: 'landmarks', title: '陌生人的长椅', summary: '拜访一个公开的他人空间，看看别人怎样整理素材。', how: '靠近按 E；只能浏览，不能改动别人的空间。', target: 'neighbor' },
+  { id: 'anomaly', category: 'landmarks', title: '回声水洼', summary: '偶尔出现的世界异象，可以回应，也可以完全忽略。', how: '靠近按 E 选择态度；没有倒计时或失败惩罚。', target: 'anomaly' },
+  { id: 'clothesline', category: 'landmarks', title: '胶片晾衣绳', summary: '把最多三枚副本挂成一排，观察并置后的感觉。', how: '先获得副本，再靠近按 E 挂上、移动或取下。', target: 'clothesline' },
+  { id: 'doublewall', category: 'landmarks', title: '双面放映墙', summary: '左右各放一段素材，让两段影像同时成为一个观察。', how: '带着副本靠近按 E；公共原片不会被改变。', target: 'doublewall' },
+  { id: 'mixtable', category: 'landmarks', title: '混剪桌', summary: '把最多三段副本排成先后顺序，保存为自己的组合。', how: '靠近按 E 添加、排序和移除片段。', target: 'mixtable' },
+  { id: 'swapbox', category: 'landmarks', title: '交换箱', summary: '留下一枚副本和一句话，再带走别人留下的一枚。', how: '带着副本靠近按 E；交换不会改变公共原片。', target: 'swapbox' },
+  { id: 'shopcafe', category: 'landmarks', title: '咖啡店橱窗', summary: '模拟把视频放进商业场景，观察素材与空间是否合适。', how: '带着副本靠近按 E；没有真实交易。', target: 'shopcafe' },
+  { id: 'shoppet', category: 'landmarks', title: '宠物店橱窗', summary: '另一种模拟商业语境，适合动物、动作和生活内容。', how: '带着副本靠近按 E；只记录你的匹配判断。', target: 'shoppet' },
+  { id: 'frame', category: 'landmarks', title: '空白画框', summary: '把一段视频或一句话放进空白处，形成新的世界纸条。', how: '靠近按 E，选择副本或留下文字。', target: 'frame' },
+
+  { id: 'video', category: 'discoveries', title: '公共视频放映物', summary: '视频会根据区域长成树冠放映架、街边灯箱、贝壳播放器或浮标银幕。', how: '靠近按 E 打开；F 点赞，G 参与虚拟竞价。公共原片始终留在世界中。', key: 'E / F / G' },
+  { id: 'note', category: 'discoveries', title: '需求纸条', summary: '玩家留下的公开需求，可以用视频或文字回应，也能继续追问。', how: '靠近按 E 展开；站在视频旁发布需求会自动引用该素材。', key: 'E / N' },
+  { id: 'resource', category: 'discoveries', title: '可再生资源', summary: '落枝、石块、高草和海边漂流物用于建设自己的地块。', how: '靠近按 E 收集并消耗体力；进入明天后重新生长。', key: 'E' },
+  { id: 'tagplant', category: 'discoveries', title: '标签植物', summary: '世界里长出的标签，可以被拔下并贴到某段视频旁。', how: '靠近按 E 拔下，走到视频旁按 F 贴上。', key: 'E / F' },
+  { id: 'bottle', category: 'discoveries', title: '漂流瓶', summary: '海岸随机出现的发现，可能装着一句话、视频线索或标签。', how: '靠近按 E 打开；它不是每日必做任务。', key: 'E' },
+  { id: 'nameless', category: 'discoveries', title: '无名处', summary: '地图上尚未被命名的小区域，名字只记录在你的世界视角里。', how: '靠近问号区域按 E，为它起名或重新命名。', key: 'E' },
+  { id: 'relation', category: 'discoveries', title: '素材之间的线', summary: '两段公共素材可以被并排观察，留下呼应、反差、顺序或暂未说清的关系。', how: '打开任意视频选择“对照另一段”；保存的关系会进入探索手账。', action: 'journal' },
+
+  { id: 'plots', category: 'homestead', title: '开荒与种植', summary: '16 块土地会永久保留清理、翻土、播种、浇水、生长和收获状态。', how: '在地块上点击土地逐步劳动；每次行动消耗体力。', action: 'home' },
+  { id: 'buildings', category: 'homestead', title: '设施建造', summary: '工作台、水井、温室和小屋扩建会解锁制作、批量浇水、稳定生长与容量。', how: '回地块按 H 打开建设簿，准备足够木材与石材。', key: 'H', action: 'home' },
+  { id: 'copies', category: 'homestead', title: '副本与摆放', summary: '副本是通过虚拟竞价获得的个人持有版本，不等同于收藏。', how: '视频旁按 G 竞价；获得后回地块按 F 摆放或收回。', key: 'G / F', action: 'home' },
+  { id: 'craft', category: 'homestead', title: '地块制作', summary: '探索资源可以制作木鸟屋、露天放映台和种子压制等生活物件。', how: '先建工作台，再在建设簿中选择制作项目。', action: 'home' },
+  { id: 'day', category: 'homestead', title: '体力、天气与明天', summary: '劳动消耗体力；天气和季节会影响土地，进入明天推动作物成长并让资源再生。', how: '在个人地块按 R 休息；世界不会因为你不休息而惩罚你。', key: 'R', action: 'home' },
+];
+
 const NAMELESS_REGIONS = [
   { id: 'r-hill', x: 1100, y: -2300, r: 430 },
   { id: 'r-forest', x: -3200, y: 60, r: 420 },
@@ -214,6 +316,12 @@ function generateWorldVideos() {
       });
     }
   });
+  const starterVideo = items.find((item) => item.zone === 'town');
+  if (starterVideo) {
+    starterVideo.wx = -300;
+    starterVideo.wy = 70;
+    starterVideo.spawn_source = '小屋附近的公共放映';
+  }
   return items;
 }
 
@@ -240,6 +348,14 @@ const defaultState = {
   bids: {},
   published: [],
   notes: [],
+  demandDrafts: [],
+  noteLinks: {},
+  noteResponses: {},
+  customTags: [],
+  assetOverrides: {},
+  assetRelations: [],
+  journalEntries: [],
+  discoveredZones: [],
   bag: [...SAMPLIES.map((item) => ({ ...item, fileName: '', mime: '', status: 'sample' }))],
   rawEvents: [],
   research: true,
@@ -259,21 +375,52 @@ const defaultState = {
   shops: { cafe: null, pet: null },
   frameSlot: null,
   namedZones: {},
+  guideIntroSeen: false,
+  homestead: JSON.parse(JSON.stringify(HOMESTEAD_DEFAULT)),
   profile: { nickname: '路过的风', username: 'visitor', bio: '收集不太确定的影像', interests: '海、树、慢节奏', spaceName: '礁石小窝', avatar: 0 },
 };
 
-function loadState() {
+function normalizeState(source = {}) {
   try {
-    const loaded = { ...defaultState, ...JSON.parse(localStorage.getItem('zhere-v7-design-state') || '{}') };
+    const loaded = { ...defaultState, ...source };
+    loaded.schemaVersion = 8;
+    loaded.homestead = {
+      ...JSON.parse(JSON.stringify(HOMESTEAD_DEFAULT)),
+      ...(loaded.homestead || {}),
+      resources: { ...HOMESTEAD_DEFAULT.resources, ...(loaded.homestead?.resources || {}) },
+      buildings: { ...HOMESTEAD_DEFAULT.buildings, ...(loaded.homestead?.buildings || {}) },
+      plots: Array.isArray(loaded.homestead?.plots) && loaded.homestead.plots.length === PLOT_COUNT
+        ? loaded.homestead.plots.map((plot) => ({ state: 'wild', stage: 0, watered: false, ...plot }))
+        : freshPlots(),
+      decor: Array.isArray(loaded.homestead?.decor) ? loaded.homestead.decor : [],
+      forageDays: loaded.homestead?.forageDays || {},
+    };
     if (!loaded.bag.length) loaded.bag = [...SAMPLIES.map((item) => ({ ...item, fileName: '', mime: '', status: 'sample' }))];
     if (!loaded.benchMessages.length) loaded.benchMessages = [{ name: '木秋', text: '海风把白天的声音都吹散了。' }];
+    loaded.demandDrafts = Array.isArray(loaded.demandDrafts) ? loaded.demandDrafts : [];
+    loaded.customTags = Array.isArray(loaded.customTags) ? loaded.customTags : [];
+    loaded.assetOverrides = loaded.assetOverrides || {};
+    loaded.assetRelations = Array.isArray(loaded.assetRelations) ? loaded.assetRelations : [];
+    loaded.journalEntries = Array.isArray(loaded.journalEntries) ? loaded.journalEntries : [];
+    loaded.discoveredZones = Array.isArray(loaded.discoveredZones) ? loaded.discoveredZones : [];
+    loaded.notes = (loaded.notes || []).map((note) => ({ status: 'open', owner: 'me', ...note }));
     return loaded;
   } catch {
     return JSON.parse(JSON.stringify(defaultState));
   }
 }
 
+const browserStateText = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+const hasBrowserStateToMigrate = Boolean(browserStateText);
+
+function loadState() {
+  try { return normalizeState(JSON.parse(browserStateText || '{}')); }
+  catch { return normalizeState(); }
+}
+
 const state = loadState();
+worldVideos.forEach((video) => Object.assign(video, state.assetOverrides[video.id] || {}));
+const MOVEMENT_KEYS = new Set(['a', 's', 'd', 'w', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown']);
 state.keys = new Set();
 state.nearest = null;
 state.activeVideo = null;
@@ -285,25 +432,70 @@ state.approached = new Set();
 state.avoidLogged = new Set();
 state.openedVideos = new Set();
 state.impressionAccum = {};
+state.activeGatherables = [];
+state.gatherRenderKey = '';
+state.gathering = null;
+state.commentReplyTo = null;
+state.activeObjectUrl = null;
+state.lastImpressions = new Map();
+state.publicAssets = [];
+state.publicDemands = [];
+state.publicRecords = [];
+state.publicWorldUpdatedAt = '';
+let telemetrySequence = 0;
+let telemetryWorldEntered = false;
+let telemetrySessionEnded = false;
+const telemetryStartedAt = Date.now();
+let movementSample = { fromX: state.wx, fromY: state.wy, distance: 0, startedAt: Date.now() };
+
+let sheetReturnFocus = null;
+let profileReturnFocus = null;
+let eventPersistQueued = false;
+let serviceSessionAvailable = false;
+
+function serializableState() {
+  const serializable = { ...state };
+  ['keys', 'nearest', 'activeVideo', 'videoOpenedAt', 'lastTime', 'carryTag', 'carryPlaced', 'approached', 'avoidLogged', 'openedVideos', 'impressionAccum', 'activeGatherables', 'gatherRenderKey', 'gathering', 'commentReplyTo', 'activeObjectUrl', 'lastImpressions', 'publicAssets', 'publicDemands', 'publicRecords', 'publicWorldUpdatedAt', 'rawEvents'].forEach((field) => delete serializable[field]);
+  return serializable;
+}
 
 function persist() {
-  const serializable = { ...state };
-  ['keys', 'nearest', 'activeVideo', 'videoOpenedAt', 'lastTime', 'carryTag', 'carryPlaced', 'approached', 'avoidLogged', 'openedVideos', 'impressionAccum'].forEach((field) => delete serializable[field]);
-  localStorage.setItem('zhere-v7-design-state', JSON.stringify(serializable));
+  window.ZhereService?.saveState(serializableState()).catch(() => {});
 }
 
 function logEvent(rawEvent, details = {}) {
+  if (!state.research && !ESSENTIAL_EVENTS.has(rawEvent)) return null;
+  const attribution = details.asset_id ? state.lastImpressions.get(details.asset_id) : null;
   const event = {
     event_id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
     raw_event: rawEvent,
-    details: { ...details, zone_id: zoneAt(state.wx, state.wy).id, wx: Math.round(state.wx), wy: Math.round(state.wy) },
+    details: {
+      ...details,
+      ...(attribution && !details.impression_id ? { impression_id: attribution.impressionId, impression_batch_id: attribution.batchId } : {}),
+      zone_id: zoneAt(state.wx, state.wy).id,
+      wx: Math.round(state.wx),
+      wy: Math.round(state.wy),
+    },
     created_at: new Date().toISOString(),
+    schema_version: TELEMETRY_SCHEMA_VERSION,
+    session_id: TELEMETRY_SESSION_ID,
+    session_sequence: ++telemetrySequence,
+    research_consent: Boolean(state.research),
     experiment_id: 'open-world-v1',
     experiment_group: 'mixed-biome',
     derived_signals: {},
   };
   state.rawEvents.push(event);
   if (state.rawEvents.length > RAW_EVENT_CAP) state.rawEvents = state.rawEvents.slice(-RAW_EVENT_CAP);
+  window.ZhereService?.events.enqueue(event);
+  if (!eventPersistQueued) {
+    eventPersistQueued = true;
+    queueMicrotask(() => {
+      eventPersistQueued = false;
+      persist();
+    });
+  }
+  return event;
 }
 
 function countEvent(name) {
@@ -316,6 +508,18 @@ function fmtNow() {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function showToast(message) {
@@ -340,13 +544,20 @@ function say(text, who = '木秋', options = []) {
   options.forEach((option) => addDialogueAction(option.label, option.handler));
   dialogue.classList.remove('is-collapsed');
   $('#dialogueToggle').textContent = '收起';
+  $('#dialogueToggle').setAttribute('aria-expanded', 'true');
 }
 
 function openSheet(markup, setup) {
+  stopMovement(true);
+  closeContextWheel();
+  if (sheet.hidden) sheetReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   sheetContent.innerHTML = markup;
   sheet.hidden = false;
+  sheet.scrollTop = 0;
   scrim.hidden = false;
   profileDrawer.hidden = true;
+  game.inert = true;
+  state.commentReplyTo = null;
   setup?.();
   requestAnimationFrame(() => $('.sheet-title', sheet)?.focus?.());
 }
@@ -360,7 +571,26 @@ function closeSheet() {
   scrim.hidden = true;
   sheetContent.replaceChildren();
   state.activeVideo = null;
+  state.commentReplyTo = null;
+  game.inert = false;
+  if (state.activeObjectUrl) {
+    URL.revokeObjectURL(state.activeObjectUrl);
+    state.activeObjectUrl = null;
+  }
+  const returnTarget = sheetReturnFocus;
+  sheetReturnFocus = null;
+  requestAnimationFrame(() => returnTarget?.isConnected && returnTarget.focus?.());
 }
+
+sheet.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const controls = $$('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])', sheet).filter((node) => !node.hidden && node.getClientRects().length);
+  if (!controls.length) return;
+  const first = controls[0];
+  const last = controls[controls.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
 
 function openUploadDatabase() {
   return new Promise((resolve, reject) => {
@@ -371,16 +601,9 @@ function openUploadDatabase() {
   });
 }
 
-async function saveUploadFile(id, file) {
-  if (!file) return;
-  const database = await openUploadDatabase();
-  await new Promise((resolve, reject) => {
-    const transaction = database.transaction('uploads', 'readwrite');
-    transaction.objectStore('uploads').put(file, id);
-    transaction.oncomplete = resolve;
-    transaction.onerror = () => reject(transaction.error);
-  });
-  database.close();
+async function saveUploadFile(id, file, { title = '', description = '' } = {}) {
+  if (!file) return null;
+  return window.ZhereService.media.upload({ assetId: id, title, description, file });
 }
 
 async function getUploadFile(id) {
@@ -395,9 +618,278 @@ async function getUploadFile(id) {
   return result;
 }
 
-function allVideos() {
-  return [...worldVideos, ...state.published];
+function validateMediaFile(file) {
+  if (!file) return '';
+  if (!file.type.startsWith('video/')) return '目前只支持视频文件，请选择 MP4、WebM 等视频格式。';
+  if (file.size > 20 * 1024 * 1024) return '当前正式存储单个视频不能超过 20MB，请压缩后重新选择。';
+  return '';
 }
+
+function allVideos() {
+  const videos = new Map();
+  [...worldVideos, ...state.published, ...state.publicAssets].forEach((video) => videos.set(video.id, video));
+  return [...videos.values()];
+}
+
+function allAssets() {
+  const assets = new Map();
+  VIDEO_POOL.forEach((base) => {
+    const active = worldVideos.find((video) => video.id === base.id);
+    assets.set(base.id, active || {
+      ...base,
+      ...(state.assetOverrides[base.id] || {}),
+      wx: null,
+      wy: null,
+      zone: null,
+      likes: state.assetOverrides[base.id]?.likes || 0,
+      comments: state.assetOverrides[base.id]?.comments || [],
+      catalogOnly: true,
+      spawn_source: '世界素材档案',
+    });
+  });
+  state.published.forEach((video) => assets.set(video.id, video));
+  state.publicAssets.forEach((video) => assets.set(video.id, video));
+  return [...assets.values()];
+}
+
+function findVideoById(id) {
+  if (!id) return null;
+  return allAssets().find((video) => video.id === id) || null;
+}
+
+function commitVideoState(video) {
+  if (!video || video.source === 'user') return;
+  state.assetOverrides[video.id] = {
+    likes: Number(video.likes) || 0,
+    tags: [...(video.tags || [])],
+    comments: JSON.parse(JSON.stringify(video.comments || [])),
+  };
+}
+
+function videoLocationLabel(video) {
+  return video?.catalogOnly || !Number.isFinite(video?.wx) ? '世界素材档案' : zoneAt(video.wx, video.wy).name;
+}
+
+const RELATION_TYPES = {
+  echo: { label: '像同一个下午', description: '气氛或动作彼此呼应' },
+  contrast: { label: '放在一起有反差', description: '并置后差异变得清楚' },
+  sequence: { label: '可以接在后面', description: '像前后相连的两个片段' },
+  unresolved: { label: '说不清，但想留着', description: '先保存关系，以后再回来' },
+};
+
+function recordJournalEntry(type, id, title, details = {}) {
+  if (!id) return;
+  const existing = state.journalEntries.find((entry) => entry.type === type && entry.id === id);
+  if (existing) {
+    existing.lastVisitedAt = new Date().toISOString();
+    existing.visits = (existing.visits || 1) + 1;
+    Object.assign(existing, details);
+  } else {
+    state.journalEntries.unshift({ type, id, title, firstVisitedAt: new Date().toISOString(), lastVisitedAt: new Date().toISOString(), visits: 1, ...details });
+    state.journalEntries = state.journalEntries.slice(0, 80);
+  }
+}
+
+function relationsForAsset(assetId) {
+  return allAssetRelations().filter((relation) => relation.aId === assetId || relation.bId === assetId);
+}
+
+function allAssetRelations() {
+  const relations = new Map(state.assetRelations.map((relation) => [relation.id, relation]));
+  state.publicRecords.filter((record) => record.kind === 'asset_relation').forEach((record) => relations.set(record.id, { id: record.id, owner: record.owner, ...(record.payload || {}) }));
+  return [...relations.values()];
+}
+
+function discoverCurrentZone(zone = zoneAt(state.wx, state.wy)) {
+  if (state.worldMode !== 'overworld' || state.discoveredZones.includes(zone.id)) return;
+  state.discoveredZones.push(zone.id);
+  recordJournalEntry('zone', zone.id, zone.name, { wx: Math.round(state.wx), wy: Math.round(state.wy) });
+  logEvent('zone_discover', { zone_id: zone.id });
+  persist();
+  showToast(`第一次走进${zone.name}，探索手账记下了一页`);
+}
+
+function allWorldNotes() {
+  const notes = new Map();
+  [...systemNotes, ...state.notes, ...state.publicDemands].forEach((note) => notes.set(note.id, note));
+  return [...notes.values()];
+}
+
+function allUserWorldNotes() {
+  const notes = new Map();
+  [...state.notes, ...state.publicDemands].forEach((note) => notes.set(note.id, note));
+  return [...notes.values()];
+}
+
+function applyPublicWorld(publicWorld, { render = false } = {}) {
+  if (!publicWorld) return;
+  const normalizeAsset = (asset) => ({
+    likes: 0, comments: [], tags: [], source: 'user', spawn_source: '玩家发布', dur: '—', res: asset.hasMedia ? '已上传' : '示例', license: '个人', price: 0,
+    ...asset,
+  });
+  const normalizeDemand = (demand) => ({ status: 'open', responses: [], ...demand });
+  if (publicWorld.mode === 'delta') {
+    const assets = new Map(state.publicAssets.map((item) => [item.id, item]));
+    const demands = new Map(state.publicDemands.map((item) => [item.id, item]));
+    const records = new Map(state.publicRecords.map((item) => [item.id, item]));
+    (publicWorld.deletedAssetIds || []).forEach((id) => assets.delete(id));
+    (publicWorld.deletedDemandIds || []).forEach((id) => demands.delete(id));
+    (publicWorld.deletedRecordIds || []).forEach((id) => records.delete(id));
+    (publicWorld.assets || []).forEach((item) => assets.set(item.id, normalizeAsset(item)));
+    (publicWorld.demands || []).forEach((item) => demands.set(item.id, normalizeDemand(item)));
+    (publicWorld.records || []).forEach((item) => records.set(item.id, item));
+    state.publicAssets = [...assets.values()]; state.publicDemands = [...demands.values()]; state.publicRecords = [...records.values()];
+  } else {
+    state.publicAssets = (publicWorld.assets || []).map(normalizeAsset);
+    state.publicDemands = (publicWorld.demands || []).map(normalizeDemand);
+    state.publicRecords = publicWorld.records || [];
+  }
+  state.publicWorldUpdatedAt = publicWorld.refreshedAt || state.publicWorldUpdatedAt;
+  if (render) {
+    renderScreens();
+    renderCreations();
+    renderWorld();
+  }
+}
+
+async function syncPublicWorld({ render = true } = {}) {
+  if (!window.ZhereService?.isAuthenticated()) return null;
+  try {
+    const publicWorld = await window.ZhereService.publicWorld.load({ since: state.publicWorldUpdatedAt });
+    applyPublicWorld(publicWorld, { render });
+    return publicWorld;
+  } catch (error) {
+    console.warn('Public world refresh failed', error);
+    return null;
+  }
+}
+
+async function migrateLegacyPublicContent() {
+  if (!window.ZhereService?.isAuthenticated() || (!state.published.length && !state.notes.length)) return;
+  let migrated = false;
+  for (const asset of [...state.published]) {
+    try {
+      await window.ZhereService.publicWorld.publishAsset(asset);
+      migrated = true;
+    } catch (error) { console.warn('Legacy public asset migration failed', asset.id, error); }
+  }
+  for (const note of [...state.notes]) {
+    try {
+      await window.ZhereService.publicWorld.createDemand(note);
+      for (const [index, response] of (state.noteResponses?.[note.id] || []).entries()) {
+        await window.ZhereService.publicWorld.respondToDemand(note.id, { ...response, id: response.id || `legacy-${note.id}-${index}` });
+      }
+      migrated = true;
+    } catch (error) { console.warn('Legacy public demand migration failed', note.id, error); }
+  }
+  if (!migrated) return;
+  state.published = [];
+  state.notes = [];
+  state.noteResponses = {};
+  await syncPublicWorld({ render: false });
+  await window.ZhereService.saveState(serializableState(), { immediate: true });
+}
+
+function responsesForNote(note) {
+  const responses = [
+    ...(note.responses || []),
+    ...(state.noteResponses?.[note.id] || []),
+  ];
+  const seen = new Set();
+  return responses.filter((response) => {
+    const key = response.id || `${response.name}:${response.text}:${response.assetId || ''}:${response.at || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function linkedVideoIdsForNote(note) {
+  return [...new Set([
+    note.refAsset,
+    ...(state.noteLinks?.[note.id] || []),
+    ...(note.assetLinks || []),
+    ...responsesForNote(note).map((response) => response.assetId),
+  ].filter(Boolean))];
+}
+
+function linkNoteToVideo(note, videoId) {
+  if (!note || !videoId) return;
+  state.noteLinks = state.noteLinks || {};
+  state.noteLinks[note.id] = [...new Set([...(state.noteLinks[note.id] || []), videoId])];
+  note.assetLinks = [...new Set([...(note.assetLinks || []), videoId])];
+}
+
+function relatedNotesForVideo(videoId) {
+  return allWorldNotes().filter((note) => linkedVideoIdsForNote(note).includes(videoId));
+}
+
+function responseVideoCandidates(note) {
+  const owned = new Set([
+    ...state.published.map((video) => video.id),
+    ...state.publicAssets.filter((video) => video.owner === 'me').map((video) => video.id),
+    ...state.copies.map((copy) => copy.assetId),
+    ...state.openedVideos,
+    ...linkedVideoIdsForNote(note),
+  ]);
+  const ranked = allAssets()
+    .map((video) => ({
+      video,
+      priority: owned.has(video.id) ? 0 : (state.exposureCounts[video.id] || 0) > 0 ? 1 : 2,
+      distance: Number.isFinite(video.wx) ? Math.hypot(video.wx - note.wx, video.wy - note.wy) : Number.POSITIVE_INFINITY,
+    }))
+    .sort((a, b) => a.priority - b.priority || a.distance - b.distance)
+    .slice(0, 16)
+    .map((entry) => entry.video);
+  return ranked;
+}
+
+function findOpenWorldSpot(originWx, originWy, excludeId = null) {
+  const occupied = [
+    ...Object.values(objectTargets),
+    ...allVideos(),
+    ...allUserWorldNotes(),
+  ].filter((item) => !excludeId || item.id !== excludeId);
+  const offsets = [
+    [110, 70], [-110, 70], [120, -90], [-120, -90],
+    [190, 30], [-190, 30], [20, 190], [20, -190],
+    [230, 130], [-230, 130], [230, -130], [-230, -130],
+    [0, 280], [0, -280], [300, 0], [-300, 0],
+  ];
+  let best = { wx: originWx + offsets[0][0], wy: originWy + offsets[0][1], clearance: -Infinity };
+  for (const [dx, dy] of offsets) {
+    const candidate = { wx: originWx + dx, wy: originWy + dy };
+    const clearance = occupied.length
+      ? Math.min(...occupied.map((item) => Math.hypot(candidate.wx - item.wx, candidate.wy - item.wy)))
+      : Infinity;
+    if (clearance >= 185) return candidate;
+    if (clearance > best.clearance) best = { ...candidate, clearance };
+  }
+  return { wx: best.wx, wy: best.wy };
+}
+
+function repairCrowdedUserContent() {
+  let changed = false;
+  [...state.notes, ...state.published].forEach((item) => {
+    const occupied = [
+      ...Object.values(objectTargets),
+      ...allVideos(),
+      ...allUserWorldNotes(),
+    ].filter((candidate) => candidate.id !== item.id);
+    const nearestDistance = occupied.length
+      ? Math.min(...occupied.map((candidate) => Math.hypot(item.wx - candidate.wx, item.wy - candidate.wy)))
+      : Infinity;
+    if (nearestDistance >= 145) return;
+    const openSpot = findOpenWorldSpot(item.wx, item.wy, item.id);
+    item.wx = openSpot.wx;
+    item.wy = openSpot.wy;
+    item.zone = zoneAt(item.wx, item.wy).id;
+    changed = true;
+  });
+  if (changed) persist();
+}
+
+repairCrowdedUserContent();
 
 function scoreVideo(video) {
   const exposures = state.exposureCounts[video.id] || 0;
@@ -451,10 +943,59 @@ function renderTerrainBands(fragment) {
   });
 }
 
+const WORLD_TRAILS = [
+  { from: [-620, 160], to: [260, -60], type: 'town' },
+  { from: [260, -60], to: [760, 260], type: 'town' },
+  { from: [-620, 160], to: [-350, -720], type: 'forest' },
+  { from: [260, -60], to: [-100, 520], type: 'shore' },
+  { from: [260, -60], to: [1700, -500], type: 'street' },
+  { from: [-350, -720], to: [-2050, -60], type: 'forest' },
+];
+
+const WORLD_SCENERY = [
+  { type: 'oldtree', wx: -980, wy: -210 },
+  { type: 'garden', wx: 650, wy: -430 },
+  { type: 'windmill', wx: 720, wy: -1780 },
+  { type: 'dock', wx: -80, wy: 690 },
+  { type: 'boat', wx: -820, wy: 1120 },
+  { type: 'market', wx: 1550, wy: -210 },
+  { type: 'forestgate', wx: -1820, wy: -350 },
+];
+
+function renderWorldConnections(fragment) {
+  WORLD_TRAILS.forEach((trail) => {
+    const a = worldToScreen(trail.from[0], trail.from[1]);
+    const b = worldToScreen(trail.to[0], trail.to[1]);
+    const minX = Math.min(a.x, b.x);
+    const maxX = Math.max(a.x, b.x);
+    const minY = Math.min(a.y, b.y);
+    const maxY = Math.max(a.y, b.y);
+    if (maxX < -120 || minX > worldShell.clientWidth + 120 || maxY < -120 || minY > worldShell.clientHeight + 120) return;
+    const path = document.createElement('span');
+    path.className = `world-trail trail-${trail.type}`;
+    path.style.left = `${Math.round(a.x)}px`;
+    path.style.top = `${Math.round(a.y)}px`;
+    path.style.width = `${Math.round(Math.hypot(b.x - a.x, b.y - a.y))}px`;
+    path.style.transform = `translateY(-50%) rotate(${Math.atan2(b.y - a.y, b.x - a.x)}rad)`;
+    fragment.append(path);
+  });
+  WORLD_SCENERY.forEach((scenery) => {
+    const point = worldToScreen(scenery.wx, scenery.wy);
+    if (point.x < -230 || point.x > worldShell.clientWidth + 230 || point.y < -190 || point.y > worldShell.clientHeight + 190) return;
+    const node = document.createElement('span');
+    node.className = `world-scenery scenery-${scenery.type}`;
+    node.innerHTML = '<i></i><i></i><i></i>';
+    node.style.left = `${Math.round(point.x)}px`;
+    node.style.top = `${Math.round(point.y)}px`;
+    fragment.append(node);
+  });
+}
+
 function renderTerrain() {
   if (state.worldMode === 'cottage') { terrainLayer.replaceChildren(); return; }
   const fragment = document.createDocumentFragment();
   renderTerrainBands(fragment);
+  renderWorldConnections(fragment);
   const chunkW = 640;
   const chunkH = 480;
   const minX = Math.floor((state.wx - worldShell.clientWidth / 2 - 200) / chunkW);
@@ -469,13 +1010,12 @@ function renderTerrain() {
       for (let i = 0; i < count; i += 1) {
         const mark = document.createElement('span');
         const roll = hash2d(cx, cy, 30 + i);
-        if (centerZone.id === 'forest' || centerZone.id === 'hill') {
-          mark.className = `terrain-mark is-bush${roll > .66 ? ' deep-green' : ''}`;
-        } else if (centerZone.id === 'shore') {
-          mark.className = `terrain-mark ${roll > .86 ? 'is-shell' : 'is-seam'}`;
-        } else {
-          mark.className = `terrain-mark ${roll < .22 ? 'is-small' : roll > .8 ? 'is-seam' : 'is-bush'}`;
-        }
+        mark.dataset.zone = centerZone.id;
+        if (centerZone.id === 'forest') mark.className = `terrain-mark ${roll > .72 ? 'is-tree-cluster' : roll < .24 ? 'is-forest-rock' : 'is-bush'}`;
+        else if (centerZone.id === 'hill') mark.className = `terrain-mark ${roll > .68 ? 'is-pine' : roll < .25 ? 'is-forest-rock' : 'is-windgrass'}`;
+        else if (centerZone.id === 'shore') mark.className = `terrain-mark ${roll > .76 ? 'is-reed' : roll < .22 ? 'is-shell' : 'is-dune'}`;
+        else if (centerZone.id === 'street') mark.className = `terrain-mark ${roll > .68 ? 'is-planter' : 'is-cobble'}`;
+        else mark.className = `terrain-mark ${roll < .2 ? 'is-flower-patch' : roll > .78 ? 'is-footpath' : 'is-bush is-small'}`;
         const wx = cx * chunkW + 70 + hash2d(cx, cy, 50 + i) * (chunkW - 140);
         const wy = cy * chunkH + 60 + hash2d(cx, cy, 70 + i) * (chunkH - 120);
         const sx = worldShell.clientWidth / 2 + wx - state.wx;
@@ -490,17 +1030,179 @@ function renderTerrain() {
   terrainLayer.replaceChildren(fragment);
 }
 
+function resourceTypeFor(zoneId, roll) {
+  if (zoneId === 'forest') return roll > .7 ? 'stump' : roll > .28 ? 'branch' : 'grass';
+  if (zoneId === 'hill') return roll > .42 ? 'stone' : 'grass';
+  if (zoneId === 'shore' || zoneId === 'sea') return 'shell';
+  if (zoneId === 'street') return roll > .65 ? 'stone' : 'grass';
+  return roll > .72 ? 'branch' : roll > .35 ? 'grass' : 'stone';
+}
+
+function generateNearbyGatherables() {
+  const chunkW = 520;
+  const chunkH = 400;
+  const minX = Math.floor((state.wx - worldShell.clientWidth / 2 - 180) / chunkW);
+  const maxX = Math.floor((state.wx + worldShell.clientWidth / 2 + 180) / chunkW);
+  const minY = Math.floor((state.wy - worldShell.clientHeight / 2 - 140) / chunkH);
+  const maxY = Math.floor((state.wy + worldShell.clientHeight / 2 + 140) / chunkH);
+  const resources = [];
+  for (let cy = minY; cy <= maxY; cy += 1) {
+    for (let cx = minX; cx <= maxX; cx += 1) {
+      if (hash2d(cx, cy, 119) < .44) continue;
+      const count = hash2d(cx, cy, 121) > .88 ? 2 : 1;
+      for (let i = 0; i < count; i += 1) {
+        const wx = cx * chunkW + 70 + hash2d(cx, cy, 130 + i) * (chunkW - 140);
+        const wy = cy * chunkH + 60 + hash2d(cx, cy, 150 + i) * (chunkH - 120);
+        const zone = zoneAt(wx, wy);
+        if (zone.id === 'sea' && hash2d(cx, cy, 178 + i) < .58) continue;
+        if (Object.values(objectTargets).some((object) => Math.hypot(wx - object.wx, wy - object.wy) < 155)) continue;
+        const type = resourceTypeFor(zone.id, hash2d(cx, cy, 170 + i));
+        const id = `${cx}:${cy}:${i}:${type}`;
+        const gatheredDay = state.homestead.forageDays[id] || 0;
+        if (state.homestead.day - gatheredDay < RESOURCE_RESPAWN_DAYS) continue;
+        resources.push({ id, type, wx, wy, zone: zone.id, ...RESOURCE_META[type] });
+      }
+    }
+  }
+  STARTER_GATHERABLES.forEach((starter) => {
+    const gatheredDay = state.homestead.forageDays[starter.id] || 0;
+    const nearViewport = Math.abs(starter.wx - state.wx) < worldShell.clientWidth / 2 + 180
+      && Math.abs(starter.wy - state.wy) < worldShell.clientHeight / 2 + 140;
+    if (nearViewport && state.homestead.day - gatheredDay >= RESOURCE_RESPAWN_DAYS) resources.push({ ...starter, zone: zoneAt(starter.wx, starter.wy).id, ...RESOURCE_META[starter.type] });
+  });
+  return resources;
+}
+
+function renderGatherables() {
+  if (state.worldMode === 'cottage') {
+    state.activeGatherables = [];
+    state.gatherRenderKey = '';
+    resourceLayer.replaceChildren();
+    return;
+  }
+  const renderKey = `${Math.floor(state.wx / 520)}:${Math.floor(state.wy / 400)}:${state.homestead.day}`;
+  if (state.gatherRenderKey !== renderKey) {
+    state.gatherRenderKey = renderKey;
+    state.activeGatherables = generateNearbyGatherables();
+    const fragment = document.createDocumentFragment();
+    state.activeGatherables.forEach((item) => {
+      const button = document.createElement('button');
+      button.className = `gatherable gather-${item.type}`;
+      button.dataset.resourceId = item.id;
+      button.dataset.label = item.label;
+      button.setAttribute('aria-label', `${item.label}，采集后明天重新生长`);
+      button.innerHTML = `<span class="gather-shape"><i></i><i></i><i></i></span><small>${item.label}</small>`;
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        state.wx = item.wx;
+        state.wy = item.wy + 58;
+        renderWorld();
+        setTimeout(() => gatherResource(item), 70);
+      });
+      fragment.append(button);
+    });
+    resourceLayer.replaceChildren(fragment);
+  }
+  $$('.gatherable', resourceLayer).forEach((node) => {
+    const item = state.activeGatherables.find((candidate) => candidate.id === node.dataset.resourceId);
+    if (item) placeWorldNode(node, item.wx, item.wy);
+  });
+}
+
+function spendEnergy(amount) {
+  if (state.homestead.energy < amount) {
+    showToast('体力不够了。回地块休息，明天再来');
+    return false;
+  }
+  state.homestead.energy -= amount;
+  return true;
+}
+
+function flyGatherReward(node, item) {
+  if (!node) return;
+  const origin = node.getBoundingClientRect();
+  const pouch = $('.resource-pouch');
+  const visibleTarget = pouch && pouch.getBoundingClientRect().width > 0 ? pouch : ($('#dockBagButton') || $('#bagButton'));
+  const target = visibleTarget?.getBoundingClientRect();
+  if (!target) return;
+  const reward = document.createElement('span');
+  reward.className = 'gather-reward-flight';
+  reward.textContent = Object.entries(item.reward).map(([key, amount]) => `${resourceLabel(key)} +${amount}`).join(' · ');
+  reward.style.left = `${origin.left + origin.width / 2}px`;
+  reward.style.top = `${origin.top + origin.height / 2}px`;
+  document.body.append(reward);
+  const dx = target.left + target.width / 2 - (origin.left + origin.width / 2);
+  const dy = target.top + target.height / 2 - (origin.top + origin.height / 2);
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  reward.animate([
+    { transform: 'translate(-50%, -50%) scale(.75)', opacity: 0 },
+    { transform: 'translate(-50%, -80%) scale(1)', opacity: 1, offset: .18 },
+    { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(.55)`, opacity: .15 },
+  ], { duration: reduced ? 60 : 720, easing: 'cubic-bezier(.2,.8,.2,1)' }).finished.finally(() => reward.remove());
+}
+
+function gatherResource(item) {
+  if (!item || state.gathering || state.homestead.forageDays[item.id] === state.homestead.day) return;
+  if (!spendEnergy(item.energy)) return;
+  state.gathering = item.id;
+  const node = $(`.gatherable[data-resource-id="${CSS.escape(item.id)}"]`, resourceLayer);
+  player.classList.add('is-gathering');
+  node?.classList.add('is-harvesting');
+  node?.setAttribute('aria-busy', 'true');
+  updateLifeHud();
+  setTimeout(() => {
+    node?.classList.add('is-depleted');
+    flyGatherReward(node, item);
+    Object.entries(item.reward).forEach(([resource, amount]) => {
+      state.homestead.resources[resource] = (state.homestead.resources[resource] || 0) + amount;
+    });
+    updateLifeHud();
+  }, 280);
+  setTimeout(() => {
+    state.homestead.forageDays[item.id] = state.homestead.day;
+    state.gatherRenderKey = '';
+    state.gathering = null;
+    player.classList.remove('is-gathering');
+    logEvent('world_resource_gathered', { resource_id: item.id, resource_type: item.type, reward: item.reward, energy_cost: item.energy });
+    persist();
+    renderWorld();
+    const rewardText = Object.entries(item.reward).map(([key, amount]) => `${resourceLabel(key)} +${amount}`).join('、');
+    const workbenchCost = BUILDING_META.workbench.cost;
+    const missingWood = Math.max(0, workbenchCost.wood - state.homestead.resources.wood);
+    const missingStone = Math.max(0, workbenchCost.stone - state.homestead.resources.stone);
+    const missingParts = [missingWood ? `木料 ${missingWood}` : '', missingStone ? `石料 ${missingStone}` : ''].filter(Boolean);
+    const homeHint = !state.homestead.buildings.workbench
+      ? (missingParts.length ? `距离露天工作台还差${missingParts.join('、')}` : '露天工作台的材料已经齐了，按 H 回地块建设')
+      : '';
+    showToast(`收集了${item.label}：${rewardText}。${homeHint || '明天会重新出现'}`);
+  }, 760);
+}
+
+function mediaObjectMarkup(zoneId) {
+  const pieces = {
+    forest: '<span class="media-crown"></span><span class="media-frame"></span><span class="media-feet"></span>',
+    hill: '<span class="media-kite"></span><span class="media-frame"></span><span class="media-feet"></span>',
+    town: '<span class="media-awning"></span><span class="media-frame"></span><span class="media-planter"></span>',
+    street: '<span class="media-marquee"></span><span class="media-frame"></span><span class="media-stand"></span>',
+    shore: '<span class="media-shell"></span><span class="media-frame"></span><span class="media-reed"></span>',
+    sea: '<span class="media-flag"></span><span class="media-frame"></span><span class="media-buoy"></span>',
+  };
+  return `<span class="media-artifact">${pieces[zoneId] || pieces.town}</span>`;
+}
+
 function renderScreens() {
   screenLayer.replaceChildren();
   allVideos().forEach((video) => {
     const button = document.createElement('button');
-    button.className = 'media-screen';
+    const zoneId = video.zone || zoneAt(video.wx, video.wy).id;
+    button.className = `media-screen media-${zoneId}`;
     button.dataset.videoId = video.id;
     button.dataset.label = video.title;
     button.setAttribute('aria-label', video.title);
+    button.innerHTML = mediaObjectMarkup(zoneId);
     const likeBadge = document.createElement('span');
-    likeBadge.className = `like-badge${state.likes.includes(video.id) ? ' is-liked' : ''}`;
-    likeBadge.textContent = state.likes.includes(video.id) ? `♥${video.likes + 1}` : `♥${video.likes}`;
+    likeBadge.className = `like-badge${video.liked || state.likes.includes(video.id) ? ' is-liked' : ''}`;
+    likeBadge.textContent = `♥${video.likes}`;
     button.append(likeBadge);
     button.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -516,10 +1218,12 @@ function renderScreens() {
 
 function renderCreations() {
   creationLayer.replaceChildren();
-  state.notes.forEach((note) => {
+  allUserWorldNotes().forEach((note) => {
     const button = document.createElement('button');
-    button.className = 'player-creation is-note';
-    button.textContent = note.title;
+    button.className = `player-creation is-note${note.status === 'closed' ? ' is-closed' : ''}`;
+    const label = document.createElement('span');
+    label.textContent = `${note.title}${note.status === 'closed' ? ' · 已关闭' : ''}`;
+    button.append(label);
     button.dataset.creationId = note.id;
     button.setAttribute('aria-label', `需求纸条：${note.title}`);
     button.addEventListener('click', (event) => {
@@ -666,7 +1370,7 @@ function renderPlaced() {
     film.className = `placed-film${item.type === 'combo' ? ' placed-combo' : ''}${state.carryPlaced === index ? ' is-selected' : ''}`;
     film.style.left = `${item.x}%`;
     film.style.top = `${item.y}%`;
-    const video = allVideos().find((candidate) => candidate.id === item.assetId);
+    const video = findVideoById(item.assetId);
     film.title = item.type === 'combo' ? `组合的副本 ${index + 1}` : `《${video ? video.title : '副本'}》的副本`;
     film.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -676,10 +1380,286 @@ function renderPlaced() {
   });
 }
 
+function resourceLabel(key) {
+  return { wood: '木料', stone: '石料', fiber: '纤维', seeds: '种子', produce: '收成' }[key] || key;
+}
+
+function energyCap() {
+  return state.homestead.buildings.cabin ? 120 : 100;
+}
+
+function homeCapacity() {
+  return HOME_CAPACITY + (state.homestead.buildings.cabin ? 4 : 0);
+}
+
+function seasonForDay(day) {
+  return ['初春', '盛夏', '深秋', '冬日'][Math.floor((day - 1) / 7) % 4];
+}
+
+function updateLifeHud() {
+  const home = state.homestead;
+  const cap = energyCap();
+  dayCount.textContent = home.day;
+  seasonName.textContent = home.season;
+  weatherName.textContent = home.weather;
+  energyCount.textContent = `${Math.round(home.energy)}/${cap}`;
+  energyBar.style.width = `${Math.max(0, Math.min(100, (home.energy / cap) * 100))}%`;
+  woodCount.textContent = home.resources.wood;
+  stoneCount.textContent = home.resources.stone;
+  seedCount.textContent = home.resources.seeds;
+  produceCount.textContent = home.resources.produce;
+  worldStage.dataset.weather = home.weather;
+  worldStage.dataset.season = home.season;
+  const atHome = state.worldMode === 'cottage';
+  $('#restButton').disabled = !atHome;
+  $('#restButton').title = atHome ? '休息并让作物生长一天' : '回到自己的地块后才能休息';
+  $('#dockHomeButton b').textContent = atHome ? '建设' : '回地块';
+  $('#homesteadButton').classList.toggle('is-active', atHome);
+  $('#homesteadButton').setAttribute('aria-pressed', String(atHome));
+  $('#dockHomeButton').setAttribute('aria-pressed', String(atHome));
+}
+
+function plotActionLabel(plot) {
+  if (plot.state === 'wild') return '清理杂草，消耗 8 体力';
+  if (plot.state === 'cleared') return '翻土，消耗 6 体力';
+  if (plot.state === 'tilled') return '播种，需要 1 颗种子';
+  if (plot.state === 'planted' && plot.stage >= 3) return '收获成熟作物';
+  if (plot.state === 'planted' && !plot.watered) return '浇水，消耗 3 体力';
+  return `正在生长，第 ${plot.stage + 1} 阶段`;
+}
+
+function renderHomestead() {
+  if (state.worldMode !== 'cottage') return;
+  const fragment = document.createDocumentFragment();
+  state.homestead.plots.forEach((plot, index) => {
+    const button = document.createElement('button');
+    button.className = `farm-plot plot-${plot.state}${plot.watered ? ' is-watered' : ''}`;
+    button.dataset.plot = index;
+    button.dataset.stage = plot.stage || 0;
+    button.setAttribute('aria-label', `第 ${index + 1} 块地：${plotActionLabel(plot)}`);
+    button.innerHTML = '<span class="soil-lines"></span><span class="crop"><i></i><i></i><i></i></span><span class="plot-spark"></span>';
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      interactPlot(index);
+    });
+    fragment.append(button);
+  });
+  plotGrid.replaceChildren(fragment);
+
+  const built = state.homestead.buildings;
+  const construction = state.homestead.construction || {};
+  const structures = [];
+  if (built.workbench) structures.push('<button class="home-structure structure-workbench" data-home-panel aria-label="露天工作台"><span></span><b>工作台</b></button>');
+  if (built.well) structures.push('<button class="home-structure structure-well" data-water-all aria-label="石砌水井，为所有作物浇水"><span></span><b>水井</b></button>');
+  if (built.greenhouse) structures.push('<button class="home-structure structure-greenhouse" data-home-panel aria-label="玻璃温室"><span></span><b>温室</b></button>');
+  Object.keys(construction).forEach((id) => {
+    const meta = BUILDING_META[id];
+    if (meta && !built[id]) {
+      structures.push(`<span class="home-structure structure-${id} is-scaffolding" aria-label="${meta.name}正在搭建"><span></span><b>搭建中</b></span>`);
+      setTimeout(() => completeConstruction(id), Math.max(60, 1500 - (Date.now() - (construction[id].startedAt || Date.now()))));
+    }
+  });
+  state.homestead.decor.forEach((decor, index) => {
+    if (decor === 'projector') structures.push(`<button class="home-decor decor-projector" style="--decor-index:${index}" data-video-deck aria-label="露天放映台，整理视频副本"></button>`);
+    else structures.push(`<span class="home-decor decor-${decor}" style="--decor-index:${index}" aria-label="木鸟屋"></span>`);
+  });
+  homeBuildings.innerHTML = structures.join('');
+  $$('[data-home-panel]', homeBuildings).forEach((node) => node.addEventListener('click', (event) => { event.stopPropagation(); showHomesteadPanel(); }));
+  const waterButton = $('[data-water-all]', homeBuildings);
+  if (waterButton) waterButton.addEventListener('click', (event) => { event.stopPropagation(); waterAllPlots(); });
+  const videoDeck = $('[data-video-deck]', homeBuildings);
+  if (videoDeck) videoDeck.addEventListener('click', (event) => { event.stopPropagation(); showPersonalSpace(); });
+  $('#homeCabin').classList.toggle('is-upgraded', !!built.cabin);
+  updateLifeHud();
+}
+
+function interactPlot(index) {
+  const plot = state.homestead.plots[index];
+  if (!plot) return;
+  if (plot.state === 'wild') {
+    if (!spendEnergy(8)) return;
+    plot.state = 'cleared';
+    state.homestead.resources.fiber += 2;
+    if (index % 3 === 0) state.homestead.resources.wood += 1;
+    showToast('清出了一块地，收下 2 份纤维');
+    logEvent('homestead_plot_cleared', { plot_index: index });
+  } else if (plot.state === 'cleared') {
+    if (!spendEnergy(6)) return;
+    plot.state = 'tilled';
+    showToast('泥土松开了，可以播种');
+    logEvent('homestead_plot_tilled', { plot_index: index });
+  } else if (plot.state === 'tilled') {
+    if (state.homestead.resources.seeds < 1) return showToast('没有种子了。去树林和高草丛里找找');
+    if (!spendEnergy(2)) return;
+    state.homestead.resources.seeds -= 1;
+    plot.state = 'planted';
+    plot.stage = 0;
+    plot.watered = state.homestead.weather === '雨';
+    showToast(plot.watered ? '种子落进湿润的土里' : '种好了，记得浇水');
+    logEvent('homestead_seed_planted', { plot_index: index });
+  } else if (plot.stage >= 3) {
+    plot.state = 'tilled';
+    plot.stage = 0;
+    plot.watered = false;
+    state.homestead.resources.produce += 2;
+    state.wallet += 6;
+    showToast('收获 2 份作物，公域互助箱回赠 6 灵感币');
+    logEvent('homestead_crop_harvested', { plot_index: index, produce: 2, virtual_reward: 6 });
+  } else if (!plot.watered) {
+    if (!spendEnergy(3)) return;
+    plot.watered = true;
+    showToast('浇过水了，休息后它会继续长');
+    logEvent('homestead_plot_watered', { plot_index: index });
+  } else {
+    showToast('今天已经照料过了。休息后再来看');
+  }
+  persist();
+  updateCounters();
+  renderHomestead();
+}
+
+function weatherForDay(day) {
+  const roll = hash2d(day, 29, 601);
+  if (roll > .78) return '雨';
+  if (roll < .18) return '风';
+  return '晴';
+}
+
+function advanceDay() {
+  if (state.worldMode !== 'cottage') return showToast('回到自己的地块才能休息');
+  const greenhouse = !!state.homestead.buildings.greenhouse;
+  state.homestead.plots.forEach((plot) => {
+    if (plot.state === 'planted' && (plot.watered || greenhouse)) plot.stage = Math.min(3, (plot.stage || 0) + 1);
+    plot.watered = false;
+  });
+  state.homestead.day += 1;
+  state.homestead.season = seasonForDay(state.homestead.day);
+  state.homestead.weather = weatherForDay(state.homestead.day);
+  state.homestead.energy = energyCap();
+  state.homestead.wellUsedDay = 0;
+  if (state.homestead.weather === '雨') state.homestead.plots.forEach((plot) => { if (plot.state === 'planted') plot.watered = true; });
+  if (state.homestead.decor.includes('birdhouse') && hash2d(state.homestead.day, 77, 911) > .48) state.homestead.resources.seeds += 1;
+  state.homestead.forageDays = Object.fromEntries(Object.entries(state.homestead.forageDays).filter(([, gatheredDay]) => state.homestead.day - gatheredDay <= 2));
+  logEvent('homestead_day_advanced', { day: state.homestead.day, weather: state.homestead.weather, greenhouse });
+  persist();
+  renderHomestead();
+  say(`第 ${state.homestead.day} 天。${state.homestead.weather === '雨' ? '雨替你浇湿了地块。' : state.homestead.weather === '风' ? '风把远处的种子吹到了路边。' : '光落在刚清出的泥土上。'}`, '木秋');
+  showToast('睡了一个好觉，体力恢复了');
+}
+
+function hasResources(cost) {
+  return Object.entries(cost).every(([key, amount]) => (state.homestead.resources[key] || 0) >= amount);
+}
+
+function spendResources(cost) {
+  Object.entries(cost).forEach(([key, amount]) => { state.homestead.resources[key] -= amount; });
+}
+
+function costText(cost) {
+  return Object.entries(cost).map(([key, amount]) => `${resourceLabel(key)} ${amount}`).join(' · ');
+}
+
+function completeConstruction(id) {
+  const project = state.homestead.construction?.[id];
+  if (!project) return;
+  delete state.homestead.construction[id];
+  state.homestead.buildings[id] = 1;
+  state.homestead.energy = Math.min(energyCap(), state.homestead.energy + (id === 'cabin' ? 20 : 0));
+  logEvent('homestead_building_completed', { building_id: id, construction_ms: Date.now() - project.startedAt });
+  persist();
+  renderHomestead();
+  showToast(`${BUILDING_META[id].name}建好了，地块有了新的轮廓`);
+}
+
+function buildStructure(id) {
+  const meta = BUILDING_META[id];
+  if (!meta || state.homestead.buildings[id] || state.homestead.construction?.[id]) return;
+  if (!hasResources(meta.cost)) return showToast(`材料不足：${costText(meta.cost)}`);
+  spendResources(meta.cost);
+  state.homestead.construction = state.homestead.construction || {};
+  state.homestead.construction[id] = { phase: 'scaffold', startedAt: Date.now(), cost: meta.cost };
+  logEvent('homestead_building_started', { building_id: id, cost: meta.cost });
+  persist();
+  closeSheet();
+  renderHomestead();
+  showToast(`${meta.name}开始搭建，脚手架已经立起来了`);
+  setTimeout(() => completeConstruction(id), 1500);
+}
+
+function craftHomesteadItem(id) {
+  const recipes = {
+    birdhouse: { name: '木鸟屋', cost: { wood: 4, fiber: 2 } },
+    projector: { name: '露天放映台', cost: { wood: 6, stone: 3 } },
+    seeds: { name: '压出一袋种子', cost: { fiber: 3, produce: 1 }, reward: { seeds: 6 } },
+  };
+  const recipe = recipes[id];
+  if (!recipe || !hasResources(recipe.cost)) return showToast(`材料不足：${costText(recipe?.cost || {})}`);
+  if (!recipe.reward && state.homestead.decor.includes(id)) return showToast(`${recipe.name}已经放在地块上了`);
+  spendResources(recipe.cost);
+  if (recipe.reward) Object.entries(recipe.reward).forEach(([key, amount]) => { state.homestead.resources[key] += amount; });
+  else state.homestead.decor.push(id);
+  logEvent('homestead_item_crafted', { recipe_id: id, cost: recipe.cost });
+  persist();
+  closeSheet();
+  renderHomestead();
+  showToast(`${recipe.name}完成了`);
+}
+
+function waterAllPlots() {
+  if (!state.homestead.buildings.well) return;
+  if (state.homestead.wellUsedDay === state.homestead.day) return showToast('水井今天已经用过了');
+  state.homestead.plots.forEach((plot) => { if (plot.state === 'planted') plot.watered = true; });
+  state.homestead.wellUsedDay = state.homestead.day;
+  logEvent('homestead_well_used', { day: state.homestead.day });
+  persist();
+  renderHomestead();
+  showToast('水沿着浅沟流过了所有作物');
+}
+
+function showHomesteadPanel() {
+  const built = state.homestead.buildings;
+  const buildingRows = Object.entries(BUILDING_META).map(([id, meta]) => {
+    const complete = !!built[id];
+    const building = !!state.homestead.construction?.[id];
+    const ready = !complete && !building && hasResources(meta.cost);
+    const label = complete ? (id === 'cabin' ? '已扩建' : '已建成') : building ? '搭建中' : ready ? '材料就绪' : '材料不足';
+    return `<div class="build-row${ready ? ' is-ready' : ''}${building ? ' is-building' : ''}${complete ? ' is-complete' : ''}"><div class="build-thumb build-${id}" aria-hidden="true"><i></i></div><div><b>${meta.name}</b><span>${meta.description}</span><small>${costText(meta.cost)}</small><em>${label}</em></div><button class="${ready ? 'primary-button' : 'paper-button'}" ${ready ? `data-build="${id}"` : !complete && !building ? `data-gather-for="${id}"` : ''} ${complete || building ? 'disabled' : ''}>${complete ? '完成' : building ? '施工中' : ready ? '开始搭建' : '去采集'}</button></div>`;
+  }).join('');
+  const craftSection = built.workbench ? `
+    <div class="note-section"><h3>工作台</h3><div class="craft-strip">
+      <button data-craft="birdhouse"><span class="craft-icon birdhouse"></span><b>木鸟屋</b><small>木料 4 · 纤维 2</small></button>
+      <button data-craft="projector"><span class="craft-icon projector"></span><b>露天放映台</b><small>木料 6 · 石料 3</small></button>
+      <button data-craft="seeds"><span class="craft-icon seedpress"></span><b>压种子</b><small>纤维 3 · 收成 1</small></button>
+    </div></div>` : '<div class="status-banner">先建造露天工作台，就能制作地块装饰和更多种子。</div>';
+  openSheet(`
+    <div class="sheet-inner homestead-sheet">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(state.profile.spaceName || '我的地块')}</h2>
+      <p class="sheet-subtitle">公共世界里的发现会再生，只有这里会记住你的每一次清理、播种和建造。</p>
+      <div class="home-summary"><div><span>今天</span><b>第 ${state.homestead.day} 天 · ${state.homestead.weather}</b></div><div><span>体力</span><b>${state.homestead.energy}/${energyCap()}</b></div><div><span>成熟作物</span><b>${state.homestead.plots.filter((plot) => plot.stage >= 3).length} 块</b></div></div>
+      <div class="note-section"><h3>建设</h3><div class="build-list">${buildingRows}</div></div>
+      ${craftSection}
+      <div class="media-actions"><button class="paper-button" id="restFromPanel">休息到明天</button><button class="text-button" id="spaceBookButton">查看副本布置簿</button></div>
+    </div>
+  `, () => {
+    $$('[data-build]', sheet).forEach((button) => button.addEventListener('click', () => buildStructure(button.dataset.build)));
+    $$('[data-gather-for]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const meta = BUILDING_META[button.dataset.gatherFor];
+      closeSheet();
+      if (state.worldMode === 'cottage') exitCottage();
+      say(`建造${meta.name}还需要${costText(meta.cost)}。林地多木料和纤维，山坡更容易找到石料；公共资源明天会重新生长。`, '木秋');
+      showToast('已回到公域，靠近资源按 E 采集');
+    }));
+    $$('[data-craft]', sheet).forEach((button) => button.addEventListener('click', () => craftHomesteadItem(button.dataset.craft)));
+    $('#restFromPanel').addEventListener('click', () => { closeSheet(); advanceDay(); });
+    $('#spaceBookButton').addEventListener('click', showPersonalSpace);
+  });
+}
+
 function updateCounters() {
   walletCount.textContent = state.wallet;
   copyCount.textContent = state.copies.length;
   favoritesCount.textContent = state.favorites.length;
+  updateLifeHud();
 }
 
 function refreshIdentity() {
@@ -691,6 +1671,8 @@ function refreshIdentity() {
   drawerAvatar.style.background = swatch.color;
   drawerName.textContent = profile.nickname || '路过的风';
   drawerTitle.textContent = `${profile.spaceName || '礁石小窝'}的整理者 · ${creatorLevel().label}`;
+  const adminButton = $('[data-panel="admin"]', profileDrawer);
+  if (adminButton) adminButton.hidden = !window.ZhereService?.user()?.admin;
 }
 
 function creatorScore() {
@@ -723,9 +1705,10 @@ function nearestTarget() {
     if (distance < 180 && (!result || distance < result.distance)) result = { ...payload, distance };
   };
   allVideos().forEach((video) => consider(Math.hypot(state.wx - video.wx, state.wy - video.wy), { type: 'video', video }));
-  state.notes.forEach((note) => consider(Math.hypot(state.wx - note.wx, state.wy - note.wy), { type: 'note', note }));
+  allUserWorldNotes().forEach((note) => consider(Math.hypot(state.wx - note.wx, state.wy - note.wy), { type: 'note', note }));
   Object.entries(objectTargets).forEach(([id, item]) => consider(Math.hypot(state.wx - item.wx, state.wy - item.wy), { type: 'object', id, hint: item.hint }));
   TAG_PLANTS.forEach((plant, index) => consider(Math.hypot(state.wx - plant.wx, state.wy - plant.wy), { type: 'tagplant', index, tag: plant.tag }));
+  state.activeGatherables.forEach((item) => consider(Math.hypot(state.wx - item.wx, state.wy - item.wy), { type: 'resource', item }));
   NAMELESS_REGIONS.forEach((region) => consider(Math.hypot(state.wx - region.x, state.wy - region.y), { type: 'nameless', region }));
   if (state.bottleState?.open === false) consider(Math.hypot(state.wx - state.bottleState.wx, state.wy - state.bottleState.wy), { type: 'bottle' });
   return result;
@@ -758,25 +1741,32 @@ function updateNearby() {
     contextHint.innerHTML = `一张纸条「${escapeHtml(state.nearest.note.title)}」 · <kbd>E</kbd> 展开看看`;
   } else if (state.nearest?.type === 'tagplant') {
     contextHint.innerHTML = `一株标签植物「${state.nearest.tag}」 · <kbd>E</kbd> 拔下来带走`;
+  } else if (state.nearest?.type === 'resource') {
+    const item = state.nearest.item;
+    contextHint.innerHTML = `${item.label} · <kbd>E</kbd> 收集 · 消耗 ${item.energy} 体力 · 明天再生`;
   } else if (state.nearest?.type === 'bottle') {
     contextHint.innerHTML = '一只漂流瓶被冲到了这里 · <kbd>E</kbd> 打开';
   } else if (state.nearest?.type === 'nameless') {
     const name = state.namedZones[state.nearest.region.id];
     contextHint.innerHTML = name ? `「${escapeHtml(name)}」 · <kbd>E</kbd> 改个名字` : '一处无名之地 · <kbd>E</kbd> 给它起个名字';
   } else if (state.nearest?.type === 'object') {
-    contextHint.innerHTML = state.nearest.hint.replace('E ', '<kbd>E</kbd> ');
+    contextHint.innerHTML = `${state.nearest.hint.replace('E ', '<kbd>E</kbd> ')} · <kbd>?</kbd> 这是什么`;
   } else if (state.carryTag) {
     contextHint.innerHTML = `你带着标签「${state.carryTag}」 · 靠近视频按 <kbd>F</kbd> 贴上去`;
   } else {
     contextHint.innerHTML = state.worldMode === 'cottage'
-      ? '点击地面移动 · 点击副本捡起来 · 再点地面放下 · 点同一枚副本收回口袋'
-      : `<kbd>WASD</kbd> 任意方向行走 · <kbd>B</kbd> 背包 · <kbd>N</kbd> 留纸条 · 当前在${currentZoneName()}`;
+      ? '点击地块开荒、翻土、播种和浇水 · <kbd>?</kbd> 图鉴 · <kbd>R</kbd> 休息到明天'
+      : `<kbd>WASD</kbd> 任意方向行走 · <kbd>?</kbd> 图鉴 · <kbd>J</kbd> 手账 · 当前在${currentZoneName()}`;
   }
   if (previousId && (!state.nearest || (state.nearest.video?.id || state.nearest.note?.id) !== previousId) && !state.openedVideos.has(previousId) && !state.avoidLogged.has(previousId)) {
     state.avoidLogged.add(previousId);
     logEvent('avoid', { asset_id: previousId });
   }
+  const currentZone = zoneAt(state.wx, state.wy);
   zoneName.textContent = currentZoneName();
+  worldStage.dataset.zone = state.worldMode === 'cottage' ? 'homestead' : currentZone.id;
+  document.body.dataset.zone = state.worldMode === 'cottage' ? 'homestead' : currentZone.id;
+  if (entry.classList.contains('is-gone')) discoverCurrentZone(currentZone);
 }
 
 function updatePlayer() {
@@ -790,8 +1780,8 @@ function updateWayfinder() {
   if (state.worldMode === 'cottage') return;
   const signals = [
     ...Object.entries(objectTargets).map(([id, item]) => ({ id, ...item })),
-    ...state.notes.map((note) => ({ ...note, label: `纸条「${note.title}」` })),
-    ...state.published.map((video) => ({ ...video, label: `我的发布《${video.title}》` })),
+    ...allUserWorldNotes().map((note) => ({ ...note, label: `${note.owner === 'me' ? '我的' : '公共'}纸条「${note.title}」` })),
+    ...state.publicAssets.map((video) => ({ ...video, label: `${video.owner === 'me' ? '我的发布' : '公共素材'}《${video.title}》` })),
   ].map((item) => ({ ...item, distance: Math.hypot(item.wx - state.wx, item.wy - state.wy) }))
     .sort((a, b) => a.distance - b.distance)
     .slice(0, 2);
@@ -805,40 +1795,62 @@ function updateWayfinder() {
 }
 
 function trackVisibility(video, visible, distance) {
+  const now = performance.now();
   if (visible) {
-    const acc = state.impressionAccum[video.id] || { time: 0, dist: distance, score: scoreVideo(video), spawn_source: video.spawn_source || '我的发布', zone: zoneAt(video.wx, video.wy).id };
-    acc.time += 1;
+    const acc = state.impressionAccum[video.id] || { durationMs: 0, visibleSince: now, dist: distance, score: scoreVideo(video), spawn_source: video.spawn_source || '我的发布', zone: zoneAt(video.wx, video.wy).id };
+    if (acc.visibleSince == null) acc.visibleSince = now;
     acc.dist = Math.min(acc.dist, distance);
     state.impressionAccum[video.id] = acc;
+  } else {
+    const acc = state.impressionAccum[video.id];
+    if (acc?.visibleSince != null) {
+      acc.durationMs += now - acc.visibleSince;
+      acc.visibleSince = null;
+    }
   }
 }
 
 function flushImpressions() {
   const ids = Object.keys(state.impressionAccum);
   if (!ids.length) return;
+  const now = performance.now();
+  const batchId = crypto.randomUUID ? crypto.randomUUID() : `impression-${Date.now()}-${Math.random()}`;
   const ranked = ids
-    .map((id) => ({ id, ...state.impressionAccum[id] }))
+    .map((id) => {
+      const acc = state.impressionAccum[id];
+      const durationMs = acc.durationMs + (acc.visibleSince != null ? now - acc.visibleSince : 0);
+      return { id, ...acc, durationMs };
+    })
     .sort((a, b) => b.score - a.score);
   const impressions = ranked.map((entry, index) => {
+    const impressionId = crypto.randomUUID ? crypto.randomUUID() : `${batchId}-${index}`;
     state.exposureCounts[entry.id] = (state.exposureCounts[entry.id] || 0) + 1;
+    state.lastImpressions.set(entry.id, { impressionId, batchId, at: Date.now() });
     return {
+      impression_id: impressionId,
+      impression_batch_id: batchId,
       asset_id: entry.id,
       zone_id: entry.zone,
       spawn_source: entry.spawn_source,
       rank: index + 1,
       recommendation_score: Number(entry.score.toFixed(2)),
       visible: true,
-      visibility_duration: entry.time,
+      visibility_duration_ms: Math.round(entry.durationMs),
       distance_to_player: Math.round(entry.dist),
+      experiment_id: 'open-world-v1',
+      experiment_group: 'mixed-biome',
     };
   });
-  logEvent('impression_batch', { impressions, count: impressions.length });
+  logEvent('impression_batch', { impression_batch_id: batchId, impressions, count: impressions.length });
   state.impressionAccum = {};
   persist();
 }
 
 function renderWorld() {
+  worldStage.scrollTop = 0;
+  worldStage.scrollLeft = 0;
   updatePlayer();
+  if (state.worldMode === 'cottage') renderHomestead();
   renderTerrain();
   renderAuras();
   renderStaticDecos();
@@ -863,10 +1875,11 @@ function renderWorld() {
     trackVisibility(video, visible, Math.hypot(state.wx - video.wx, state.wy - video.wy));
   });
   $$('.player-creation').forEach((node) => {
-    const note = state.notes.find((candidate) => candidate.id === node.dataset.creationId);
+    const note = allUserWorldNotes().find((candidate) => candidate.id === node.dataset.creationId);
     if (note) placeWorldNode(node, note.wx, note.wy);
   });
   renderTagPlants();
+  renderGatherables();
   renderBidPlants();
   renderDecos();
   renderNameless();
@@ -874,22 +1887,30 @@ function renderWorld() {
   updateWayfinder();
 }
 
-function toggleLike(video) {
-  const liked = state.likes.includes(video.id);
+async function toggleLike(video) {
+  const isPublicAsset = state.publicAssets.some((asset) => asset.id === video.id);
+  const liked = isPublicAsset ? Boolean(video.liked) : state.likes.includes(video.id);
+  if (isPublicAsset) {
+    try {
+      const result = await window.ZhereService.publicWorld.setAssetReaction(video.id, !liked);
+      Object.assign(video, result.asset);
+      state.publicAssets = state.publicAssets.map((asset) => asset.id === video.id ? video : asset);
+    } catch (error) { showToast(error.message || '点赞保存失败'); return false; }
+  }
   if (liked) {
-    state.likes = state.likes.filter((id) => id !== video.id);
-    video.likes = Math.max(0, video.likes - 1);
+    if (!isPublicAsset) { state.likes = state.likes.filter((id) => id !== video.id); video.likes = Math.max(0, video.likes - 1); }
     logEvent('unlike', { asset_id: video.id });
     showToast('已取消点赞');
   } else {
-    state.likes.push(video.id);
-    video.likes += 1;
+    if (!isPublicAsset) { state.likes.push(video.id); video.likes += 1; }
     logEvent('like', { asset_id: video.id });
     showToast('点赞了');
   }
+  commitVideoState(video);
   persist();
   renderScreens();
   renderWorld();
+  return true;
 }
 
 function toggleFavoriteVideo(video) {
@@ -910,33 +1931,136 @@ function toggleFavoriteVideo(video) {
 function renderVideoComments(video) {
   const comments = video.comments || [];
   if (!comments.length) return '<div class="empty-state">还没有留言。你可以只观察，不必评价。</div>';
-  return comments.map((comment) => `<div class="comment"><b>${escapeHtml(comment.name)}</b><span>${escapeHtml(comment.text)}</span><button class="text-button" type="button">回复</button></div>`).join('');
+  comments.forEach((comment, index) => {
+    if (!comment.id) comment.id = `comment-${video.id}-${index}-${Date.now()}`;
+  });
+  const roots = comments.filter((comment) => !comment.parentId || !comments.some((candidate) => candidate.id === comment.parentId));
+  return roots.map((comment) => {
+    const replies = comments.filter((candidate) => candidate.parentId === comment.id);
+    const own = comment.owner === 'me' || (!comment.owner && comment.name === (state.profile.nickname || '路过的风'));
+    return `<article class="comment-thread">
+      <div class="comment${comment.reported ? ' is-reported' : ''}">
+        <b>${escapeHtml(comment.name)}</b><span>${escapeHtml(comment.text)}</span>
+        <div class="comment-actions">
+          <button class="text-button" type="button" data-reply-comment="${escapeHtml(comment.id)}">回复</button>
+          ${own ? `<button class="text-button" type="button" data-edit-comment="${escapeHtml(comment.id)}">修改</button><button class="text-button" type="button" data-delete-comment="${escapeHtml(comment.id)}">删除</button>` : `<button class="text-button" type="button" data-report-comment="${escapeHtml(comment.id)}" ${comment.reported ? 'disabled' : ''}>${comment.reported ? '已举报' : '举报'}</button>`}
+        </div>
+      </div>
+      ${replies.map((reply) => {
+        const ownReply = reply.owner === 'me' || (!reply.owner && reply.name === (state.profile.nickname || '路过的风'));
+        return `<div class="comment is-reply"><b>${escapeHtml(reply.name)} <small>回复 ${escapeHtml(comment.name)}</small></b><span>${escapeHtml(reply.text)}</span><div class="comment-actions">${ownReply ? `<button class="text-button" type="button" data-edit-comment="${escapeHtml(reply.id)}">修改</button><button class="text-button" type="button" data-delete-comment="${escapeHtml(reply.id)}">删除</button>` : `<button class="text-button" type="button" data-report-comment="${escapeHtml(reply.id)}" ${reply.reported ? 'disabled' : ''}>${reply.reported ? '已举报' : '举报'}</button>`}</div></div>`;
+      }).join('')}
+    </article>`;
+  }).join('');
 }
 
 function bindVideoReplies(video) {
-  $$('.comment .text-button', sheet).forEach((button, index) => button.addEventListener('click', () => {
+  $$('[data-reply-comment]', sheet).forEach((button) => button.addEventListener('click', () => {
+    const comment = (video.comments || []).find((candidate) => candidate.id === button.dataset.replyComment);
+    if (!comment) return;
+    state.commentReplyTo = { id: comment.id, name: comment.name };
     const input = $('#commentForm input[name="comment"]');
-    input.placeholder = `回复 ${(video.comments || [])[index]?.name || '这条留言'}`;
+    input.placeholder = `回复 ${comment.name}`;
+    $('#replyComposerText').textContent = `正在回复 ${comment.name}`;
+    $('#replyComposer').hidden = false;
     input.focus();
-    logEvent('comment_reply_start', { asset_id: video.id, reply_to: (video.comments || [])[index]?.name || null });
+    logEvent('comment_reply_start', { asset_id: video.id, reply_to: comment.name, parent_comment_id: comment.id });
   }));
+  $$('[data-edit-comment]', sheet).forEach((button) => button.addEventListener('click', () => {
+    const comment = (video.comments || []).find((candidate) => candidate.id === button.dataset.editComment);
+    if (comment) showEditPublicComment(video, comment);
+  }));
+  $$('[data-delete-comment]', sheet).forEach((button) => button.addEventListener('click', async () => {
+    const id = button.dataset.deleteComment;
+    if (state.publicAssets.some((asset) => asset.id === video.id)) {
+      try { await window.ZhereService.publicWorld.deleteAssetComment(video.id, id); }
+      catch (error) { return showToast(error.message || '留言删除失败'); }
+    }
+    video.comments = (video.comments || []).filter((comment) => comment.id !== id && comment.parentId !== id);
+    commitVideoState(video);
+    persist();
+    refreshVideoComments(video);
+    logEvent('comment_delete', { asset_id: video.id, comment_id: id });
+    showToast('留言已删除');
+  }));
+  $$('[data-report-comment]', sheet).forEach((button) => button.addEventListener('click', () => {
+    const comment = (video.comments || []).find((candidate) => candidate.id === button.dataset.reportComment);
+    if (!comment) return;
+    showReportTarget('comment', comment.id, () => showVideo(video));
+  }));
+}
+
+function showEditPublicComment(video, comment) {
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">修改我的留言</h2>
+      <form id="editCommentForm"><label>留言内容<textarea name="text" rows="4" maxlength="160" required>${escapeHtml(comment.text)}</textarea></label><p class="form-error" id="editCommentError" role="alert"></p><div class="media-actions"><button class="primary-button" type="submit">保存修改</button><button class="paper-button" id="editCommentBack" type="button">返回素材</button></div></form>
+    </div>
+  `, () => {
+    $('#editCommentBack').addEventListener('click', () => showVideo(video));
+    $('#editCommentForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const text = event.currentTarget.elements.text.value.trim();
+      try {
+        const result = await window.ZhereService.publicWorld.updateAssetComment(video.id, comment.id, text);
+        Object.assign(comment, result.comment);
+        logEvent('comment_update', { asset_id: video.id, comment_id: comment.id, length: text.length });
+        showVideo(video); showToast('留言已更新');
+      } catch (error) { $('#editCommentError').textContent = error.message || '留言修改失败。'; }
+    });
+  });
+}
+
+function showReportTarget(targetType, targetId, onBack) {
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">向公域维护员报告</h2>
+      <p class="sheet-subtitle">举报会进入服务端审核队列，不会立即公开显示，也不会自动判定对方违规。</p>
+      <form id="reportTargetForm"><label>问题说明<textarea name="reason" rows="4" maxlength="300" required placeholder="请描述具体问题"></textarea></label><p class="form-error" id="reportTargetError" role="alert"></p><div class="media-actions"><button class="danger-button" type="submit">提交举报</button><button class="paper-button" id="reportTargetBack" type="button">返回</button></div></form>
+    </div>
+  `, () => {
+    $('#reportTargetBack').addEventListener('click', () => onBack?.());
+    $('#reportTargetForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const reason = event.currentTarget.elements.reason.value.trim();
+      try {
+        await window.ZhereService.publicWorld.report({ targetType, targetId, reason });
+        logEvent('content_report', { target_type: targetType, target_id: targetId, reason_length: reason.length });
+        onBack?.(); showToast('举报已进入审核队列');
+      } catch (error) { $('#reportTargetError').textContent = error.message || '举报提交失败。'; }
+    });
+  });
+}
+
+function refreshVideoComments(video) {
+  const list = $('#commentList', sheet);
+  if (!list) return;
+  list.innerHTML = renderVideoComments(video);
+  bindVideoReplies(video);
 }
 
 function showVideo(video) {
   state.activeVideo = video;
   state.videoOpenedAt = performance.now();
   state.openedVideos.add(video.id);
-  const zone = zoneAt(video.wx, video.wy);
+  const zone = video.catalogOnly || !Number.isFinite(video.wx)
+    ? { id: 'catalog', name: '世界素材档案' }
+    : zoneAt(video.wx, video.wy);
   const favorite = state.favorites.some((entry) => entry.type === 'media' && entry.id === video.id);
-  const liked = state.likes.includes(video.id);
+  const liked = video.liked || state.likes.includes(video.id);
   const hasCopy = state.copies.some((copy) => copy.assetId === video.id) || state.placed.some((placed) => placed.assetId === video.id || (placed.parts || []).includes(video.id));
   const bid = state.bids[video.id];
-  const openNotes = [...systemNotes, ...state.notes];
+  const publicAsset = state.publicAssets.find((asset) => asset.id === video.id);
+  const ownsPublicAsset = publicAsset?.owner === 'me';
+  const openNotes = allWorldNotes();
+  const relatedNotes = relatedNotesForVideo(video.id);
+  const assetRelations = relationsForAsset(video.id);
+  recordJournalEntry('asset', video.id, video.title, { wx: video.wx, wy: video.wy, catalogOnly: !!video.catalogOnly });
   logEvent('asset_open', { asset_id: video.id, spawn_source: video.spawn_source || '我的发布', zone_id: zone.id });
   openSheet(`
     <div class="sheet-inner media-sheet">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(video.title)}</h2>
-      <p class="sheet-subtitle">这段公共视频留在${zone.name}。观看、点赞、收藏、评论会分别记录，不会被直接解释成喜欢或不喜欢。</p>
+      <p class="sheet-subtitle">${video.catalogOnly ? '这段素材今天没有出现在地图上，但它的详情、回应和历史关系仍然保留。' : `这段公共视频留在${zone.name}。`}观看、点赞、收藏、评论会分别记录，不会被直接解释成喜欢或不喜欢。</p>
       <div class="meta-chips">
         <span class="chip">${zone.name}</span>
         <span class="chip">${escapeHtml(video.spawn_source || '我的发布')}</span>
@@ -944,34 +2068,57 @@ function showVideo(video) {
         <span class="chip">${escapeHtml(video.res || '—')}</span>
         <span class="chip">授权 · ${escapeHtml(video.license || '个人副本')}</span>
       </div>
+      ${video.catalogOnly ? '<div class="status-banner">素材暂未摆放在今日公域。你仍可观看档案、回应需求或等待它再次出现。</div>' : ''}
       ${hasCopy ? '<div class="status-banner">你已经拥有这段视频的副本，它可以躺在你的小窝里。</div>' : ''}
       <div class="media-layout">
         <div>
-          <div class="video-frame" id="videoFrame"><span class="video-status" id="videoStatus">等待播放</span></div>
+          <div class="video-frame" id="videoFrame"><span class="video-status" id="videoStatus">${video.source === 'user' ? '正在读取本地素材' : '等待播放'}</span></div>
           <div class="media-actions">
             <button class="primary-button" id="playButton">播放</button>
             <button class="paper-button" id="likeButton">${liked ? '♥ 已点赞' : '♡ 点赞'}</button>
             <button class="paper-button" id="favoriteButton">${favorite ? '已收藏' : '收藏'}</button>
-            <button class="paper-button" id="bidButton">${bid?.settled ? '竞价已落幕' : '参与竞价 G'}</button>
+            <button class="paper-button" id="compareButton">对照另一段</button>
+            <button class="paper-button" id="bidButton" ${video.catalogOnly ? 'disabled' : ''}>${video.catalogOnly ? '等待再次出现' : bid?.settled ? '竞价已落幕' : '参与竞价 G'}</button>
+            ${ownsPublicAsset ? '<button class="paper-button" id="editPublicAssetButton">管理素材</button>' : publicAsset ? '<button class="text-button" id="reportPublicAssetButton">举报素材</button>' : ''}
           </div>
           <div class="note-section">
             <h3>标签</h3>
             <div class="tag-row" id="tagRow">
               ${(video.tags || []).map((tag) => `<button class="tag-button is-selected" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)} ×</button>`).join('')}
-              ${['治愈', '古怪', '像广告', '适合凌晨'].filter((tag) => !(video.tags || []).includes(tag)).map((tag) => `<button class="tag-button" data-tag="${tag}">${tag}</button>`).join('')}
+              ${[...new Set(['治愈', '古怪', '像广告', '适合凌晨', ...state.customTags])].filter((tag) => !(video.tags || []).includes(tag)).map((tag) => `<button class="tag-button" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`).join('')}
             </div>
+            <form class="inline-tag-form" id="customTagForm">
+              <label>创建自己的标签<input name="customTag" maxlength="12" placeholder="2–12 个字" /></label>
+              <button class="paper-button" type="submit">创建并贴上</button>
+              <span class="form-error" id="customTagError" role="alert"></span>
+            </form>
             ${state.carryTag ? `<p style="margin-top:8px;font-size:12px;color:var(--muted)">你口袋里有一株「${escapeHtml(state.carryTag)}」标签植物，<button class="text-button" id="plantTagButton" type="button">点这里贴到视频旁</button>，或退出后按 F</p>` : ''}
           </div>
         </div>
         <div>
           <h3>留言</h3>
           <div class="comment-list" id="commentList">${renderVideoComments(video)}</div>
+          <div class="reply-composer" id="replyComposer" hidden><span id="replyComposerText"></span><button class="text-button" id="cancelReply" type="button">取消回复</button></div>
           <form class="inline-form" id="commentForm">
             <label>写下观察<input name="comment" maxlength="80" required placeholder="描述你看见的东西" /></label>
             <button class="primary-button" type="submit">留下</button>
           </form>
           <div class="note-section">
-            <button class="paper-button" id="linkNoteButton">把这段连接到一张纸条</button>
+            <h3>素材之间的线 ${assetRelations.length}</h3>
+            <div class="relation-list">
+              ${assetRelations.length ? assetRelations.map((relation) => {
+                const otherId = relation.aId === video.id ? relation.bId : relation.aId;
+                const other = findVideoById(otherId);
+                return `<button class="relation-row" type="button" data-asset-relation="${escapeHtml(relation.id)}"><span>对照</span><b>${escapeHtml(other?.title || '一段素材')}</b><small>${escapeHtml(RELATION_TYPES[relation.type]?.label || '保留的关系')}</small></button>`;
+              }).join('') : '<div class="empty-state compact-empty">还没有和其他素材连线。对照不会改变公共素材，只会留下你的观察关系。</div>'}
+            </div>
+          </div>
+          <div class="note-section">
+            <h3>关联需求 ${relatedNotes.length}</h3>
+            <div class="relation-list">
+              ${relatedNotes.length ? relatedNotes.map((note, index) => `<button class="relation-row" type="button" data-related-note="${index}"><span>需求</span><b>${escapeHtml(note.title)}</b><small>打开纸条</small></button>`).join('') : '<div class="empty-state">这段视频还没有回应任何需求。</div>'}
+            </div>
+            <button class="paper-button" id="linkNoteButton">连接到其他需求</button>
             ${openNotes.length ? '' : '<p style="margin:8px 0 0;font-size:12px;color:var(--muted)">公域里目前还没有展开的纸条。按 N 可以留下一张。</p>'}
           </div>
         </div>
@@ -979,54 +2126,434 @@ function showVideo(video) {
     </div>
   `, () => {
     $('#playButton').addEventListener('click', () => togglePlayback(video));
-    $('#likeButton').addEventListener('click', () => {
-      toggleLike(video);
-      $('#likeButton').textContent = state.likes.includes(video.id) ? '♥ 已点赞' : '♡ 点赞';
+    $('#likeButton').addEventListener('click', async () => {
+      if (!await toggleLike(video)) return;
+      $('#likeButton').textContent = video.liked || state.likes.includes(video.id) ? '♥ 已点赞' : '♡ 点赞';
     });
     $('#favoriteButton').addEventListener('click', () => {
       toggleFavoriteVideo(video);
       $('#favoriteButton').textContent = state.favorites.some((entry) => entry.type === 'media' && entry.id === video.id) ? '已收藏' : '收藏';
     });
+    $('#compareButton').addEventListener('click', () => showComparePicker(video));
     $('#bidButton').addEventListener('click', () => openBidPanel(video));
+    $('#editPublicAssetButton')?.addEventListener('click', () => showEditPublicAsset(video));
+    $('#reportPublicAssetButton')?.addEventListener('click', () => showReportTarget('asset', video.id, () => showVideo(video)));
     $('#linkNoteButton').addEventListener('click', () => showLinkNote(video));
+    $$('[data-related-note]', sheet).forEach((button) => button.addEventListener('click', () => showNoteDetail(relatedNotes[Number(button.dataset.relatedNote)])));
+    $$('[data-asset-relation]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const relation = allAssetRelations().find((item) => item.id === button.dataset.assetRelation);
+      if (!relation) return;
+      const other = findVideoById(relation.aId === video.id ? relation.bId : relation.aId);
+      if (other) showCompareWorkbench(video, other, relation);
+    }));
     const plantTagButton = $('#plantTagButton', sheet);
     if (plantTagButton) plantTagButton.addEventListener('click', () => plantCarriedTag(video));
-    $$('.tag-button', sheet).forEach((button) => button.addEventListener('click', () => {
+    $$('.tag-button', sheet).forEach((button) => button.addEventListener('click', async () => {
       const tag = button.dataset.tag;
       video.tags = video.tags || [];
-      if (button.classList.contains('is-selected')) {
+      const active = !button.classList.contains('is-selected');
+      if (state.publicAssets.some((asset) => asset.id === video.id)) {
+        try {
+          const result = await window.ZhereService.publicWorld.setAssetTag(video.id, tag, active);
+          Object.assign(video, result.asset);
+        } catch (error) { return showToast(error.message || '标签保存失败'); }
+        commitVideoState(video);
+        logEvent(active ? 'tag_add' : 'tag_remove', { asset_id: video.id, tag, ...(active ? { source: 'sheet' } : {}) });
+        persist();
+        showVideo(video);
+        showToast(active ? `贴上了标签「${tag}」` : `已取消你贴的「${tag}」`);
+        return;
+      } else if (!active) {
         video.tags = video.tags.filter((value) => value !== tag);
+      } else video.tags.push(tag);
+      if (!active) {
         button.remove();
         logEvent('tag_remove', { asset_id: video.id, tag });
         showToast(`摘掉了标签「${tag}」`);
       } else {
-        video.tags.push(tag);
         button.classList.add('is-selected');
         button.textContent = `${tag} ×`;
         logEvent('tag_add', { asset_id: video.id, tag, source: 'sheet' });
       }
+      commitVideoState(video);
+      persist();
     }));
+    $('#customTagForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const input = event.currentTarget.elements.customTag;
+      const tag = input.value.trim().replace(/\s+/g, ' ');
+      const error = $('#customTagError');
+      if (tag.length < 2) return error.textContent = '标签至少需要 2 个字。';
+      if ((video.tags || []).includes(tag)) return error.textContent = '这段视频已经有这个标签。';
+      state.customTags = [...new Set([...state.customTags, tag])].slice(-24);
+      if (state.publicAssets.some((asset) => asset.id === video.id)) {
+        try {
+          const result = await window.ZhereService.publicWorld.setAssetTag(video.id, tag, true);
+          Object.assign(video, result.asset);
+        } catch (requestError) { return error.textContent = requestError.message || '标签保存失败。'; }
+      } else video.tags = [...(video.tags || []), tag];
+      commitVideoState(video);
+      logEvent('custom_tag_create', { asset_id: video.id, tag });
+      persist();
+      showVideo(video);
+      showToast(`已创建并贴上「${tag}」`);
+    });
     bindVideoReplies(video);
-    $('#commentForm').addEventListener('submit', (event) => {
+    $('#cancelReply').addEventListener('click', () => {
+      state.commentReplyTo = null;
+      $('#replyComposer').hidden = true;
+      const input = $('#commentForm input[name="comment"]');
+      input.placeholder = '描述你看见的东西';
+      input.focus();
+    });
+    $('#commentForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const input = event.currentTarget.elements.comment;
       const text = input.value.trim();
       if (!text) return;
+      const replyTo = state.commentReplyTo;
+      let comment = { id: crypto.randomUUID ? crypto.randomUUID() : `comment-${Date.now()}`, name: state.profile.nickname || '路过的风', text, parentId: replyTo?.id || null, createdAt: new Date().toISOString() };
+      if (state.publicAssets.some((asset) => asset.id === video.id)) {
+        try {
+          const result = await window.ZhereService.publicWorld.commentOnAsset(video.id, comment);
+          comment = result.comment;
+        } catch (error) { return showToast(error.message || '留言提交失败'); }
+      }
       video.comments = video.comments || [];
-      video.comments.push({ name: state.profile.nickname || '路过的风', text });
-      $('#commentList').innerHTML = renderVideoComments(video);
-      bindVideoReplies(video);
+      video.comments.push(comment);
+      commitVideoState(video);
+      persist();
+      refreshVideoComments(video);
       input.value = '';
-      logEvent('comment', { asset_id: video.id, length: text.length });
-      showToast('留言留在了视频旁');
+      state.commentReplyTo = null;
+      $('#replyComposer').hidden = true;
+      input.placeholder = '描述你看见的东西';
+      logEvent(replyTo ? 'comment_reply' : 'comment', { asset_id: video.id, length: text.length, parent_comment_id: replyTo?.id || null });
+      showToast(replyTo ? '回复留在了这条留言下面' : '留言留在了视频旁');
+    });
+    hydrateLocalMedia(video);
+  });
+}
+
+function showEditPublicAsset(video) {
+  openSheet(`
+    <div class="sheet-inner">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">管理公共素材</h2>
+      <p class="sheet-subtitle">可以修改说明、把素材移到当前站立位置，或从公共世界撤回。撤回不会删除你的原始上传文件。</p>
+      <form id="editPublicAssetForm">
+        <label>素材标题<input name="title" maxlength="80" required value="${escapeHtml(video.title)}" /></label>
+        <label>素材说明<textarea name="description" rows="4" maxlength="500">${escapeHtml(video.description || '')}</textarea></label>
+        <label class="check-label"><input type="checkbox" name="relocate" /> 移到我现在站立的位置（${escapeHtml(currentZoneName())}）</label>
+        <p class="form-error" id="editPublicAssetError" role="alert"></p>
+        <div class="media-actions"><button class="primary-button" type="submit">保存修改</button><button class="paper-button" id="editPublicAssetBack" type="button">返回素材</button><button class="danger-button" id="withdrawPublicAsset" type="button">撤回公共素材</button></div>
+      </form>
+    </div>
+  `, () => {
+    $('#editPublicAssetBack').addEventListener('click', () => showVideo(video));
+    $('#editPublicAssetForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const payload = { title: form.elements.title.value.trim(), description: form.elements.description.value.trim() };
+      if (form.elements.relocate.checked) Object.assign(payload, { wx: state.wx, wy: state.wy, zone: currentZoneName() });
+      try {
+        const result = await window.ZhereService.publicWorld.updateAsset(video.id, payload);
+        Object.assign(video, result.asset);
+        state.publicAssets = state.publicAssets.map((asset) => asset.id === video.id ? video : asset);
+        renderScreens(); renderWorld(); showVideo(video); showToast('公共素材已更新');
+      } catch (error) { $('#editPublicAssetError').textContent = error.message || '素材修改失败。'; }
+    });
+    $('#withdrawPublicAsset').addEventListener('click', () => confirmWithdrawPublicAsset(video));
+  });
+}
+
+function confirmWithdrawPublicAsset(video) {
+  openSheet(`
+    <div class="sheet-inner confirm-sheet"><h2 class="sheet-title" id="sheetTitle" tabindex="-1">撤回《${escapeHtml(video.title)}》？</h2><p class="sheet-subtitle">它会从其他玩家的地图和公共档案中消失，原始上传文件仍保留在你的账户数据中。</p><div class="media-actions"><button class="danger-button" id="confirmWithdrawAsset" type="button">确认撤回</button><button class="paper-button" id="cancelWithdrawAsset" type="button">返回</button></div></div>
+  `, () => {
+    $('#cancelWithdrawAsset').addEventListener('click', () => showEditPublicAsset(video));
+    $('#confirmWithdrawAsset').addEventListener('click', async () => {
+      try { await window.ZhereService.publicWorld.deleteAsset(video.id); }
+      catch (error) { return showToast(error.message || '素材撤回失败'); }
+      state.publicAssets = state.publicAssets.filter((asset) => asset.id !== video.id);
+      state.favorites = state.favorites.filter((entry) => !(entry.type === 'media' && entry.id === video.id));
+      closeSheet(); renderScreens(); renderWorld(); showToast('公共素材已撤回');
     });
   });
 }
 
-function togglePlayback(video) {
+function showComparePicker(baseVideo) {
+  openSheet(`
+    <div class="sheet-inner compare-picker">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">给《${escapeHtml(baseVideo.title)}》找一段对照</h2>
+      <p class="sheet-subtitle">对照不是合成或购买。它只记录你为什么把两段公共素材放在一起看。</p>
+      <label class="search-box">搜索另一段素材<input id="compareSearch" placeholder="标题、标签或场景" /></label>
+      <div class="compare-candidate-list" id="compareCandidates"></div>
+      <div class="media-actions"><button class="paper-button" id="compareBack" type="button">返回当前素材</button></div>
+    </div>
+  `, () => {
+    const render = () => {
+      const query = $('#compareSearch').value.trim().toLowerCase();
+      const baseTags = new Set(baseVideo.tags || []);
+      const candidates = allAssets().filter((video) => video.id !== baseVideo.id)
+        .map((video) => ({ video, affinity: (video.tags || []).filter((tag) => baseTags.has(tag)).length * 3 + (video.scene === baseVideo.scene ? 1 : 0) }))
+        .filter(({ video }) => !query || `${video.title}${video.scene || ''}${(video.tags || []).join('')}`.toLowerCase().includes(query))
+        .sort((a, b) => b.affinity - a.affinity || a.video.title.localeCompare(b.video.title, 'zh-CN'))
+        .slice(0, query ? 30 : 16);
+      const list = $('#compareCandidates');
+      list.innerHTML = candidates.length ? candidates.map(({ video, affinity }) => `<button class="compare-candidate" type="button" data-compare-candidate="${escapeHtml(video.id)}"><span class="compare-candidate-mark" aria-hidden="true"></span><span><b>${escapeHtml(video.title)}</b><small>${escapeHtml(videoLocationLabel(video))} · ${(video.tags || []).slice(0, 3).map(escapeHtml).join(' / ') || '暂无标签'}${affinity ? ` · ${affinity} 条相近线索` : ''}</small></span><em>放到旁边</em></button>`).join('') : '<div class="empty-state">没有找到匹配素材，换一个词试试。</div>';
+      $$('[data-compare-candidate]', list).forEach((button) => button.addEventListener('click', () => showCompareWorkbench(baseVideo, findVideoById(button.dataset.compareCandidate))));
+    };
+    $('#compareSearch').addEventListener('input', render);
+    $('#compareBack').addEventListener('click', () => showVideo(baseVideo));
+    render();
+  });
+}
+
+function showCompareWorkbench(a, b, existingRelation = null) {
+  if (!a || !b) return showToast('其中一段素材暂时无法读取');
+  const foreignRelation = existingRelation?.owner === 'other';
+  let selectedType = foreignRelation ? '' : existingRelation?.type || '';
+  openSheet(`
+    <div class="sheet-inner compare-workbench">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">两段素材，先并排看一会儿</h2>
+      <p class="sheet-subtitle">不用找到标准答案。选择此刻最接近的关系，也可以留下以后才看得懂的话。</p>
+      <div class="compare-stage">
+        <article><div class="compare-art media-${escapeHtml(a.zone || 'town')}"><span></span></div><h3>${escapeHtml(a.title)}</h3><p>${escapeHtml(videoLocationLabel(a))} · ${(a.tags || []).slice(0, 4).map(escapeHtml).join(' / ') || '暂无标签'}</p><button class="text-button" type="button" data-open-compare="${escapeHtml(a.id)}">单独打开</button></article>
+        <div class="relation-thread" aria-hidden="true"><i></i><i></i><i></i></div>
+        <article><div class="compare-art media-${escapeHtml(b.zone || 'town')}"><span></span></div><h3>${escapeHtml(b.title)}</h3><p>${escapeHtml(videoLocationLabel(b))} · ${(b.tags || []).slice(0, 4).map(escapeHtml).join(' / ') || '暂无标签'}</p><button class="text-button" type="button" data-open-compare="${escapeHtml(b.id)}">单独打开</button></article>
+      </div>
+      <fieldset class="relation-choices">
+        <legend>它们为什么应该放在一起？</legend>
+        ${Object.entries(RELATION_TYPES).map(([key, meta]) => `<button type="button" data-relation-type="${key}" aria-pressed="${String(selectedType === key)}"><b>${meta.label}</b><span>${meta.description}</span></button>`).join('')}
+      </fieldset>
+      ${foreignRelation ? `<div class="status-banner">${escapeHtml(existingRelation.note || '另一位旅人留下了这条素材关系。')} 你可以在同两段素材之间留下自己的另一条线。</div>` : ''}
+      <label>留一句只属于这条线的话<textarea id="relationNote" rows="2" maxlength="160" placeholder="可选；以后回来看时会出现在手账里">${escapeHtml(foreignRelation ? '' : existingRelation?.note || '')}</textarea></label>
+      <p class="form-error" id="relationError" role="alert"></p>
+      <div class="media-actions"><button class="primary-button" id="saveRelation" type="button">${existingRelation && !foreignRelation ? '保存关系变化' : '把我的线留在公共世界'}</button><button class="paper-button" id="changeCompare" type="button">换一段素材</button>${existingRelation && !foreignRelation ? '<button class="danger-button" id="deleteRelation" type="button">拆掉这条线</button>' : ''}</div>
+    </div>
+  `, () => {
+    $$('[data-relation-type]', sheet).forEach((button) => button.addEventListener('click', () => {
+      selectedType = button.dataset.relationType;
+      $$('[data-relation-type]', sheet).forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
+      $('#relationError').textContent = '';
+    }));
+    $$('[data-open-compare]', sheet).forEach((button) => button.addEventListener('click', () => showVideo(findVideoById(button.dataset.openCompare))));
+    $('#changeCompare').addEventListener('click', () => showComparePicker(a));
+    $('#saveRelation').addEventListener('click', async () => {
+      if (!selectedType) return $('#relationError').textContent = '先选择一种此刻最接近的关系。';
+      const pairExisting = allAssetRelations().find((relation) => relation.owner !== 'other' && ((relation.aId === a.id && relation.bId === b.id) || (relation.aId === b.id && relation.bId === a.id)));
+      const relation = (!foreignRelation && existingRelation) || pairExisting || { id: crypto.randomUUID ? crypto.randomUUID() : `relation-${Date.now()}`, aId: a.id, bId: b.id, createdAt: new Date().toISOString() };
+      relation.type = selectedType;
+      relation.note = $('#relationNote').value.trim();
+      relation.updatedAt = new Date().toISOString();
+      try {
+        const result = await window.ZhereService.publicWorld.saveRecord({ id: relation.id, kind: 'asset_relation', payload: relation });
+        state.publicRecords = [...state.publicRecords.filter((item) => item.id !== relation.id), result.record];
+        state.assetRelations = state.assetRelations.filter((item) => item.id !== relation.id);
+      } catch (error) { return $('#relationError').textContent = error.message || '关系保存失败。'; }
+      recordJournalEntry('relation', relation.id, `${a.title} × ${b.title}`, { aId: a.id, bId: b.id, relationType: selectedType });
+      logEvent('asset_relation_save', { relation_id: relation.id, asset_a: a.id, asset_b: b.id, relation_type: selectedType, note_length: relation.note.length });
+      persist();
+      showVideo(a);
+      showToast('两段素材之间拉起了一根线，已经留在探索手账');
+    });
+    $('#deleteRelation')?.addEventListener('click', async () => {
+      if (state.publicRecords.some((record) => record.id === existingRelation.id)) {
+        try { await window.ZhereService.publicWorld.deleteRecord(existingRelation.id); }
+        catch (error) { return showToast(error.message || '关系删除失败'); }
+        state.publicRecords = state.publicRecords.filter((record) => record.id !== existingRelation.id);
+      }
+      state.assetRelations = state.assetRelations.filter((relation) => relation.id !== existingRelation.id);
+      state.journalEntries = state.journalEntries.filter((entry) => !(entry.type === 'relation' && entry.id === existingRelation.id));
+      logEvent('asset_relation_delete', { relation_id: existingRelation.id });
+      persist();
+      showVideo(a);
+      showToast('这条线已经拆下，两段公共素材都还在原处');
+    });
+  });
+}
+
+function journalEntryLabel(entry) {
+  const labels = { asset: '素材', demand: '需求', relation: '关系', zone: '地点' };
+  return labels[entry.type] || '足迹';
+}
+
+function showJournal(initialTab = 'recent') {
+  let activeTab = initialTab;
+  openSheet(`
+    <div class="sheet-inner journal-sheet">
+      <div class="journal-heading">
+        <div><span class="section-kicker">不是任务清单，是你走过的路</span><h2 class="sheet-title" id="sheetTitle" tabindex="-1">探索手账</h2></div>
+        <p>看过的素材、展开过的纸条、发现的地方与亲手连起的关系都会留在这里。它们没有完成期限，随时可以回来。</p>
+      </div>
+      <nav class="journal-tabs" aria-label="手账分类">
+        <button type="button" data-journal-tab="recent">最近翻过</button>
+        <button type="button" data-journal-tab="relations">素材关系</button>
+        <button type="button" data-journal-tab="places">发现地点</button>
+      </nav>
+      <div class="journal-memory" id="journalMemory"></div>
+      <div class="journal-list" id="journalList"></div>
+    </div>
+  `, () => {
+    const renderJournal = () => {
+      $$('[data-journal-tab]', sheet).forEach((button) => {
+        const selected = button.dataset.journalTab === activeTab;
+        button.classList.toggle('is-active', selected);
+        button.setAttribute('aria-current', selected ? 'page' : 'false');
+      });
+      const ordered = [...state.journalEntries].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || new Date(b.lastVisitedAt) - new Date(a.lastVisitedAt));
+      const list = $('#journalList');
+      const memory = $('#journalMemory');
+      memory.innerHTML = `<p>你已经走进 <b>${state.discoveredZones.length}</b> 个地方，公共世界里有 <b>${allAssetRelations().length}</b> 条素材关系，手账里有 <b>${state.journalEntries.length}</b> 页会再次打开的记忆。</p>`;
+      if (activeTab === 'relations') {
+        const relations = allAssetRelations();
+        list.innerHTML = relations.length ? relations.map((relation) => {
+          const a = findVideoById(relation.aId);
+          const b = findVideoById(relation.bId);
+          const meta = RELATION_TYPES[relation.type] || RELATION_TYPES.unresolved;
+          if (!a || !b) return '';
+          return `<article class="journal-relation"><span class="relation-line-mark" aria-hidden="true"></span><div><small>素材之间的线</small><h3>${escapeHtml(a.title)} <i>与</i> ${escapeHtml(b.title)}</h3><p><b>${meta.label}</b>${relation.note ? ` · ${escapeHtml(relation.note)}` : ''}</p></div><button class="paper-button" type="button" data-journal-relation="${escapeHtml(relation.id)}">重新并排看</button></article>`;
+        }).join('') : '<div class="journal-empty"><b>还没有拉起素材之间的线</b><p>打开任意素材，选择“对照另一段”，把两个发现放在一起看。</p></div>';
+      } else if (activeTab === 'places') {
+        const placeEntries = ordered.filter((entry) => entry.type === 'zone');
+        list.innerHTML = placeEntries.length ? placeEntries.map((entry, index) => `<article class="journal-place"><span>${String(index + 1).padStart(2, '0')}</span><div><small>发现地点</small><h3>${escapeHtml(entry.title)}</h3><p>${entry.visits > 1 ? `已经回来过 ${entry.visits} 次` : '第一次经过时记下的位置'}</p></div><button class="paper-button" type="button" data-journal-place="${escapeHtml(entry.id)}">回到附近</button></article>`).join('') : '<div class="journal-empty"><b>地图还没有留下地名</b><p>离开原地向任意方向走，第一次进入区域时会自动夹进手账。</p></div>';
+      } else {
+        list.innerHTML = ordered.length ? ordered.map((entry) => `<article class="journal-entry ${entry.pinned ? 'is-pinned' : ''}"><button class="journal-open" type="button" data-journal-open="${escapeHtml(entry.type)}:${escapeHtml(entry.id)}"><span class="journal-stamp">${journalEntryLabel(entry)}</span><span><b>${escapeHtml(entry.title)}</b><small>${entry.visits > 1 ? `翻过 ${entry.visits} 次` : '刚刚夹进手账'}${entry.pinned ? ' · 压在最上面' : ''}</small></span></button><button class="journal-pin" type="button" data-journal-pin="${escapeHtml(entry.type)}:${escapeHtml(entry.id)}" aria-label="${entry.pinned ? '取消压在最上面' : '压在手账最上面'}" aria-pressed="${String(Boolean(entry.pinned))}">${entry.pinned ? '取下别针' : '别在上面'}</button></article>`).join('') : '<div class="journal-empty"><b>第一页还空着</b><p>走近素材或纸条按 E，手账会记住你真正看过的东西。</p></div>';
+      }
+      $$('[data-journal-tab]', sheet).forEach((button) => button.onclick = () => { activeTab = button.dataset.journalTab; renderJournal(); });
+      $$('[data-journal-pin]', sheet).forEach((button) => button.onclick = () => {
+        const [type, ...idParts] = button.dataset.journalPin.split(':');
+        const entry = state.journalEntries.find((item) => item.type === type && item.id === idParts.join(':'));
+        if (!entry) return;
+        entry.pinned = !entry.pinned;
+        persist();
+        renderJournal();
+        showToast(entry.pinned ? '这一页已经压在手账最上面' : '已经取下别针，足迹仍然保留');
+      });
+      $$('[data-journal-relation]', sheet).forEach((button) => button.onclick = () => {
+        const relation = allAssetRelations().find((item) => item.id === button.dataset.journalRelation);
+        if (relation) showCompareWorkbench(findVideoById(relation.aId), findVideoById(relation.bId), relation);
+      });
+      $$('[data-journal-place]', sheet).forEach((button) => button.onclick = () => revisitJournalPlace(button.dataset.journalPlace));
+      $$('[data-journal-open]', sheet).forEach((button) => button.onclick = () => openJournalEntry(button.dataset.journalOpen));
+    };
+    renderJournal();
+  });
+}
+
+function revisitJournalPlace(zoneId) {
+  const entry = state.journalEntries.find((item) => item.type === 'zone' && item.id === zoneId);
+  if (!entry) return showToast('这页地点记录已经褪色了');
+  if (state.worldMode === 'cottage') exitCottage();
+  state.wx = Number(entry.wx) || 0;
+  state.wy = Number(entry.wy) || 0;
+  recordJournalEntry('zone', entry.id, entry.title, { wx: state.wx, wy: state.wy });
+  persist();
+  closeSheet();
+  renderWorld();
+  showToast(`沿着手账的折痕，回到了「${entry.title}」附近`);
+}
+
+function openJournalEntry(key) {
+  const [type, ...idParts] = key.split(':');
+  const id = idParts.join(':');
+  if (type === 'asset') return showVideo(findVideoById(id));
+  if (type === 'demand') return showNoteDetail(allWorldNotes().find((note) => note.id === id));
+  if (type === 'relation') {
+  const relation = allAssetRelations().find((item) => item.id === id);
+    if (relation) return showCompareWorkbench(findVideoById(relation.aId), findVideoById(relation.bId), relation);
+  }
+  if (type === 'zone') return revisitJournalPlace(id);
+  showToast('这页内容暂时无法重新打开');
+}
+
+async function hydrateLocalMedia(video) {
+  if (video.source !== 'user' || !video.mime?.startsWith('video/')) {
+    if (video.source === 'user') {
+      const status = $('#videoStatus');
+      if (status) status.textContent = video.fileName ? '本地文件不可用，请重新上传' : '仅保存了素材说明';
+      const button = $('#playButton');
+      if (button) button.disabled = true;
+    }
+    return;
+  }
+  const frame = $('#videoFrame');
+  const button = $('#playButton');
+  try {
+    let mediaUrl = video.mediaUrl || '';
+    if (!mediaUrl) {
+      const file = await getUploadFile(video.id);
+      if (!file) throw new Error('missing-media-file');
+      if (state.activeObjectUrl) URL.revokeObjectURL(state.activeObjectUrl);
+      state.activeObjectUrl = URL.createObjectURL(file);
+      mediaUrl = state.activeObjectUrl;
+    }
+    if (state.activeVideo?.id !== video.id || !frame) throw new Error('inactive-video');
+    frame.replaceChildren();
+    const media = document.createElement('video');
+    media.className = 'local-video';
+    media.src = mediaUrl;
+    media.controls = true;
+    media.playsInline = true;
+    media.preload = 'metadata';
+    media.setAttribute('aria-label', `播放《${video.title}》`);
+    frame.append(media);
+    button.disabled = false;
+    button.textContent = video.mediaUrl ? '播放上传视频' : '播放迁移视频';
+    const source = video.mediaUrl ? 'server-upload' : 'legacy-local-upload';
+    const milestones = new Set();
+    let seekFrom = 0;
+    let lastPlaybackTime = 0;
+    media.addEventListener('play', () => {
+      frame.classList.add('is-playing');
+      button.textContent = '暂停';
+      logEvent('play', { asset_id: video.id, source, current_time: Number(media.currentTime.toFixed(2)), duration: Number.isFinite(media.duration) ? Number(media.duration.toFixed(2)) : null });
+      persist();
+    });
+    media.addEventListener('pause', () => {
+      frame.classList.remove('is-playing');
+      button.textContent = '继续播放';
+      if (!media.ended) logEvent('pause', { asset_id: video.id, source, current_time: Number(media.currentTime.toFixed(2)), duration: Number.isFinite(media.duration) ? Number(media.duration.toFixed(2)) : null });
+      persist();
+    });
+    media.addEventListener('timeupdate', () => {
+      if (!Number.isFinite(media.duration) || media.duration <= 0) return;
+      const progress = media.currentTime / media.duration;
+      [25, 50, 75].forEach((milestone) => {
+        if (progress < milestone / 100 || milestones.has(milestone)) return;
+        milestones.add(milestone);
+        logEvent('play_progress', { asset_id: video.id, source, milestone, current_time: Number(media.currentTime.toFixed(2)), duration: Number(media.duration.toFixed(2)) });
+      });
+      if (!media.seeking) lastPlaybackTime = media.currentTime;
+    });
+    media.addEventListener('seeking', () => { seekFrom = lastPlaybackTime; });
+    media.addEventListener('seeked', () => logEvent('seek', { asset_id: video.id, source, from_time: Number(seekFrom.toFixed(2)), to_time: Number(media.currentTime.toFixed(2)), duration: Number.isFinite(media.duration) ? Number(media.duration.toFixed(2)) : null }));
+    media.addEventListener('ended', () => {
+      milestones.add(100);
+      logEvent('play_complete', { asset_id: video.id, source, milestone: 100, duration: Number.isFinite(media.duration) ? Number(media.duration.toFixed(2)) : null });
+      persist();
+    });
+    media.addEventListener('error', () => logEvent('play_error', { asset_id: video.id, source, media_error_code: media.error?.code || null }));
+  } catch {
+    const status = $('#videoStatus');
+    if (status) status.textContent = '没有找到服务端视频文件，请重新上传';
+    if (button) button.disabled = true;
+  }
+}
+
+async function togglePlayback(video) {
   const frame = $('#videoFrame');
   if (!frame) return;
   const button = $('#playButton');
+  const media = $('.local-video', frame);
+  if (media) {
+    if (media.paused) {
+      try { await media.play(); } catch { showToast('浏览器阻止了播放，请使用播放器内的播放按钮'); }
+    } else {
+      media.pause();
+    }
+    return;
+  }
   const playing = frame.classList.toggle('is-playing');
   button.textContent = playing ? '暂停' : '播放';
   $('#videoStatus').textContent = playing ? '正在播放占位片段' : '已暂停';
@@ -1041,12 +2568,19 @@ function togglePlayback(video) {
     if (!playing && mark) mark.remove();
   }
   logEvent(playing ? 'play' : 'pause', { asset_id: video.id });
+  persist();
 }
 
-function plantCarriedTag(video) {
+async function plantCarriedTag(video) {
   if (!state.carryTag) return;
   video.tags = video.tags || [];
-  if (!video.tags.includes(state.carryTag)) video.tags.push(state.carryTag);
+  if (state.publicAssets.some((asset) => asset.id === video.id)) {
+    try {
+      const result = await window.ZhereService.publicWorld.setAssetTag(video.id, state.carryTag, true);
+      Object.assign(video, result.asset);
+    } catch (error) { return showToast(error.message || '标签保存失败'); }
+  } else if (!video.tags.includes(state.carryTag)) video.tags.push(state.carryTag);
+  commitVideoState(video);
   logEvent('tag_add', { asset_id: video.id, tag: state.carryTag, source: 'tag_plant' });
   const tag = state.carryTag;
   state.carryTag = null;
@@ -1170,19 +2704,30 @@ function settleOrContinue(video) {
 }
 
 function showLinkNote(video) {
-  const notes = [...systemNotes, ...state.notes];
+  const notes = allWorldNotes();
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">把《${escapeHtml(video.title)}》连到一张纸条</h2>
       <p class="sheet-subtitle">如果你发现某段视频回应了某个需求，就把它连过去。这会记录为一条需求—素材关系，不会通知任何人。</p>
       <div class="list-stack">
-        ${notes.length ? notes.map((note, index) => `<div class="list-row"><div><b>${escapeHtml(note.title)}</b><span>${escapeHtml(note.type === 'commerce' ? '模拟商业需求' : '个人需求')} · ${escapeHtml(note.by || '我')}</span></div><button class="text-button" data-link="${index}">连接</button></div>`).join('') : '<div class="empty-state">公域里还没有展开的纸条。按 N 可以留下一张。</div>'}
+        ${notes.length ? notes.map((note, index) => {
+          const linked = linkedVideoIdsForNote(note).includes(video.id);
+          return `<div class="list-row"><div><b>${escapeHtml(note.title)}</b><span>${escapeHtml(note.type === 'commerce' ? '模拟商业需求' : '个人需求')} · ${escapeHtml(note.by || '我')}</span></div><button class="${linked ? 'paper-button' : 'text-button'}" data-link="${index}" ${linked ? 'disabled' : ''}>${linked ? '已连接' : '连接'}</button></div>`;
+        }).join('') : '<div class="empty-state">公域里还没有展开的纸条。按 N 可以留下一张。</div>'}
       </div>
       <div class="media-actions"><button class="text-button" id="linkBack">回到视频</button></div>
     </div>
   `, () => {
-    $$('[data-link]', sheet).forEach((button) => button.addEventListener('click', () => {
+    $$('[data-link]', sheet).forEach((button) => button.addEventListener('click', async () => {
       const note = notes[Number(button.dataset.link)];
+      if (state.publicDemands.some((item) => item.id === note.id)) {
+        try {
+          const result = await window.ZhereService.publicWorld.setDemandLink(note.id, video.id, true);
+          Object.assign(note, result.demand);
+        } catch (error) { return showToast(error.message || '需求关联保存失败'); }
+      }
+      linkNoteToVideo(note, video.id);
+      persist();
       logEvent('demand_asset_link', { demand_id: note.id, asset_id: video.id });
       closeSheet();
       showToast(`《${video.title}》已连到「${note.title}」`);
@@ -1192,39 +2737,75 @@ function showLinkNote(video) {
 }
 
 function showNoteDetail(note) {
+  if (!note) return showToast('这张纸条已经不存在');
+  recordJournalEntry('demand', note.id, note.title, { wx: note.wx, wy: note.wy });
+  persist();
   const favorite = state.favorites.some((entry) => entry.type === 'demand' && entry.id === note.id);
-  const refVideo = note.refAsset ? allVideos().find((video) => video.id === note.refAsset) : null;
+  const own = note.owner === 'me' || state.notes.some((item) => item.id === note.id);
+  const closed = note.status === 'closed';
+  const refVideo = findVideoById(note.refAsset);
+  const linkedVideos = linkedVideoIdsForNote(note).map(findVideoById).filter(Boolean);
+  const responseCandidates = responseVideoCandidates(note);
+  const noteResponses = responsesForNote(note);
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(note.title)}</h2>
-      <p class="sheet-subtitle">${note.type === 'commerce' ? '模拟商业需求' : '个人需求'} · 发布人 ${escapeHtml(note.by || state.profile.nickname)} · ${escapeHtml(zoneAt(note.wx, note.wy).name)}${note.createdAt ? ' · ' + escapeHtml(note.createdAt) : ''}</p>
+      <p class="sheet-subtitle">${note.type === 'commerce' ? '模拟商业需求' : '个人需求'} · 发布人 ${escapeHtml(note.by || state.profile.nickname)} · ${escapeHtml(zoneAt(note.wx, note.wy).name)}${note.createdAt ? ' · ' + escapeHtml(note.createdAt) : ''} · ${closed ? '已关闭' : '开放回应'}</p>
+      ${own ? `<div class="demand-owner-actions"><button class="paper-button" id="editDemand" type="button">修改纸条</button><button class="paper-button" id="toggleDemandStatus" type="button">${closed ? '重新开放' : '关闭需求'}</button><button class="danger-button" id="deleteDemand" type="button">删除</button></div>` : state.publicDemands.some((item) => item.id === note.id) ? '<div class="demand-owner-actions"><button class="text-button" id="reportDemand" type="button">举报这张需求</button></div>' : ''}
       ${note.description ? `<div class="status-banner">${escapeHtml(note.description)}</div>` : ''}
-      ${note.type === 'commerce' ? '<div class="danger-zone"><b>模拟说明</b><p>此需求不形成真实合同、支付或授权。所有金额都是灵感币虚拟预算。</p></div>' : ''}
+      ${note.type === 'commerce' ? `<div class="commerce-summary"><div><span>项目</span><b>${escapeHtml(note.projectName || '未填写')}</b></div><div><span>受众</span><b>${escapeHtml(note.audience || '未填写')}</b></div><div><span>规格</span><b>${escapeHtml(note.format || '未填写')}</b></div><div><span>数量</span><b>${escapeHtml(note.quantity || 1)} 段</b></div><div><span>虚拟预算</span><b>${escapeHtml(note.budget || 0)} 灵感币</b></div><div><span>截止</span><b>${escapeHtml(note.deadline || '开放')}</b></div></div><div class="danger-zone"><b>模拟说明</b><p>此需求不形成真实合同、支付或授权。所有金额都是灵感币虚拟预算。</p></div>` : ''}
       ${refVideo ? `<div class="meta-chips"><span class="chip">参考视频 · ${escapeHtml(refVideo.title)}</span><button class="text-button" id="openRef">去看参考视频</button></div>` : ''}
-      <div class="note-section"><h3>回应 ${note.responses.length}</h3>
-        <div class="comment-list">${note.responses.length ? note.responses.map((response) => `<div class="comment"><b>${escapeHtml(response.name)}</b><span>${escapeHtml(response.text)}</span></div>`).join('') : '<div class="empty-state">还没有回应。你可以用素材回应，也可以当作没看见。</div>'}</div>
+      <div class="note-section relation-section"><h3>关联视频 ${linkedVideos.length}</h3>
+        <div class="relation-list">${linkedVideos.length ? linkedVideos.map((video) => `<button class="relation-row" type="button" data-linked-video="${escapeHtml(video.id)}"><span>视频</span><b>${escapeHtml(video.title)}</b><small>打开播放</small></button>`).join('') : '<div class="empty-state">还没有视频与这张需求相连。回应时可以直接选择一段。</div>'}</div>
       </div>
-      <form class="note-section" id="noteResponseForm">
+      <div class="note-section"><h3>回应 ${noteResponses.length}</h3>
+        <div class="comment-list">${noteResponses.length ? noteResponses.map((response) => `<div class="comment relation-comment"><b>${escapeHtml(response.name)}</b>${response.text ? `<span>${escapeHtml(response.text)}</span>` : '<span>用一段视频作出了回应</span>'}${response.assetId ? `<button class="relation-inline" type="button" data-response-video="${escapeHtml(response.assetId)}">▶ ${escapeHtml(response.assetTitle || '打开回应视频')}</button>` : ''}<div class="comment-actions">${response.owner === 'me' ? `<button class="text-button" type="button" data-edit-response="${escapeHtml(response.id)}">修改</button><button class="text-button" type="button" data-delete-response="${escapeHtml(response.id)}">删除</button>` : response.id ? `<button class="text-button" type="button" data-report-response="${escapeHtml(response.id)}">举报</button>` : ''}</div></div>`).join('') : '<div class="empty-state">还没有回应。你可以选择视频回应，也可以只留下文字。</div>'}</div>
+      </div>
+      ${closed ? '<div class="note-section"><div class="empty-state">这张需求已经关闭，历史回应和素材关系仍然可查看。</div></div>' : `<form class="note-section" id="noteResponseForm">
         <h3>用你的素材回应</h3>
-        <label>回应内容<textarea name="response" rows="3" required placeholder="描述你能提供什么，或你见过的哪段视频合适"></textarea></label>
+        <label>选择回应视频
+          <select name="responseAsset">
+            <option value="">不附视频，只写文字</option>
+            ${responseCandidates.map((video) => `<option value="${escapeHtml(video.id)}">${state.published.some((item) => item.id === video.id) || video.owner === 'me' ? '我发布的 · ' : state.copies.some((copy) => copy.assetId === video.id) ? '我的副本 · ' : '公共视频 · '}${escapeHtml(video.title)}</option>`).join('')}
+          </select>
+        </label>
+        <p class="field-help">优先显示你发布、拥有、看过或离需求较近的视频。关联后双方页面都能互相打开。</p>
+        <label>补充说明<textarea name="response" rows="3" placeholder="为什么这段视频合适，或你还能提供什么"></textarea></label>
+        <p class="form-error" id="noteResponseError" role="alert"></p>
         <div class="media-actions">
-          <button class="primary-button" type="submit">留下回应</button>
-          <button class="paper-button" id="noteFavoriteButton">${favorite ? '已收藏' : '收藏纸条'}</button>
+          <button class="primary-button" type="submit">提交视频回应</button>
+          <button class="paper-button" id="noteFavoriteButton" type="button">${favorite ? '已收藏' : '收藏纸条'}</button>
         </div>
-      </form>
+      </form>`}
     </div>
   `, () => {
-    $('#noteResponseForm').addEventListener('submit', (event) => {
+    $('#noteResponseForm')?.addEventListener('submit', async (event) => {
       event.preventDefault();
       const text = event.currentTarget.elements.response.value.trim();
-      if (!text) return;
-      note.responses.push({ name: state.profile.nickname || '路过的风', text, at: fmtNow() });
-      persist();
-      logEvent('demand_response', { demand_id: note.id, length: text.length });
-      closeSheet();
-      showToast('回应贴在了纸条上');
+      const assetId = event.currentTarget.elements.responseAsset.value;
+      const responseVideo = findVideoById(assetId);
+      if (!text && !responseVideo) return $('#noteResponseError').textContent = '请选择一段视频，或写下回应内容。';
+      const isPublicDemand = state.publicDemands.some((item) => item.id === note.id);
+      if (isPublicDemand) {
+        try {
+          const result = await window.ZhereService.publicWorld.respondToDemand(note.id, {
+            text, assetId: responseVideo?.id || null, assetTitle: responseVideo?.title || '',
+          });
+          note.responses = [...(note.responses || []), result.response];
+        } catch (error) {
+          return $('#noteResponseError').textContent = error.message || '回应提交失败，请稍后重试。';
+        }
+      } else {
+        state.noteResponses = state.noteResponses || {};
+        state.noteResponses[note.id] = [...(state.noteResponses[note.id] || []), { name: state.profile.nickname || '路过的风', text, assetId: responseVideo?.id || null, assetTitle: responseVideo?.title || '', at: fmtNow() }];
+        if (responseVideo) linkNoteToVideo(note, responseVideo.id);
+        persist();
+      }
+      logEvent('demand_response', { demand_id: note.id, asset_id: responseVideo?.id || null, length: text.length });
+      showNoteDetail(note);
+      showToast(responseVideo ? `《${responseVideo.title}》已作为回应贴在纸条上` : '文字回应贴在了纸条上');
     });
-    $('#noteFavoriteButton').addEventListener('click', () => {
+    $('#noteFavoriteButton')?.addEventListener('click', () => {
       const index = state.favorites.findIndex((entry) => entry.type === 'demand' && entry.id === note.id);
       if (index >= 0) {
         state.favorites.splice(index, 1);
@@ -1240,94 +2821,265 @@ function showNoteDetail(note) {
     });
     const openRef = $('#openRef', sheet);
     if (openRef && refVideo) openRef.addEventListener('click', () => showVideo(refVideo));
+    $('#editDemand')?.addEventListener('click', () => showLeaveNote(refVideo, note));
+    $('#reportDemand')?.addEventListener('click', () => showReportTarget('demand', note.id, () => showNoteDetail(note)));
+    $('#toggleDemandStatus')?.addEventListener('click', async () => {
+      const nextStatus = closed ? 'open' : 'closed';
+      if (state.publicDemands.some((item) => item.id === note.id)) {
+        try {
+          const result = await window.ZhereService.publicWorld.updateDemand(note.id, { status: nextStatus });
+          Object.assign(note, result.demand);
+        } catch (error) { return showToast(error.message || '需求状态保存失败'); }
+      } else note.status = nextStatus;
+      logEvent(note.status === 'closed' ? 'demand_close' : 'demand_reopen', { demand_id: note.id });
+      persist();
+      renderCreations();
+      showNoteDetail(note);
+      showToast(note.status === 'closed' ? '需求已关闭，历史关系仍保留' : '需求已重新开放');
+    });
+    $('#deleteDemand')?.addEventListener('click', () => confirmDemandDelete(note));
+    $$('[data-edit-response]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const response = noteResponses.find((item) => item.id === button.dataset.editResponse);
+      if (response) showEditDemandResponse(note, response);
+    }));
+    $$('[data-delete-response]', sheet).forEach((button) => button.addEventListener('click', async () => {
+      try { await window.ZhereService.publicWorld.deleteDemandResponse(note.id, button.dataset.deleteResponse); }
+      catch (error) { return showToast(error.message || '回应删除失败'); }
+      note.responses = (note.responses || []).filter((item) => item.id !== button.dataset.deleteResponse);
+      showNoteDetail(note); showToast('回应已删除');
+    }));
+    $$('[data-report-response]', sheet).forEach((button) => button.addEventListener('click', () => showReportTarget('response', button.dataset.reportResponse, () => showNoteDetail(note))));
+    $$('[data-linked-video], [data-response-video]', sheet).forEach((button) => button.addEventListener('click', () => {
+      const videoId = button.dataset.linkedVideo || button.dataset.responseVideo;
+      const video = findVideoById(videoId);
+      if (video) showVideo(video);
+    }));
   });
 }
 
-function showLeaveNote(referenceVideo = null) {
+function showEditDemandResponse(note, response) {
+  openSheet(`
+    <div class="sheet-inner"><h2 class="sheet-title" id="sheetTitle" tabindex="-1">修改我的回应</h2><form id="editDemandResponseForm"><label>回应内容<textarea name="text" rows="4" maxlength="500">${escapeHtml(response.text || '')}</textarea></label><p class="form-error" id="editDemandResponseError" role="alert"></p><div class="media-actions"><button class="primary-button" type="submit">保存回应</button><button class="paper-button" id="editDemandResponseBack" type="button">返回需求</button></div></form></div>
+  `, () => {
+    $('#editDemandResponseBack').addEventListener('click', () => showNoteDetail(note));
+    $('#editDemandResponseForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const text = event.currentTarget.elements.text.value.trim();
+      try {
+        const result = await window.ZhereService.publicWorld.updateDemandResponse(note.id, response.id, { text });
+        Object.assign(response, result.response); showNoteDetail(note); showToast('回应已更新');
+      } catch (error) { $('#editDemandResponseError').textContent = error.message || '回应修改失败。'; }
+    });
+  });
+}
+
+function confirmDemandDelete(note) {
+  openSheet(`
+    <div class="sheet-inner confirm-sheet">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">删除这张需求？</h2>
+      <p class="sheet-subtitle">《${escapeHtml(note.title)}》会从地图和公告树消失。已有素材本身不会删除，但这张纸条上的回应与关联会一并移除。</p>
+      <div class="danger-zone"><b>此操作无法在当前原型中撤销</b><p>如果只是暂时不再接收回应，建议返回并选择“关闭需求”。</p></div>
+      <div class="media-actions"><button class="danger-button" id="confirmDeleteDemand" type="button">确认删除</button><button class="paper-button" id="cancelDeleteDemand" type="button">返回纸条</button></div>
+    </div>
+  `, () => {
+    $('#cancelDeleteDemand').addEventListener('click', () => showNoteDetail(note));
+    $('#confirmDeleteDemand').addEventListener('click', async () => {
+      if (state.publicDemands.some((item) => item.id === note.id)) {
+        try { await window.ZhereService.publicWorld.deleteDemand(note.id); }
+        catch (error) { return showToast(error.message || '需求删除失败'); }
+        state.publicDemands = state.publicDemands.filter((item) => item.id !== note.id);
+      }
+      state.notes = state.notes.filter((item) => item.id !== note.id);
+      delete state.noteLinks[note.id];
+      delete state.noteResponses[note.id];
+      state.favorites = state.favorites.filter((entry) => !(entry.type === 'demand' && entry.id === note.id));
+      logEvent('demand_delete', { demand_id: note.id });
+      persist();
+      closeSheet();
+      renderCreations();
+      renderWorld();
+      updateCounters();
+      showToast('需求已删除');
+    });
+  });
+}
+
+function showLeaveNote(referenceVideo = null, record = null) {
+  const isPublished = !!record && (state.notes.some((note) => note.id === record.id) || state.publicDemands.some((note) => note.id === record.id && note.owner === 'me'));
+  const isPublicRecord = !!record && state.publicDemands.some((note) => note.id === record.id);
+  const initialType = record?.type || 'personal';
   openSheet(`
     <div class="sheet-inner">
-      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">在这里留一张纸条</h2>
-      <p class="sheet-subtitle">你正站在${currentZoneName()}。纸条会出现在你脚下的位置，所有人都能看见，也都能忽略。${referenceVideo ? `这张纸条会自动钉在《${escapeHtml(referenceVideo.title)}》旁。` : '如果你站在某段视频旁按 N，纸条会自动引用它。'}</p>
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${isPublished ? '修改需求纸条' : record ? '继续编辑草稿' : '在这里留一张纸条'}</h2>
+      <p class="sheet-subtitle">${isPublished ? '修改后纸条仍留在原来的位置，已有回应和素材关联不会消失。' : `你正站在${currentZoneName()}。发布后纸条会出现在当前位置附近；保存草稿则不会出现在公共世界。`}${referenceVideo ? ` 这张纸条会引用《${escapeHtml(referenceVideo.title)}》。` : ''}</p>
       <form id="leaveNoteForm">
         <label>类型
           <span class="option-row">
-            <label><input type="radio" name="noteType" value="personal" checked /> 个人需求</label>
-            <label><input type="radio" name="noteType" value="commerce" /> 模拟商业需求（不形成真实交易）</label>
+            <label><input type="radio" name="noteType" value="personal" ${initialType === 'personal' ? 'checked' : ''} /> 个人需求</label>
+            <label><input type="radio" name="noteType" value="commerce" ${initialType === 'commerce' ? 'checked' : ''} /> 模拟商业需求</label>
           </span>
         </label>
-        <label>想说的话<input name="title" required maxlength="40" placeholder="想找一段……" /></label>
-        <label>补充说明<textarea name="description" rows="3" placeholder="风格、用途、长度、预算（虚拟）都可以写"></textarea></label>
-        <button class="primary-button" type="submit">把纸条钉在这里</button>
+        <label>需求标题<input name="title" required maxlength="48" value="${escapeHtml(record?.title || '')}" placeholder="想找一段……" /></label>
+        <label>补充说明<textarea name="description" rows="3" maxlength="360" placeholder="希望看到什么、会如何使用、哪些内容不要出现">${escapeHtml(record?.description || '')}</textarea></label>
+        <fieldset class="commerce-fields" id="commerceFields" ${initialType === 'commerce' ? '' : 'hidden'}>
+          <legend>模拟商业需求信息</legend>
+          <div class="field-grid">
+            <label>项目或品牌<input name="projectName" maxlength="48" value="${escapeHtml(record?.projectName || '')}" placeholder="例如：北巷宠物铺春季短片" /></label>
+            <label>目标受众<input name="audience" maxlength="48" value="${escapeHtml(record?.audience || '')}" placeholder="例如：养猫的新手家庭" /></label>
+            <label>视频规格<input name="format" maxlength="48" value="${escapeHtml(record?.format || '')}" placeholder="例如：9:16，15–30 秒" /></label>
+            <label>需要数量<input name="quantity" type="number" min="1" max="99" value="${escapeHtml(record?.quantity || 1)}" /></label>
+            <label>虚拟预算<input name="budget" type="number" min="0" max="9999" value="${escapeHtml(record?.budget || '')}" placeholder="灵感币" /></label>
+            <label>截止日期<input name="deadline" type="date" value="${escapeHtml(record?.deadline || '')}" /></label>
+          </div>
+          <p class="field-help">这里不产生真实合同、支付或授权；预算仅用于原型中的灵感币协作。</p>
+        </fieldset>
+        <p class="form-error" id="leaveNoteError" role="alert"></p>
+        <div class="media-actions">
+          <button class="primary-button" type="submit">${isPublished ? '保存修改' : '发布到当前位置'}</button>
+          ${isPublished ? '' : '<button class="paper-button" id="saveDemandDraft" type="button">保存草稿</button>'}
+        </div>
       </form>
     </div>
-  `, () => $('#leaveNoteForm').addEventListener('submit', (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const title = form.elements.title.value.trim();
-    if (!title) return;
-    const type = form.elements.noteType.value;
-    const note = {
-      id: `n-${Date.now()}`,
-      title,
+  `, () => {
+    const form = $('#leaveNoteForm');
+    const fields = $('#commerceFields');
+    const error = $('#leaveNoteError');
+    const toggleCommerce = () => { fields.hidden = form.elements.noteType.value !== 'commerce'; error.textContent = ''; };
+    $$('input[name="noteType"]', form).forEach((input) => input.addEventListener('change', toggleCommerce));
+    const collect = () => ({
+      id: record?.id || `n-${Date.now()}`,
+      title: form.elements.title.value.trim(),
       description: form.elements.description.value.trim(),
-      type,
-      by: state.profile.nickname || '路过的风',
-      wx: state.wx + 40,
-      wy: state.wy + 20,
-      zone: zoneAt(state.wx, state.wy).id,
-      refAsset: referenceVideo ? referenceVideo.id : null,
-      responses: [],
-      createdAt: '刚刚',
+      type: form.elements.noteType.value,
+      projectName: form.elements.projectName.value.trim(),
+      audience: form.elements.audience.value.trim(),
+      format: form.elements.format.value.trim(),
+      quantity: Math.max(1, Number(form.elements.quantity.value) || 1),
+      budget: Math.max(0, Number(form.elements.budget.value) || 0),
+      deadline: form.elements.deadline.value,
+    });
+    const validate = (payload) => {
+      if (!payload.title) return '请填写需求标题。';
+      if (payload.type === 'commerce' && !payload.projectName) return '模拟商业需求需要填写项目或品牌。';
+      if (payload.type === 'commerce' && payload.budget <= 0) return '请填写大于 0 的虚拟预算。';
+      return '';
     };
-    state.notes.push(note);
-    persist();
-    logEvent('publish_demand', { demand_id: note.id, demand_type: type, zone_id: note.zone });
-    if (referenceVideo) logEvent('demand_asset_link', { demand_id: note.id, asset_id: referenceVideo.id, auto: true });
-    closeSheet();
-    renderCreations();
-    renderWorld();
-    say(`纸条钉在了${currentZoneName()}。想知道写了什么的人，自然会走过来。`);
-    showToast('纸条已出现在你脚边');
-  }));
+    $('#saveDemandDraft')?.addEventListener('click', () => {
+      const payload = collect();
+      if (!payload.title) return error.textContent = '至少填写标题后才能保存草稿。';
+      const draft = { ...payload, id: record?.id || `draft-${Date.now()}`, refAsset: referenceVideo?.id || record?.refAsset || null, updatedAt: fmtNow() };
+      const existing = state.demandDrafts.findIndex((item) => item.id === draft.id);
+      if (existing >= 0) state.demandDrafts[existing] = draft; else state.demandDrafts.push(draft);
+      logEvent('demand_draft_save', { draft_id: draft.id, demand_type: draft.type });
+      persist();
+      closeSheet();
+      showToast('需求草稿已保存，可在公告树继续编辑');
+    });
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const payload = collect();
+      const message = validate(payload);
+      if (message) return error.textContent = message;
+      const noteSpot = isPublished ? { wx: record.wx, wy: record.wy } : findOpenWorldSpot(state.wx, state.wy);
+      const note = {
+        ...(isPublished ? record : {}),
+        ...payload,
+        id: isPublished ? record.id : `n-${Date.now()}`,
+        by: state.profile.nickname || '路过的风',
+        owner: 'me',
+        status: record?.status || 'open',
+        wx: noteSpot.wx,
+        wy: noteSpot.wy,
+        zone: isPublished ? record.zone : zoneAt(state.wx, state.wy).id,
+        refAsset: referenceVideo?.id || record?.refAsset || null,
+        responses: record?.responses || [],
+        createdAt: record?.createdAt || '刚刚',
+        updatedAt: fmtNow(),
+      };
+      let publicDemand;
+      try {
+        const result = isPublicRecord
+          ? await window.ZhereService.publicWorld.updateDemand(note.id, note)
+          : await window.ZhereService.publicWorld.createDemand(note);
+        publicDemand = result.demand;
+      } catch (serviceError) {
+        return error.textContent = serviceError.message || '公共需求发布失败，请稍后重试。';
+      }
+      state.publicDemands = [...state.publicDemands.filter((item) => item.id !== publicDemand.id), publicDemand];
+      state.notes = state.notes.filter((item) => item.id !== publicDemand.id);
+      state.demandDrafts = state.demandDrafts.filter((draft) => draft.id !== record?.id);
+      logEvent(isPublished ? 'demand_update' : 'publish_demand', { demand_id: publicDemand.id, demand_type: publicDemand.type, zone_id: publicDemand.zone });
+      if (referenceVideo && !isPublished) logEvent('demand_asset_link', { demand_id: note.id, asset_id: referenceVideo.id, auto: true });
+      persist();
+      closeSheet();
+      renderCreations();
+      renderWorld();
+      say(isPublished ? '纸条上的内容已经更新，原来的回应仍在。' : `纸条钉在了${currentZoneName()}。想知道写了什么的人，自然会走过来。`);
+      showToast(isPublished ? '需求已更新' : '纸条已出现在当前位置附近');
+    });
+  });
 }
 
 function showBoard() {
-  const allNotes = [...systemNotes, ...state.notes];
+  const allNotes = allWorldNotes().map((note) => note.id.startsWith('sys-') ? { status: 'open', owner: 'system', ...note } : note);
+  let activeTab = 'all';
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">公告树</h2>
-      <p class="sheet-subtitle">所有留在世界里的纸条都挂在风的记忆里。你可以在这里找，也可以去它们所在的位置。想留新纸条，在世界任意地方按 N。</p>
+      <p class="sheet-subtitle">寻找公开需求，也管理自己的纸条与草稿。关闭需求不会删除已有回应，素材关系会继续保留。</p>
+      <div class="board-tabs" role="tablist" aria-label="公告树分类">
+        <button class="board-tab is-active" role="tab" aria-selected="true" data-board-tab="all">开放需求</button>
+        <button class="board-tab" role="tab" aria-selected="false" data-board-tab="mine">我的需求</button>
+        <button class="board-tab" role="tab" aria-selected="false" data-board-tab="drafts">草稿 ${state.demandDrafts.length}</button>
+        <button class="board-tab" role="tab" aria-selected="false" data-board-tab="closed">已关闭</button>
+        <button class="board-tab" role="tab" aria-selected="false" data-board-tab="media">素材库</button>
+      </div>
       <label class="search-box">搜索纸条或视频
         <input id="boardSearch" placeholder="例如：海、猫、咖啡" />
       </label>
+      <div class="board-summary" id="boardSummary"></div>
       <div class="list-stack" id="boardResults"></div>
+      <div class="media-actions"><button class="primary-button" id="boardNewDemand">在当前位置发布需求</button></div>
     </div>
   `, () => {
     const render = () => {
       const box = $('#boardResults', sheet);
       const query = ($('#boardSearch', sheet).value || '').trim().toLowerCase();
       const rows = [];
-      allNotes.forEach((note, index) => {
-        if (query && !`${note.title}${note.description || ''}`.toLowerCase().includes(query)) return;
-        rows.push(`<div class="list-row"><div><b>${escapeHtml(note.title)}</b><span>${note.type === 'commerce' ? '模拟商业需求' : '个人需求'} · ${escapeHtml(note.by || '我')} · ${escapeHtml(zoneAt(note.wx, note.wy).name)}</span></div><div class="row-actions"><button class="text-button" data-open-note="${index}">打开</button><button class="text-button" data-goto-note="${index}">定位</button></div></div>`);
-      });
-      worldVideos.concat(state.published).forEach((video) => {
-        if (!query) return;
-        if (!`${video.title}${(video.tags || []).join('')}`.toLowerCase().includes(query)) return;
-        rows.push(`<div class="list-row"><div><b>${escapeHtml(video.title)}</b><span>公共视频 · ${escapeHtml(zoneAt(video.wx, video.wy).name)}</span></div><button class="text-button" data-goto-video="${video.id}">定位</button></div>`);
-      });
+      if (activeTab === 'drafts') {
+        state.demandDrafts.forEach((draft) => {
+          if (query && !`${draft.title}${draft.description || ''}`.toLowerCase().includes(query)) return;
+          rows.push(`<div class="list-row"><div><b>${escapeHtml(draft.title)}</b><span>草稿 · ${draft.type === 'commerce' ? '模拟商业需求' : '个人需求'} · ${escapeHtml(draft.updatedAt || '')}</span></div><div class="row-actions"><button class="text-button" data-edit-draft="${escapeHtml(draft.id)}">继续编辑</button><button class="text-button" data-delete-draft="${escapeHtml(draft.id)}">删除</button></div></div>`);
+        });
+      } else if (activeTab === 'media') {
+        allAssets().forEach((video) => {
+          if (query && !`${video.title}${(video.tags || []).join('')}`.toLowerCase().includes(query)) return;
+          rows.push(`<div class="list-row"><div><b>${escapeHtml(video.title)}</b><span>公共素材 · ${escapeHtml(videoLocationLabel(video))}${video.catalogOnly ? ' · 今日未摆放' : ''}</span></div><div class="row-actions"><button class="text-button" data-open-video="${escapeHtml(video.id)}">打开</button>${video.catalogOnly ? '' : `<button class="text-button" data-goto-video="${escapeHtml(video.id)}">定位</button>`}</div></div>`);
+        });
+      } else {
+        allNotes.filter((note) => {
+          if (activeTab === 'all') return note.status !== 'closed';
+          if (activeTab === 'mine') return note.owner === 'me' && note.status !== 'closed';
+          return note.owner === 'me' && note.status === 'closed';
+        }).forEach((note) => {
+          if (query && !`${note.title}${note.description || ''}${note.projectName || ''}`.toLowerCase().includes(query)) return;
+          rows.push(`<div class="list-row"><div><b>${escapeHtml(note.title)}</b><span>${note.type === 'commerce' ? '模拟商业需求' : '个人需求'} · ${escapeHtml(note.by || '我')} · ${escapeHtml(zoneAt(note.wx, note.wy).name)} · ${note.status === 'closed' ? '已关闭' : `${responsesForNote(note).length} 个回应`}</span></div><div class="row-actions"><button class="text-button" data-open-note="${escapeHtml(note.id)}">打开</button><button class="text-button" data-goto-note="${escapeHtml(note.id)}">定位</button></div></div>`);
+        });
+      }
+      $('#boardSummary').textContent = `${rows.length} 条结果 · ${activeTab === 'drafts' ? '草稿不会公开' : activeTab === 'media' ? '素材关系不会随每日地图轮换消失' : '任何公开需求都可以忽略'}`;
       box.innerHTML = rows.length ? rows.join('') : '<div class="empty-state">没有匹配的纸条或视频。</div>';
-      $$('[data-open-note]', box).forEach((button) => button.addEventListener('click', () => showNoteDetail(allNotes[Number(button.dataset.openNote)])));
+      $$('[data-open-note]', box).forEach((button) => button.addEventListener('click', () => showNoteDetail(allNotes.find((note) => note.id === button.dataset.openNote))));
       $$('[data-goto-note]', box).forEach((button) => button.addEventListener('click', () => {
-        const note = allNotes[Number(button.dataset.gotoNote)];
+        const note = allNotes.find((candidate) => candidate.id === button.dataset.gotoNote);
         state.wx = note.wx;
         state.wy = note.wy + 84;
         closeSheet();
         renderWorld();
         showToast('已在纸条旁');
       }));
+      $$('[data-open-video]', box).forEach((button) => button.addEventListener('click', () => showVideo(findVideoById(button.dataset.openVideo))));
       $$('[data-goto-video]', box).forEach((button) => button.addEventListener('click', () => {
-        const video = allVideos().find((candidate) => candidate.id === button.dataset.gotoVideo);
+        const video = findVideoById(button.dataset.gotoVideo);
         if (!video) return;
         state.wx = video.wx;
         state.wy = video.wy + 84;
@@ -1335,9 +3087,91 @@ function showBoard() {
         renderWorld();
         setTimeout(() => showVideo(video), 80);
       }));
+      $$('[data-edit-draft]', box).forEach((button) => button.addEventListener('click', () => {
+        const draft = state.demandDrafts.find((item) => item.id === button.dataset.editDraft);
+        showLeaveNote(findVideoById(draft?.refAsset), draft);
+      }));
+      $$('[data-delete-draft]', box).forEach((button) => button.addEventListener('click', () => {
+        state.demandDrafts = state.demandDrafts.filter((item) => item.id !== button.dataset.deleteDraft);
+        persist();
+        render();
+        showToast('草稿已删除');
+      }));
     };
+    $$('[data-board-tab]', sheet).forEach((button) => button.addEventListener('click', () => {
+      activeTab = button.dataset.boardTab;
+      $$('[data-board-tab]', sheet).forEach((tab) => { const active = tab === button; tab.classList.toggle('is-active', active); tab.setAttribute('aria-selected', String(active)); });
+      render();
+    }));
     $('#boardSearch').addEventListener('input', render);
+    $('#boardNewDemand').addEventListener('click', () => showLeaveNote());
     render();
+  });
+}
+
+function showPublishAnywhere() {
+  if (state.worldMode === 'cottage') {
+    openSheet(`
+      <div class="sheet-inner publish-sheet">
+        <h2 class="sheet-title" id="sheetTitle" tabindex="-1">公共内容要留在公域</h2>
+        <p class="sheet-subtitle">这里是你的私人地块。推门回到公域后，走到任何位置都能发布视频或需求。</p>
+        <div class="media-actions"><button class="primary-button" id="publishExitHome">回到门外发布</button></div>
+      </div>
+    `, () => $('#publishExitHome').addEventListener('click', () => { closeSheet(); exitCottage(); setTimeout(showPublishAnywhere, 120); }));
+    return;
+  }
+  const referenceVideo = state.nearest?.type === 'video' ? state.nearest.video : null;
+  openSheet(`
+    <div class="sheet-inner publish-sheet">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">随地发布</h2>
+      <p class="sheet-subtitle">你正站在${escapeHtml(currentZoneName())}。发布内容会落在当前位置附近的空位，不需要先去固定建筑。${referenceVideo ? `这里靠近《${escapeHtml(referenceVideo.title)}》，新需求会自动引用它。` : ''}</p>
+      <div class="publish-choice-row">
+        <button class="publish-choice is-active" type="button" aria-pressed="true"><span class="publish-choice-icon video-choice-icon" aria-hidden="true"></span><b>发布视频</b><small>上传新素材，或从背包选择</small></button>
+        <button class="publish-choice" id="publishDemandHere" type="button" aria-pressed="false"><span class="publish-choice-icon note-choice-icon" aria-hidden="true"></span><b>发布需求</b><small>在当前位置留下一张公开纸条</small></button>
+      </div>
+      <form class="quick-upload-form" id="quickUploadForm">
+        <h3>上传并直接发布</h3>
+        <div class="field-grid">
+          <label>视频标题<input name="title" required maxlength="48" placeholder="给这段素材一个名字" /></label>
+          <label>素材文件（可选）<input name="file" type="file" accept="video/*" /></label>
+        </div>
+        <label>一句话说明<input name="description" maxlength="80" placeholder="希望别人从什么角度看它" /></label>
+        <p class="form-error" id="quickUploadError" role="alert"></p>
+        <button class="primary-button" type="submit">上传并发布到当前位置</button>
+      </form>
+      <div class="note-section"><h3>从背包发布</h3>
+        <div class="list-stack">${state.bag.length ? state.bag.map((item, index) => `<div class="list-row"><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.description || item.fileName || '示例素材')}</span></div><button class="paper-button" type="button" data-quick-publish="${index}">发布在这里</button></div>`).join('') : '<div class="empty-state">背包里没有待发布素材。可以直接用上面的表单上传并发布。</div>'}</div>
+      </div>
+    </div>
+  `, () => {
+    $('#publishDemandHere').addEventListener('click', () => showLeaveNote(referenceVideo));
+    $$('[data-quick-publish]', sheet).forEach((button) => button.addEventListener('click', () => publishBagItem(Number(button.dataset.quickPublish))));
+    $('#quickUploadForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const title = form.elements.title.value.trim();
+      if (!title) return $('#quickUploadError').textContent = '请填写视频标题。';
+      const file = form.elements.file.files?.[0] || null;
+      const fileError = validateMediaFile(file);
+      if (fileError) return $('#quickUploadError').textContent = fileError;
+      const submit = form.querySelector('[type="submit"]');
+      submit.disabled = true;
+      submit.textContent = '正在保存素材…';
+      const id = `u-${Date.now()}`;
+      const description = form.elements.description.value.trim();
+      let uploaded = null;
+      try { uploaded = await saveUploadFile(id, file, { title, description }); }
+      catch (error) {
+        submit.disabled = false;
+        submit.textContent = '上传并发布到当前位置';
+        return $('#quickUploadError').textContent = error.message || '视频上传失败，请稍后重试。';
+      }
+      state.bag.push({ id, title, description, fileName: file?.name || '', mime: file?.type || '', status: file ? 'stored-server' : 'metadata-only', mediaUrl: uploaded?.asset?.mediaUrl || '' });
+      const index = state.bag.length - 1;
+      persist();
+      logEvent('upload_to_bag', { title, source: 'publish_anywhere' });
+      publishBagItem(index);
+    });
   });
 }
 
@@ -1349,12 +3183,12 @@ function showWorkshop() {
       <form id="uploadForm">
         <label>标题<input name="title" required placeholder="给这段素材一个名字" /></label>
         <label>一句话说明<input name="description" placeholder="希望别人怎么看它" /></label>
-        <label>素材文件（可选）<input name="file" type="file" accept="video/*,image/*" /></label>
+        <label>素材文件（可选）<input name="file" type="file" accept="video/*" /><span class="field-help">支持浏览器可播放的视频格式，单个文件不超过 100MB。</span></label>
         <p class="form-error" id="uploadError"></p>
         <button class="primary-button" type="submit">放进背包</button>
       </form>
       <div class="note-section"><h3>背包里现有的素材</h3>
-        <div class="list-stack">${state.bag.map((item, index) => `<div class="list-row"><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.fileName || '示例素材')}</span></div><button class="text-button" data-publish-at="${index}">在脚下发布</button></div>`).join('')}</div>
+        <div class="list-stack">${state.bag.map((item, index) => `<div class="list-row"><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.fileName || '示例素材')}</span></div><button class="text-button" data-publish-at="${index}">发布到当前位置</button></div>`).join('')}</div>
       </div>
     </div>
   `, () => {
@@ -1364,9 +3198,21 @@ function showWorkshop() {
       const title = form.elements.title.value.trim();
       if (!title) return $('#uploadError').textContent = '请填写标题。';
       const file = form.elements.file.files?.[0] || null;
+      const fileError = validateMediaFile(file);
+      if (fileError) return $('#uploadError').textContent = fileError;
+      const submit = form.querySelector('[type="submit"]');
+      submit.disabled = true;
+      submit.textContent = '正在放进背包…';
       const id = `u-${Date.now()}`;
-      state.bag.push({ id, title, description: form.elements.description.value.trim(), fileName: file?.name || '', mime: file?.type || '', status: file ? 'stored-locally' : 'metadata-only' });
-      try { await saveUploadFile(id, file); } catch { state.bag[state.bag.length - 1].status = 'metadata-only'; }
+      const description = form.elements.description.value.trim();
+      let uploaded = null;
+      try { uploaded = await saveUploadFile(id, file, { title, description }); }
+      catch (error) {
+        submit.disabled = false;
+        submit.textContent = '放进背包';
+        return $('#uploadError').textContent = error.message || '视频上传失败，请稍后重试。';
+      }
+      state.bag.push({ id, title, description, fileName: file?.name || '', mime: file?.type || '', status: file ? 'stored-server' : 'metadata-only', mediaUrl: uploaded?.asset?.mediaUrl || '' });
       persist();
       logEvent('upload_to_bag', { title });
       closeSheet();
@@ -1384,11 +3230,11 @@ function showBag() {
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">背包</h2>
       <p class="sheet-subtitle">这里装着可以发布到世界的素材，和你的视频副本。走到哪里，就能在哪里发布。</p>
       <div class="note-section"><h3>待发布素材</h3>
-        <div class="list-stack">${state.bag.length ? state.bag.map((item, index) => `<div class="list-row"><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.description || item.fileName || '示例素材')}</span></div><button class="text-button" data-bag-publish="${index}">在脚下发布</button></div>`).join('') : '<div class="empty-state">背包空着。到共创台上传，或用示例素材体验发布。</div>'}</div>
+        <div class="list-stack">${state.bag.length ? state.bag.map((item, index) => `<div class="list-row"><div><b>${escapeHtml(item.title)}</b><span>${escapeHtml(item.description || item.fileName || '示例素材')}</span></div><button class="text-button" data-bag-publish="${index}">发布到当前位置</button></div>`).join('') : '<div class="empty-state">背包空着。到共创台上传，或用示例素材体验发布。</div>'}</div>
       </div>
       <div class="note-section"><h3>副本口袋（${state.copies.length}）</h3>
         <div class="list-stack">${state.copies.length ? state.copies.map((copy, index) => {
-          const video = allVideos().find((candidate) => candidate.id === copy.assetId);
+          const video = findVideoById(copy.assetId);
           return `<div class="list-row"><div><b>${escapeHtml(video ? video.title : '一段副本')}</b><span>竞价获得 · ${new Date(copy.acquiredAt).toLocaleDateString('zh-CN')}</span></div><button class="text-button" data-copy-goto="${index}">去小窝摆放</button></div>`;
         }).join('') : '<div class="empty-state">视频旁按 G 参与虚拟竞价，赢了才能获得副本。</div>'}</div>
       </div>
@@ -1403,34 +3249,29 @@ function showBag() {
   });
 }
 
-function publishBagItem(index) {
+async function publishBagItem(index) {
   const item = state.bag[index];
   if (!item) return;
-  state.bag.splice(index, 1);
   const publishId = item.id && item.id.startsWith('u-') ? item.id : `p-${Date.now()}`;
   const zone = zoneAt(state.wx, state.wy);
   let context = zone.name;
   const nearVideo = allVideos().find((video) => Math.hypot(state.wx - video.wx, state.wy - video.wy) < 420);
   if (nearVideo) context = `靠近《${nearVideo.title}》`;
-  state.published.push({
-    id: publishId,
-    title: item.title,
-    description: item.description || '',
-    fileName: item.fileName || '',
-    mime: item.mime || '',
-    source: 'user',
-    spawn_source: '我的发布',
-    wx: state.wx + 60,
-    wy: state.wy - 40,
-    zone: zone.id,
-    likes: 0,
-    dur: '—', res: '本地', license: '个人', price: 0,
-    comments: [],
-    exposureRoll: Math.random(),
-    at: fmtNow(),
-  });
+  const publishSpot = findOpenWorldSpot(state.wx, state.wy);
+  let result;
+  try {
+    result = await window.ZhereService.publicWorld.publishAsset({
+      id: publishId, title: item.title, description: item.description || '', mime: item.mime || '',
+      wx: publishSpot.wx, wy: publishSpot.wy, zone: zone.id,
+    });
+  } catch (error) {
+    return showToast(error.message || '公共素材发布失败，请稍后重试');
+  }
+  state.bag.splice(index, 1);
+  state.publicAssets = [...state.publicAssets.filter((asset) => asset.id !== result.asset.id), result.asset];
+  state.published = state.published.filter((asset) => asset.id !== result.asset.id);
   persist();
-  logEvent('publish_asset', { asset_id: publishId, asset_world_position: { wx: Math.round(state.wx), wy: Math.round(state.wy) }, asset_zone: zone.id, publish_context: context, publish_timestamp: new Date().toISOString() });
+  logEvent('publish_asset', { asset_id: publishId, asset_world_position: { wx: Math.round(publishSpot.wx), wy: Math.round(publishSpot.wy) }, asset_zone: zone.id, publish_context: context, publish_timestamp: new Date().toISOString() });
   closeSheet();
   renderScreens();
   renderWorld();
@@ -1441,16 +3282,29 @@ function publishBagItem(index) {
 function enterCottage() {
   state.worldMode = 'cottage';
   worldStage.classList.add('is-cottage');
-  worldArt.hidden = false;
+  worldArt.hidden = true;
+  homesteadLayer.hidden = false;
   cottageExit.hidden = false;
   zoneName.textContent = currentZoneName();
   renderPlaced();
+  renderHomestead();
+  state.nearest = null;
+  nearby.hidden = true;
+  updateNearby();
   persist();
   logEvent('space_enter', { space: 'personal' });
-  say(`这里是${state.profile.spaceName || '你的小窝'}。世界上唯一可以随意摆放副本的地方。`, '木秋', [
-    { label: '打开布置簿', handler: showPersonalSpace },
-    { label: '放一枚副本', handler: placeCopy },
+  say(`这里是${state.profile.spaceName || '你的小窝'}。清地、种植和建造都会留在这里；公共世界不会因为采集而被你占有。`, '木秋', [
+    { label: '打开建设簿', handler: showHomesteadPanel },
+    { label: '布置视频副本', handler: showPersonalSpace },
   ]);
+}
+
+function goToHomestead() {
+  if (state.worldMode === 'cottage') return showHomesteadPanel();
+  state.wx = objectTargets.cottage.wx;
+  state.wy = objectTargets.cottage.wy + 70;
+  renderWorld();
+  setTimeout(enterCottage, 70);
 }
 
 function exitCottage() {
@@ -1458,6 +3312,7 @@ function exitCottage() {
   state.carryPlaced = null;
   worldStage.classList.remove('is-cottage');
   worldArt.hidden = true;
+  homesteadLayer.hidden = true;
   cottageExit.hidden = true;
   persist();
   renderWorld();
@@ -1468,7 +3323,7 @@ function exitCottage() {
 function placeCopy() {
   if (state.worldMode !== 'cottage') return showToast('回到你的小屋才能摆放副本');
   if (!state.copies.length) return showToast('口袋里没有副本。视频旁按 G 参与竞价');
-  if (state.placed.length >= HOME_CAPACITY) return showToast('小窝摆满了。先在布置簿里收起一些');
+  if (state.placed.length >= homeCapacity()) return showToast('小窝摆满了。先在布置簿里收起一些');
   const copy = state.copies.shift();
   state.placed.push({ type: 'copy', assetId: copy.assetId, x: Math.round(state.cottageX), y: Math.round(state.cottageY), since: copy.acquiredAt });
   renderPlaced();
@@ -1498,7 +3353,7 @@ function pickUpPlaced(index) {
 
 function combineCopies() {
   if (state.copies.length < 2) return showToast('至少需要两枚副本');
-  if (state.placed.length >= HOME_CAPACITY) return showToast('小窝摆满了。先在布置簿里收起一些');
+  if (state.placed.length >= homeCapacity()) return showToast('小窝摆满了。先在布置簿里收起一些');
   const parts = state.copies.splice(0, 2).map((copy) => copy.assetId);
   state.placed.push({ type: 'combo', parts, assetId: parts[0], x: 22, y: 42, since: Date.now() });
   renderPlaced();
@@ -1511,7 +3366,7 @@ function combineCopies() {
 function showPersonalSpace() {
   const placedList = state.placed.length
     ? state.placed.map((item, index) => {
-      const video = allVideos().find((candidate) => candidate.id === item.assetId);
+      const video = findVideoById(item.assetId);
       const kept = Math.max(0, Math.floor((Date.now() - (item.since || Date.now())) / 60000));
       return `<div class="bid-row"><span>${item.type === 'combo' ? '组合的副本' : '《' + escapeHtml(video ? video.title : '副本') + '》'} · ${Math.round(item.x)},${Math.round(item.y)}</span><b>已留 ${kept} 分钟</b></div>`;
     }).join('')
@@ -1519,7 +3374,7 @@ function showPersonalSpace() {
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(state.profile.spaceName || '我的小窝')}布置簿</h2>
-      <p class="sheet-subtitle">小窝最多同时摆放 ${HOME_CAPACITY} 个对象。在小窝里点击副本拿起来，点击地面放下；长期保留的副本会被记录为稳定偏好。</p>
+      <p class="sheet-subtitle">小窝目前可以摆放 ${homeCapacity()} 个对象。在小窝里点击副本拿起来，点击地面放下；扩建小屋还能增加容量。</p>
       <div class="choice-grid">
         <button class="choice-button" data-rug="teal"><b>灰绿毯</b><span>安静的底色</span></button>
         <button class="choice-button" data-rug="brick"><b>赭红毯</b><span>只改变自己的空间</span></button>
@@ -1544,7 +3399,7 @@ function showPersonalSpace() {
 }
 
 function copyTitle(assetId) {
-  const video = allVideos().find((candidate) => candidate.id === assetId);
+  const video = findVideoById(assetId);
   return video ? video.title : '一段副本';
 }
 
@@ -1737,7 +3592,7 @@ function showMixTable() {
     });
     const save = $('#mixSave', sheet);
     if (save) save.addEventListener('click', () => {
-      if (state.placed.length >= HOME_CAPACITY) return showToast('小窝摆满了，先收起一些');
+      if (state.placed.length >= homeCapacity()) return showToast('小窝摆满了，先收起一些');
       const parts = [...state.mix];
       parts.forEach((assetId) => {
         const idx = state.copies.findIndex((copy) => copy.assetId === assetId);
@@ -1898,7 +3753,7 @@ function showFrame() {
             <button class="primary-button" type="submit">留下</button>
           </form>
         </div>
-      `, () => $('#frameWordForm').addEventListener('submit', (event) => {
+      `, () => $('#frameWordForm').addEventListener('submit', async (event) => {
         event.preventDefault();
         const text = event.currentTarget.elements.text.value.trim();
         if (!text) return;
@@ -1915,7 +3770,10 @@ function showFrame() {
           responses: [],
           createdAt: '刚刚',
         };
-        state.notes.push(note);
+        try {
+          const result = await window.ZhereService.publicWorld.createDemand(note);
+          state.publicDemands = [...state.publicDemands.filter((item) => item.id !== result.demand.id), result.demand];
+        } catch (error) { return showToast(error.message || '纸条发布失败'); }
         persist();
         logEvent('publish_demand', { demand_id: note.id, demand_type: 'personal', source: 'blank_frame' });
         closeSheet();
@@ -2088,7 +3946,7 @@ function openBottle() {
   `, () => {
     const go = $('#bottleGo', sheet);
     if (go) go.addEventListener('click', () => {
-      const video = allVideos().find((candidate) => candidate.id === content.asset_id);
+      const video = findVideoById(content.asset_id);
       if (!video) return closeSheet();
       state.wx = video.wx;
       state.wy = video.wy + 84;
@@ -2122,9 +3980,13 @@ function openBottle() {
       closeSheet();
       showToast('瓶子顺着潮水漂远了');
     });
-    $('#bottleReplyForm').addEventListener('submit', (event) => {
+    $('#bottleReplyForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const text = event.currentTarget.elements.reply.value.trim();
+      if (text) {
+        try { await window.ZhereService.publicWorld.saveRecord({ kind: 'bottle_reply', payload: { text } }); }
+        catch (error) { return showToast(error.message || '回信保存失败'); }
+      }
       logEvent('bottle_reply', { length: text.length });
       spawnBottle();
       persist();
@@ -2137,7 +3999,8 @@ function openBottle() {
 
 function showSeabench() {
   logEvent('bench_sit');
-  const recent = [...state.benchMessages].slice(-3).reverse();
+  const shared = state.publicRecords.filter((record) => record.kind === 'bench_message').map((record) => ({ id: record.id, owner: record.owner, name: record.name, text: record.payload?.text, createdAt: record.createdAt }));
+  const recent = [...state.benchMessages, ...shared].sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || ''))).slice(-3).reverse();
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">你坐下了</h2>
@@ -2154,12 +4017,14 @@ function showSeabench() {
       </form>
     </div>
   `, () => {
-    $('#benchForm').addEventListener('submit', (event) => {
+    $('#benchForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const text = event.currentTarget.elements.line.value.trim();
       if (!text) return;
-      state.benchMessages.push({ name: state.profile.nickname || '路过的风', text });
-      if (state.benchMessages.length > 10) state.benchMessages = state.benchMessages.slice(-10);
+      try {
+        const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'bench_message', payload: { text } });
+        state.publicRecords.push(result.record);
+      } catch (error) { return showToast(error.message || '留言保存失败'); }
       persist();
       logEvent('bench_reply', { length: text.length });
       closeSheet();
@@ -2170,20 +4035,28 @@ function showSeabench() {
 }
 
 function showNeighbor() {
+  const followRecord = state.publicRecords.find((record) => record.kind === 'follow' && record.owner === 'me' && record.payload?.targetSpaceId === 'late-branch-repair');
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">晚枝修理所</h2>
       <p class="sheet-subtitle">一个玩家自愿公开的小窝。你只能看和回应，不能移动对方的副本。</p>
       <div class="video-frame"><span class="video-status">邻居空间预览</span></div>
       <div class="media-actions">
-        <button class="primary-button" id="followButton">${state.following ? '取消关注' : '关注这个空间'}</button>
+        <button class="primary-button" id="followButton">${followRecord ? '取消关注' : '关注这个空间'}</button>
       </div>
     </div>
   `, () => {
-    $('#followButton').addEventListener('click', () => {
-      state.following = !state.following;
-      persist();
-      logEvent(state.following ? 'follow' : 'unfollow', { space_id: 'late-branch-repair' });
+    $('#followButton').addEventListener('click', async () => {
+      try {
+        if (followRecord) {
+          await window.ZhereService.publicWorld.deleteRecord(followRecord.id);
+          state.publicRecords = state.publicRecords.filter((record) => record.id !== followRecord.id);
+        } else {
+          const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'follow', payload: { targetSpaceId: 'late-branch-repair' } });
+          state.publicRecords.push(result.record);
+        }
+      } catch (error) { return showToast(error.message || '关注状态保存失败'); }
+      logEvent(followRecord ? 'unfollow' : 'follow', { space_id: 'late-branch-repair' });
       showNeighbor();
     });
   });
@@ -2226,7 +4099,119 @@ function showAnomaly() {
     closeSheet();
     const messages = { restore: '你把颜色留在了自己的物件上。', replace: '世界安静了一点。', ignore: '你选择继续散步，世界没有催促你。', mix: '颜色们暂时达成了不稳定的和平。' };
     say(messages[state.eventChoice]);
-  })));
+  }))); 
+}
+
+const GUIDE_CATEGORIES = {
+  start: '先学会这五件事',
+  landmarks: '世界地标',
+  discoveries: '路上会遇见',
+  homestead: '个人地块',
+};
+
+function guideIdForNearest() {
+  if (state.worldMode === 'cottage') return 'plots';
+  if (!state.nearest) return null;
+  if (state.nearest.type === 'object') return state.nearest.id;
+  const ids = { video: 'video', note: 'note', resource: 'resource', tagplant: 'tagplant', bottle: 'bottle', nameless: 'nameless' };
+  return ids[state.nearest.type] || null;
+}
+
+function guideStatus(item) {
+  if (!item.target) return item.key ? `快捷键 ${item.key}` : '随时可以了解';
+  const target = objectTargets[item.target];
+  const distance = Math.round(Math.hypot(target.wx - state.wx, target.wy - state.wy) / 10);
+  const visited = state.discoveredZones.includes(zoneAt(target.wx, target.wy).id);
+  return `${visited ? '到过这片区域' : '尚未走到附近'} · 约 ${distance} 步`;
+}
+
+function showWorldGuide(initialCategory = 'start', focusId = null) {
+  if (!state.guideIntroSeen) {
+    state.guideIntroSeen = true;
+    persist();
+  }
+  const focused = WORLD_GUIDE_ITEMS.find((item) => item.id === focusId);
+  let activeCategory = focused?.category || initialCategory;
+  openSheet(`
+    <div class="sheet-inner world-guide">
+      <header class="guide-heading">
+        <div><h2 class="sheet-title" id="sheetTitle" tabindex="-1">世界图鉴</h2><p>这里不是开发设计稿，而是玩家随身携带的说明书。看到什么不明白，就查它能做什么、怎么操作，再决定要不要过去。</p></div>
+        <div class="guide-compass" aria-hidden="true"><i></i><span></span></div>
+      </header>
+      <section class="guide-now" id="guideNow"></section>
+      <div class="guide-workspace">
+        <nav class="guide-categories" aria-label="图鉴分类">
+          ${Object.entries(GUIDE_CATEGORIES).map(([id, label]) => `<button type="button" data-guide-category="${id}">${label}</button>`).join('')}
+          <button type="button" data-guide-rules>世界基本规则</button>
+        </nav>
+        <div class="guide-content">
+          <label class="guide-search">搜索图鉴<input id="guideSearch" type="search" placeholder="例如：竞价、纸条、交换箱、种植" autocomplete="off" /></label>
+          <div class="guide-result-note" id="guideResultNote"></div>
+          <div class="guide-entries" id="guideEntries"></div>
+        </div>
+      </div>
+    </div>
+  `, () => {
+    const nearestGuideId = guideIdForNearest();
+    const nearestItem = WORLD_GUIDE_ITEMS.find((item) => item.id === nearestGuideId);
+    $('#guideNow').innerHTML = nearestItem
+      ? `<div><span class="guide-symbol guide-${nearestItem.category}" aria-hidden="true"><i></i></span><p><small>你现在靠近</small><b>${escapeHtml(nearestItem.title)}</b><span>${escapeHtml(nearestItem.summary)}</span></p></div><button class="paper-button" type="button" data-guide-focus="${nearestItem.id}">查看这一项</button>`
+      : `<div><span class="guide-symbol guide-start" aria-hidden="true"><i></i></span><p><small>你现在位于</small><b>${escapeHtml(currentZoneName())}</b><span>附近没有必须互动的对象。可以继续走，或先从五件基本动作开始。</span></p></div><button class="paper-button" type="button" data-guide-focus="walk">从行走开始</button>`;
+    const renderGuide = () => {
+      const query = $('#guideSearch').value.trim().toLowerCase();
+      const items = WORLD_GUIDE_ITEMS.filter((item) => {
+        const inCategory = query || item.category === activeCategory;
+        return inCategory && (!query || `${item.title}${item.summary}${item.how}${item.key || ''}`.toLowerCase().includes(query));
+      });
+      $$('[data-guide-category]', sheet).forEach((button) => {
+        const selected = button.dataset.guideCategory === activeCategory && !query;
+        button.classList.toggle('is-active', selected);
+        button.setAttribute('aria-current', selected ? 'page' : 'false');
+      });
+      $('#guideResultNote').textContent = query ? `在全部图鉴中找到 ${items.length} 项` : `${GUIDE_CATEGORIES[activeCategory]} · ${items.length} 项`;
+      $('#guideEntries').innerHTML = items.length ? items.map((item) => `
+        <article class="guide-entry ${item.id === focusId ? 'is-focused' : ''}" data-guide-entry="${item.id}">
+          <span class="guide-symbol guide-${item.category}" aria-hidden="true"><i></i></span>
+          <div class="guide-entry-copy"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.summary)}</p><dl><div><dt>怎么做</dt><dd>${escapeHtml(item.how)}</dd></div><div><dt>当前状态</dt><dd>${escapeHtml(guideStatus(item))}</dd></div></dl></div>
+          <div class="guide-entry-actions">${item.target ? `<button class="primary-button" type="button" data-guide-target="${item.target}">带我去</button>` : ''}${item.action ? `<button class="paper-button" type="button" data-guide-action="${item.action}">现在试试</button>` : ''}</div>
+        </article>
+      `).join('') : '<div class="guide-empty"><b>没有找到这件东西</b><p>可以换一个更短的词，例如“视频”“地块”或“交换”。</p><button class="text-button" id="guideClearSearch" type="button">清空搜索</button></div>';
+      $$('[data-guide-target]', sheet).forEach((button) => button.onclick = () => travelFromGuide(button.dataset.guideTarget));
+      $$('[data-guide-action]', sheet).forEach((button) => button.onclick = () => runGuideAction(button.dataset.guideAction));
+      $('#guideClearSearch')?.addEventListener('click', () => { $('#guideSearch').value = ''; renderGuide(); $('#guideSearch').focus(); });
+      if (focusId) requestAnimationFrame(() => $(`[data-guide-entry="${focusId}"]`, sheet)?.scrollIntoView({ block: 'center' }));
+    };
+    $$('[data-guide-category]', sheet).forEach((button) => button.addEventListener('click', () => { activeCategory = button.dataset.guideCategory; $('#guideSearch').value = ''; focusId = null; renderGuide(); }));
+    $('[data-guide-rules]', sheet).addEventListener('click', showAbout);
+    $('[data-guide-focus]', sheet).addEventListener('click', (event) => {
+      focusId = event.currentTarget.dataset.guideFocus;
+      activeCategory = WORLD_GUIDE_ITEMS.find((item) => item.id === focusId)?.category || 'start';
+      $('#guideSearch').value = '';
+      renderGuide();
+    });
+    $('#guideSearch').addEventListener('input', renderGuide);
+    renderGuide();
+  });
+}
+
+function travelFromGuide(targetId) {
+  const target = objectTargets[targetId];
+  if (!target) return showToast('这处地点暂时无法导航');
+  closeSheet();
+  if (targetId === 'cottage') return goToHomestead();
+  if (state.worldMode === 'cottage') exitCottage();
+  state.wx = target.wx;
+  state.wy = target.wy + 72;
+  persist();
+  renderWorld();
+  logEvent('guide_travel', { target_id: targetId });
+  showToast(`沿着图鉴的路线，来到了「${target.label}」附近`);
+}
+
+function runGuideAction(action) {
+  if (action === 'journal') return showJournal();
+  if (action === 'publish') return showPublishAnywhere();
+  if (action === 'home') { closeSheet(); return goToHomestead(); }
 }
 
 function showAbout() {
@@ -2262,10 +4247,11 @@ function showFavorites() {
       const fav = state.favorites[Number(button.dataset.openFavorite)];
       if (!fav) return;
       const found = fav.type === 'media'
-        ? allVideos().find((video) => video.id === fav.id)
-        : [...systemNotes, ...state.notes].find((note) => note.id === fav.id);
+        ? findVideoById(fav.id)
+        : allWorldNotes().find((note) => note.id === fav.id);
       if (!found) { closeSheet(); return showToast('它已经不在世界里了'); }
       if (fav.type === 'demand') { closeSheet(); showNoteDetail(found); return; }
+      if (found.catalogOnly || !Number.isFinite(found.wx)) { showVideo(found); return; }
       state.wx = found.wx;
       state.wy = found.wy + 84;
       closeSheet();
@@ -2341,7 +4327,10 @@ function showLedger() {
 
 function showHelpFeedback() {
   const faq = [
-    ['怎么发布视频？', '共创台上传（或直接用背包里的示例素材），按 B 打开背包，在世界任意位置点“在脚下发布”。'],
+    ['怎么发布视频或需求？', '走到世界任意位置按 P，或点击右下角“发布”，再选择发布视频或发布需求。'],
+    ['探索手账会记录什么？', '按 J 打开手账。真正打开过的素材、纸条、首次到达的地点和你建立的素材关系会自动留下足迹；它不是任务清单，也没有完成期限。'],
+    ['怎么把两段素材联系起来？', '打开任意素材，选择“对照另一段”，并排观察后选择此刻最接近的关系。保存的线会出现在素材页与探索手账里。'],
+    ['角色身边还能做什么？', '点击角色或按 Q 打开身边行动盘。它会根据附近素材、纸条、资源或设施改变提示。'],
     ['副本怎么获得？', '走近视频按 G 参与虚拟竞价，植物开花且你领先时，副本入口袋。回小窝按 F 摆放。'],
     ['收藏和购买有什么区别？', '收藏是“以后还想找到它”；只有竞价成功才获得可持有的副本。'],
     ['纸条是什么？', '在世界任意位置按 N 留下的需求；站在视频旁按 N 会自动引用那段视频。'],
@@ -2385,30 +4374,107 @@ function showPrivacy() {
       <div class="danger-zone"><b>虚拟声明</b><p>灵感币无现金价值，不可提现、不可兑换。NPC（如慢半拍的鹿）始终被明确标记。</p></div>
     </div>
   `, () => {
-    $('#researchToggle').addEventListener('change', (event) => { state.research = event.target.checked; persist(); logEvent('research_consent_change', { active: state.research }); showToast(state.research ? '已加入研究' : '已退出研究，账户仍保留'); });
-    $('#exportData').addEventListener('click', () => showToast(`已准备 ${state.rawEvents.length} 条原始事件的导出设计`));
-    $('#deleteData').addEventListener('click', () => { state.anonymized = true; state.research = false; persist(); logEvent('deletion_request'); showToast('删除申请已记录，行为数据将匿名化'); });
+    $('#researchToggle').addEventListener('change', async (event) => {
+      const input = event.currentTarget;
+      const previous = state.research;
+      const next = input.checked;
+      input.disabled = true;
+      try {
+        await window.ZhereService.privacy.updateConsent(next);
+        state.research = next;
+        persist();
+        logEvent('research_consent_change', { active: next, previous });
+        showToast(next ? '已加入研究' : '已退出研究，账户仍保留');
+      } catch (error) {
+        input.checked = previous;
+        showToast(error.message || '研究设置保存失败，请稍后重试');
+      } finally {
+        input.disabled = false;
+      }
+    });
+    $('#exportData').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const result = await window.ZhereService.privacy.exportData();
+        downloadJson(`zhere-account-data-${new Date().toISOString().slice(0, 10)}.json`, result.export);
+        logEvent('data_export', { count: result.export.raw_events?.length || 0, scope: 'server-account' });
+        showToast(`已导出 ${result.export.raw_events?.length || 0} 条服务端原始事件`);
+      } catch (error) {
+        showToast(error.message || '服务端数据导出失败');
+      } finally {
+        button.disabled = false;
+      }
+    });
+    $('#deleteData').addEventListener('click', showDataDeletionConfirm);
   });
 }
 
-function showAdmin() {
+function showDataDeletionConfirm() {
+  openSheet(`
+    <div class="sheet-inner confirm-sheet">
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">申请删除并匿名化？</h2>
+      <p class="sheet-subtitle">确认后会在服务端退出研究、移除账户标识并注销现有会话；不再能关联到你的公共世界行为会继续保留。</p>
+      <label class="check-label"><input type="checkbox" id="confirmAnonymize" /> 我理解公共世界中的匿名痕迹会保留，以维持素材关系和世界连续性</label>
+      <p class="form-error" id="deleteDataError" role="alert"></p>
+      <div class="media-actions"><button class="danger-button" id="confirmDeleteData" type="button">确认匿名化账户数据</button><button class="paper-button" id="cancelDeleteData" type="button">返回隐私设置</button></div>
+    </div>
+  `, () => {
+    $('#cancelDeleteData').addEventListener('click', showPrivacy);
+    $('#confirmDeleteData').addEventListener('click', async () => {
+      if (!$('#confirmAnonymize').checked) return $('#deleteDataError').textContent = '请先确认你理解匿名化后的保留范围。';
+      const button = $('#confirmDeleteData');
+      button.disabled = true;
+      $('#deleteDataError').textContent = '';
+      try {
+        logEvent('deletion_request', { scope: 'server-account', anonymized: true });
+        await window.ZhereService.events.flush({ keepalive: true });
+        await window.ZhereService.privacy.anonymize();
+        localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+        localStorage.removeItem(SESSION_KEY);
+        localStorage.removeItem(LEGACY_SESSION_KEY);
+        location.reload();
+      } catch (error) {
+        button.disabled = false;
+        $('#deleteDataError').textContent = error.message || '服务端匿名化失败，请稍后重试。';
+      }
+    });
+  });
+}
+
+async function showAdmin() {
+  if (!window.ZhereService?.user()?.admin) return showToast('当前账户没有公域维护权限');
+  openSheet(`<div class="sheet-inner"><h2 class="sheet-title" id="sheetTitle" tabindex="-1">公域维护簿</h2><div class="empty-state">正在读取服务端审核队列……</div></div>`);
+  let reports;
+  try { reports = (await window.ZhereService.admin.reports()).reports || []; }
+  catch (error) { return openSheet(`<div class="sheet-inner"><h2 class="sheet-title" id="sheetTitle" tabindex="-1">公域维护簿</h2><div class="danger-zone"><b>审核队列读取失败</b><p>${escapeHtml(error.message || '服务暂时不可用')}</p></div></div>`); }
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">公域维护簿</h2>
-      <p class="sheet-subtitle">管理员原型范围：内容审核、曝光补偿参数、实验分组、数据导出。不改变普通玩家的世界能力。</p>
+      <p class="sheet-subtitle">这里读取真实服务端举报队列。隐藏内容与处理举报分开执行，所有操作都经过管理员权限检查。</p>
       <div class="auction-price">
-        <div class="price-block"><span>本地原始事件</span><strong>${state.rawEvents.length}</strong> 条</div>
-        <div class="price-block"><span>曝光批次</span><strong>${countEvent('impression_batch')}</strong> 批</div>
+        <div class="price-block"><span>待处理举报</span><strong>${reports.filter((item) => item.status === 'open').length}</strong> 条</div>
+        <div class="price-block"><span>公共内容</span><strong>${state.publicAssets.length + state.publicDemands.length}</strong> 项</div>
       </div>
-      <div class="choice-grid">
-        <button class="choice-button admin-action"><b>调整曝光补偿</b><span>给低曝光内容更多出现机会</span></button>
-        <button class="choice-button admin-action"><b>审核公共世界</b><span>${state.published.length} 个玩家发布位置</span></button>
-        <button class="choice-button admin-action"><b>实验分组</b><span>open-world-v1 / mixed-biome</span></button>
-        <button class="choice-button admin-action"><b>导出原始事件</b><span>raw_event 与空衍生字段</span></button>
-      </div>
-      <div class="status-banner">正式实现时，所有持久化必须经过服务端 Feishu Repository，浏览器不持有飞书凭证。</div>
+      <div class="list-stack">${reports.length ? reports.map((report) => `<div class="list-row"><div><b>${escapeHtml(report.targetType)} · ${escapeHtml(report.targetId)}</b><span>${escapeHtml(report.reason)} · ${escapeHtml(report.reporterName || '匿名举报')} · ${escapeHtml(report.status)}</span></div><div class="row-actions">${report.status === 'open' ? `<button class="danger-button" data-admin-hide="${escapeHtml(report.id)}" data-target-type="${escapeHtml(report.targetType)}" data-target-id="${escapeHtml(report.targetId)}">隐藏并处理</button><button class="paper-button" data-admin-dismiss="${escapeHtml(report.id)}">驳回</button>` : ''}</div></div>`).join('') : '<div class="empty-state">当前没有举报记录。</div>'}</div>
     </div>
-  `, () => $$('.admin-action', sheet).forEach((button) => button.addEventListener('click', () => showToast(`已模拟：${button.querySelector('b').textContent}`))));
+  `, () => {
+    $$('[data-admin-hide]', sheet).forEach((button) => button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await window.ZhereService.admin.moderate(button.dataset.targetType, button.dataset.targetId, true);
+        await window.ZhereService.admin.updateReport(button.dataset.adminHide, 'resolved');
+        await syncPublicWorld({ render: true });
+        showAdmin();
+      } catch (error) { button.disabled = false; showToast(error.message || '审核操作失败'); }
+    }));
+    $$('[data-admin-dismiss]', sheet).forEach((button) => button.addEventListener('click', async () => {
+      button.disabled = true;
+      try { await window.ZhereService.admin.updateReport(button.dataset.adminDismiss, 'dismissed'); showAdmin(); }
+      catch (error) { button.disabled = false; showToast(error.message || '审核操作失败'); }
+    }));
+  });
 }
 
 function showProfileForm() {
@@ -2451,6 +4517,9 @@ function showProfilePanel(type) {
   scrim.hidden = false;
   const panels = {
     profile: showProfileForm,
+    board: showBoard,
+    journal: showJournal,
+    guide: showWorldGuide,
     favorites: showFavorites,
     data: showData,
     ledger: showLedger,
@@ -2461,11 +4530,60 @@ function showProfilePanel(type) {
   panels[type]?.();
 }
 
+function updateContextWheel() {
+  if (!contextWheel) return;
+  contextWheel.style.setProperty('--context-x', state.worldMode === 'cottage' ? state.cottageX : 50);
+  contextWheel.style.setProperty('--context-y', state.worldMode === 'cottage' ? state.cottageY : 52);
+  let title = state.worldMode === 'cottage' ? '在自己的地块上' : `站在${currentZoneName()}`;
+  let hint = state.worldMode === 'cottage' ? '查看土地、建筑与今天能做的事' : '看看脚边与视线里有什么';
+  if (state.nearest?.type === 'video') {
+    title = `靠近《${state.nearest.video.title}》`;
+    hint = '打开素材，回应、收藏或与另一段对照';
+  } else if (state.nearest?.type === 'note') {
+    title = `靠近纸条「${state.nearest.note.title}」`;
+    hint = '展开需求，回应或追问细节';
+  } else if (state.nearest?.type === 'resource') {
+    title = `脚边有${state.nearest.item.label}`;
+    hint = `收集会消耗 ${state.nearest.item.energy} 点体力`;
+  } else if (state.nearest?.type === 'object') {
+    title = state.nearest.label || '靠近一处公共设施';
+    hint = state.nearest.hint?.replace(/^E\s*/, '') || '打开这里的互动';
+  }
+  contextWheelTitle.textContent = title;
+  contextObserveHint.textContent = hint;
+}
+
+function closeContextWheel() {
+  if (!contextWheel || contextWheel.hidden) return;
+  contextWheel.hidden = true;
+  player.setAttribute('aria-expanded', 'false');
+}
+
+function toggleContextWheel(force) {
+  if (!contextWheel || !sheet.hidden || !profileDrawer.hidden || !entry.classList.contains('is-gone')) return;
+  const shouldOpen = typeof force === 'boolean' ? force : contextWheel.hidden;
+  if (!shouldOpen) return closeContextWheel();
+  stopMovement(true);
+  updateContextWheel();
+  contextWheel.hidden = false;
+  player.setAttribute('aria-expanded', 'true');
+  requestAnimationFrame(() => $('[data-context-action]', contextWheel)?.focus());
+}
+
+function runContextAction(action) {
+  closeContextWheel();
+  if (action === 'observe') return state.worldMode === 'cottage' ? showHomesteadPanel() : observe();
+  if (action === 'note') return state.worldMode === 'cottage' ? showPublishAnywhere() : showLeaveNote(state.nearest?.type === 'video' ? state.nearest.video : null);
+  if (action === 'publish') return showPublishAnywhere();
+  if (action === 'journal') return showJournal();
+}
+
 function observe() {
   if (!state.nearest) return say('附近没有特别的东西。海在更南边，林子在西边。');
   if (state.nearest.type === 'video') return showVideo(state.nearest.video);
   if (state.nearest.type === 'note') return showNoteDetail(state.nearest.note);
   if (state.nearest.type === 'tagplant') return pluckTagPlant(state.nearest.index);
+  if (state.nearest.type === 'resource') return gatherResource(state.nearest.item);
   if (state.nearest.type === 'nameless') return showNameless(state.nearest.region);
   if (state.nearest.type === 'bottle') return openBottle();
   const actions = {
@@ -2514,6 +4632,33 @@ function useSecondaryVerb() {
   showToast(state.carryTag ? '走到一段视频旁，按 F 把标签贴上去' : '这里没有可以互动的对象');
 }
 
+function resetMovementSample() {
+  movementSample = { fromX: state.wx, fromY: state.wy, distance: 0, startedAt: Date.now(), mode: state.worldMode };
+}
+
+function flushMovementSample(reason = 'interval') {
+  if (movementSample.distance < 0.5) return;
+  logEvent('move_sample', {
+    from_wx: Math.round(movementSample.fromX),
+    from_wy: Math.round(movementSample.fromY),
+    to_wx: Math.round(state.wx),
+    to_wy: Math.round(state.wy),
+    distance: Number(movementSample.distance.toFixed(2)),
+    duration_ms: Date.now() - movementSample.startedAt,
+    movement_kind: 'continuous',
+    world_mode: movementSample.mode,
+    reason,
+  });
+  resetMovementSample();
+}
+
+function endTelemetrySession(reason) {
+  if (!telemetryWorldEntered || telemetrySessionEnded) return;
+  flushMovementSample(reason);
+  telemetrySessionEnded = true;
+  logEvent('session_end', { reason, duration_ms: Date.now() - telemetryStartedAt });
+}
+
 function frame(now) {
   const dt = Math.min(32, now - state.lastTime);
   state.lastTime = now;
@@ -2532,9 +4677,11 @@ function frame(now) {
     } else {
       state.wx += dx;
       state.wy += dy;
+      movementSample.distance += Math.hypot(dx, dy);
     }
     player.classList.toggle('is-moving', Boolean(dx || dy));
     if (dx || dy) {
+      closeContextWheel();
       if (state.worldMode !== 'cottage') state.exploreSteps += Math.abs(dx) + Math.abs(dy);
       renderWorld();
     }
@@ -2554,6 +4701,11 @@ setInterval(() => {
 }, 8000);
 
 setInterval(() => {
+  if (!entry.classList.contains('is-gone')) return;
+  flushMovementSample('interval');
+}, 2000);
+
+setInterval(() => {
   const today = new Date().toDateString();
   const longKept = state.placed.filter((item) => Date.now() - (item.since || 0) > 24 * 3600 * 1000);
   if (longKept.length && state.lastKeptDay !== today) {
@@ -2565,23 +4717,33 @@ setInterval(() => {
 
 function enterWorld(mode) {
   entry.classList.add('is-gone');
+  entry.inert = true;
+  entry.setAttribute('aria-hidden', 'true');
   history.replaceState({}, '', appBasePath);
-  localStorage.setItem('zhere-v7-prototype-session', mode);
-  if (mode === 'register-mock') {
-    const data = new FormData($('#registerForm'));
-    state.profile.nickname = data.get('nickname') || state.profile.nickname;
-    state.profile.username = data.get('username') || state.profile.username;
-    state.profile.spaceName = data.get('spaceName') || state.profile.spaceName;
-    persist();
-  }
   refreshIdentity();
+  telemetryWorldEntered = true;
+  telemetrySessionEnded = false;
+  resetMovementSample();
   logEvent('session_start', { mode, consent_research: state.research, day_seed: daySeed });
+  syncPublicWorld({ render: true });
   setTimeout(() => { entry.hidden = true; }, 320);
-  say('往南走是海，往西是树林。你想留下的东西，走到哪里都可以留下。');
+  if (!state.guideIntroSeen) {
+    say('第一次来不用记住所有东西。先学会走路、观察和回家，就已经可以开始；看到不认识的物件，随时按“？”打开世界图鉴。', '木秋', [
+      { label: '先看五件基本动作', handler: () => showWorldGuide('start') },
+      { label: '我先自己走走', handler: () => { state.guideIntroSeen = true; persist(); say('好。地图没有边界，也没有必须完成的清单；不明白时按“？”就能回来查。'); } },
+    ]);
+  } else {
+    say('小屋旁有会再生的落枝和高草。收集材料能建设自己的地块；看到不认识的东西，按“？”查世界图鉴。');
+  }
+  if (matchMedia('(max-width: 820px)').matches && state.guideIntroSeen) {
+    dialogue.classList.add('is-collapsed');
+    $('#dialogueToggle').textContent = '展开木秋的对话';
+    $('#dialogueToggle').setAttribute('aria-expanded', 'false');
+  }
 }
 
 function showEntryPage(page) {
-  $$('.entry-page').forEach((node) => node.classList.toggle('is-active', node.dataset.entryPage === page));
+$$('.entry-page').forEach((node) => node.classList.toggle('is-active', node.dataset.entryPage === page));
   $('#entryBack').hidden = page === 'welcome';
   const route = page === 'forgot' ? 'forgot-password' : page;
   const path = page === 'welcome' ? appBasePath : `${appBasePath}#/${route}`;
@@ -2590,27 +4752,96 @@ function showEntryPage(page) {
 
 $$('[data-entry-target]').forEach((button) => button.addEventListener('click', () => showEntryPage(button.dataset.entryTarget)));
 $('#entryBack').addEventListener('click', () => showEntryPage('welcome'));
-$('#guestButton').addEventListener('click', () => enterWorld('design-guest'));
-$('#loginForm').addEventListener('submit', (event) => {
+$('#guestButton').addEventListener('click', async () => {
+  const button = $('#guestButton');
+  button.disabled = true;
+  try {
+    if (!serviceSessionAvailable) {
+      const result = await window.ZhereService.guest();
+      if (result.state) Object.assign(state, normalizeState(result.state));
+      state.rawEvents = Array.isArray(result.events) ? result.events.slice(-RAW_EVENT_CAP) : [];
+      applyPublicWorld(result.publicWorld, { render: false });
+    }
+    serviceSessionAvailable = true;
+    persist();
+    enterWorld('server-guest');
+  } catch (error) {
+    showToast(error.message || '服务端暂时不可用');
+    button.disabled = false;
+  }
+});
+$('#loginForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   if (!form.checkValidity()) return $('#loginError').textContent = '请填写有效账户和至少 8 位密码。';
-  enterWorld('login-mock');
+  const submit = form.querySelector('[type="submit"]');
+  submit.disabled = true;
+  $('#loginError').textContent = '';
+  try {
+    const data = new FormData(form);
+    const result = await window.ZhereService.login({ identity: data.get('identity'), password: data.get('password') });
+    serviceSessionAvailable = true;
+    if (result.state) Object.assign(state, normalizeState(result.state));
+    state.rawEvents = Array.isArray(result.events) ? result.events.slice(-RAW_EVENT_CAP) : [];
+    applyPublicWorld(result.publicWorld, { render: false });
+    if (result.user) {
+      state.profile.nickname = result.user.nickname || state.profile.nickname;
+      state.profile.username = result.user.username || state.profile.username;
+      state.profile.spaceName = result.user.spaceName || state.profile.spaceName;
+      state.research = Boolean(result.user.research);
+    }
+    persist();
+    logEvent('login', { method: 'password' });
+    enterWorld('server-login');
+  } catch (error) {
+    $('#loginError').textContent = error.message || '登录失败，请稍后重试。';
+    submit.disabled = false;
+  }
 });
-$('#registerForm').addEventListener('submit', (event) => {
+$('#registerForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const data = new FormData(form);
   if (!form.checkValidity()) return $('#registerError').textContent = '请完整填写字段，并确认年龄和条款。';
   if (data.get('password') !== data.get('confirmPassword')) return $('#registerError').textContent = '两次密码不一致。';
-  state.research = data.get('research') === 'on';
-  persist();
-  enterWorld('register-mock');
+  const submit = form.querySelector('[type="submit"]');
+  submit.disabled = true;
+  $('#registerError').textContent = '';
+  try {
+    const result = await window.ZhereService.register({
+      identity: data.get('identity'), username: data.get('username'), nickname: data.get('nickname'), spaceName: data.get('spaceName'),
+      password: data.get('password'), confirmPassword: data.get('confirmPassword'), ageConfirmed: data.get('age') === 'on',
+      agreeTerms: data.get('terms') === 'on', research: data.get('research') === 'on',
+    });
+    serviceSessionAvailable = true;
+    if (result.state) Object.assign(state, normalizeState(result.state));
+    state.rawEvents = Array.isArray(result.events) ? result.events.slice(-RAW_EVENT_CAP) : [];
+    applyPublicWorld(result.publicWorld, { render: false });
+    state.profile.nickname = data.get('nickname') || state.profile.nickname;
+    state.profile.username = data.get('username') || state.profile.username;
+    state.profile.spaceName = data.get('spaceName') || state.profile.spaceName;
+    state.research = data.get('research') === 'on';
+    persist();
+    logEvent('register', { consent_research: state.research });
+    enterWorld('server-register');
+  } catch (error) {
+    $('#registerError').textContent = error.message || '注册失败，请稍后重试。';
+    submit.disabled = false;
+  }
 });
-$('#forgotForm').addEventListener('submit', (event) => { event.preventDefault(); showEntryPage('welcome'); showToast('人工重置申请已提交'); });
+$('#forgotForm').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  try {
+    await window.ZhereService.forgotPassword({ identity: data.get('identity'), note: data.get('note') });
+    showEntryPage('welcome');
+    showToast('重置申请已提交；如果账户存在，管理员会发送指引');
+  } catch (error) { showToast(error.message || '提交失败，请稍后重试'); }
+});
 
 worldStage.addEventListener('click', (event) => {
   if (event.target.closest('button')) return;
+  closeContextWheel();
   const rect = worldStage.getBoundingClientRect();
   if (state.worldMode === 'cottage') {
     const cx = Math.max(6, Math.min(94, ((event.clientX - rect.left) / rect.width) * 100));
@@ -2631,8 +4862,17 @@ worldStage.addEventListener('click', (event) => {
     renderPlaced();
     persist();
   } else {
+    const fromX = state.wx;
+    const fromY = state.wy;
+    flushMovementSample('click_move');
     state.wx += event.clientX - rect.left - rect.width / 2;
     state.wy += event.clientY - rect.top - rect.height * .52;
+    logEvent('move_sample', {
+      from_wx: Math.round(fromX), from_wy: Math.round(fromY), to_wx: Math.round(state.wx), to_wy: Math.round(state.wy),
+      distance: Number(Math.hypot(state.wx - fromX, state.wy - fromY).toFixed(2)), duration_ms: 0,
+      movement_kind: 'click', world_mode: state.worldMode, reason: 'click_move',
+    });
+    resetMovementSample();
     renderWorld();
     logEvent('move_click', { mode: state.worldMode });
   }
@@ -2650,17 +4890,18 @@ $$('.world-object').forEach((button) => button.addEventListener('click', (event)
 }));
 
 window.addEventListener('keydown', (event) => {
-  if (event.target.matches('input, textarea, select')) return;
   const key = event.key.toLowerCase();
   if (key === 'escape') {
+    if (!contextWheel.hidden) { closeContextWheel(); player.focus(); return; }
     if (!sheet.hidden) { closeSheet(); return; }
-    if (!profileDrawer.hidden) { profileDrawer.hidden = true; scrim.hidden = true; return; }
+    if (!profileDrawer.hidden) { profileDrawer.hidden = true; scrim.hidden = true; game.inert = false; profileReturnFocus?.focus?.(); profileReturnFocus = null; return; }
     if (!entry.hidden && entry.classList.contains('is-gone') === false) {
       const activePage = $('.entry-page.is-active', entry);
       if (activePage && activePage.dataset.entryPage !== 'welcome') showEntryPage('welcome');
     }
     return;
   }
+  if (event.target.matches('input, textarea, select')) return;
   if (!sheet.hidden) {
     if (key === ' ' && state.activeVideo) {
       event.preventDefault();
@@ -2670,21 +4911,51 @@ window.addEventListener('keydown', (event) => {
   }
   if (!profileDrawer.hidden) return;
   if (!entry.classList.contains('is-gone')) return;
-  if (['a', 's', 'd', 'w', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'e', 'f', 'g', 'b', 'n', ' '].includes(key)) event.preventDefault();
-  state.keys.add(key);
+  if (MOVEMENT_KEYS.has(key) || ['e', 'f', 'g', 'b', 'n', 'p', 'q', 'j', 'h', 'r', '?', ' '].includes(key)) event.preventDefault();
+  if (MOVEMENT_KEYS.has(key)) state.keys.add(key);
   if (event.repeat) return;
+  if (key === 'q') toggleContextWheel();
+  if (key === 'j') showJournal();
+  if (key === '?') {
+    const guideId = guideIdForNearest();
+    const item = WORLD_GUIDE_ITEMS.find((entry) => entry.id === guideId);
+    showWorldGuide(item?.category || 'start', guideId);
+  }
   if (key === 'e') observe();
   if (key === 'f') useSecondaryVerb();
   if (key === 'g' && state.nearest?.type === 'video' && state.worldMode === 'overworld') openBidPanel(state.nearest.video);
   if (key === 'b' && state.worldMode === 'overworld') showBag();
   if (key === 'n' && state.worldMode === 'overworld') showLeaveNote(state.nearest?.type === 'video' ? state.nearest.video : null);
+  if (key === 'p') showPublishAnywhere();
+  if (key === 'h') goToHomestead();
+  if (key === 'r') advanceDay();
 });
 window.addEventListener('keyup', (event) => {
   const key = event.key.toLowerCase();
   const wasPresent = state.keys.has(key);
   state.keys.delete(key);
-  if (wasPresent && ['a', 's', 'd', 'w', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) persist();
+  if (wasPresent && MOVEMENT_KEYS.has(key)) persist();
 });
+
+function stopMovement(savePosition = false) {
+  const wasMoving = state.keys.size > 0;
+  state.keys.clear();
+  player.classList.remove('is-moving');
+  if (wasMoving) flushMovementSample('input_stopped');
+  if (savePosition && wasMoving) persist();
+}
+
+window.addEventListener('blur', () => stopMovement(true));
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') {
+    stopMovement(true);
+    if (telemetryWorldEntered && !telemetrySessionEnded) logEvent('session_pause', { duration_ms: Date.now() - telemetryStartedAt });
+  } else if (telemetryWorldEntered && !telemetrySessionEnded) {
+    resetMovementSample();
+    logEvent('session_resume', { duration_ms: Date.now() - telemetryStartedAt });
+  }
+});
+window.addEventListener('pagehide', () => endTelemetrySession('pagehide'));
 
 cottageExit.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -2696,38 +4967,125 @@ window.addEventListener('resize', renderWorld);
 $('#dialogueToggle').addEventListener('click', () => {
   const collapsed = dialogue.classList.toggle('is-collapsed');
   $('#dialogueToggle').textContent = collapsed ? '展开木秋的对话' : '收起';
+  $('#dialogueToggle').setAttribute('aria-expanded', String(!collapsed));
 });
 $('#sheetClose').addEventListener('click', closeSheet);
-scrim.addEventListener('click', () => { closeSheet(); profileDrawer.hidden = true; scrim.hidden = true; });
-$('#profileButton').addEventListener('click', () => { profileDrawer.hidden = false; scrim.hidden = false; });
-$('#profileClose').addEventListener('click', () => { profileDrawer.hidden = true; scrim.hidden = true; });
+scrim.addEventListener('click', () => {
+  if (!sheet.hidden) closeSheet();
+  if (!profileDrawer.hidden) {
+    profileDrawer.hidden = true;
+    game.inert = false;
+    profileReturnFocus?.focus?.();
+    profileReturnFocus = null;
+  }
+  scrim.hidden = true;
+});
+$('#profileButton').addEventListener('click', () => {
+  stopMovement(true);
+  closeContextWheel();
+  profileReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  profileDrawer.hidden = false;
+  scrim.hidden = false;
+  game.inert = true;
+  requestAnimationFrame(() => $('#profileClose').focus());
+});
+$('#profileClose').addEventListener('click', () => {
+  profileDrawer.hidden = true;
+  scrim.hidden = true;
+  game.inert = false;
+  profileReturnFocus?.focus?.();
+  profileReturnFocus = null;
+});
 $$('[data-panel]').forEach((button) => button.addEventListener('click', () => showProfilePanel(button.dataset.panel)));
-$('#logoutButton').addEventListener('click', () => { localStorage.removeItem('zhere-v7-prototype-session'); location.reload(); });
-$('#aboutButton').addEventListener('click', showAbout);
+$('#logoutButton').addEventListener('click', async () => {
+  $('#logoutButton').disabled = true;
+  endTelemetrySession('logout');
+  logEvent('logout');
+  await window.ZhereService.logout().catch(() => {});
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
+  localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(LEGACY_SESSION_KEY);
+  location.reload();
+});
+$('#aboutButton').addEventListener('click', () => showWorldGuide('start', guideIdForNearest()));
+$('#guideButton').addEventListener('click', () => showWorldGuide('start', guideIdForNearest()));
 $('#eventButton').addEventListener('click', showAnomaly);
 $('#bagButton').addEventListener('click', () => { if (state.worldMode === 'overworld') showBag(); });
 $('#favoritesButton').addEventListener('click', showFavorites);
+$('#homesteadButton').addEventListener('click', goToHomestead);
+$('#dockHomeButton').addEventListener('click', goToHomestead);
+$('#dockBagButton').addEventListener('click', () => state.worldMode === 'cottage' ? showPersonalSpace() : showBag());
+$('#publishButton').addEventListener('click', showPublishAnywhere);
+$('#actionButton').addEventListener('click', () => state.worldMode === 'cottage' ? showHomesteadPanel() : observe());
+$('#journalButton').addEventListener('click', () => showJournal());
+player.addEventListener('click', (event) => { event.stopPropagation(); toggleContextWheel(); });
+$('#contextWheelClose').addEventListener('click', (event) => { event.stopPropagation(); closeContextWheel(); player.focus(); });
+$$('[data-context-action]', contextWheel).forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); runContextAction(button.dataset.contextAction); }));
+$('#restButton').addEventListener('click', advanceDay);
+$('#homeCabin').addEventListener('click', (event) => { event.stopPropagation(); showHomesteadPanel(); });
+$('#dayStone').addEventListener('click', (event) => { event.stopPropagation(); advanceDay(); });
 
-const existingSession = localStorage.getItem('zhere-v7-prototype-session');
-if (existingSession) $('#guestButton').textContent = '继续上次漫游';
 const initialEntryRoute = location.hash.replace('#/', '');
 if (['login', 'register', 'forgot-password'].includes(initialEntryRoute)) showEntryPage(initialEntryRoute === 'forgot-password' ? 'forgot' : initialEntryRoute);
 
-worldStage.classList.toggle('event-muted', state.eventChoice === 'replace' || state.eventChoice === 'mix');
-if (!state.bottleState) spawnBottle();
-renderScreens();
-renderCreations();
-if (state.worldMode === 'overworld') renderPlaced();
-updateCounters();
-refreshIdentity();
-setInterval(persist, 15000);
-if (state.worldMode === 'cottage') {
-  worldStage.classList.add('is-cottage');
-  worldArt.hidden = false;
-  cottageExit.hidden = false;
-  renderPlaced();
+async function startApp() {
+  try {
+    const boot = await window.ZhereService.bootstrap();
+    serviceSessionAvailable = boot.authenticated;
+    if (boot.authenticated) {
+      if (boot.state) Object.assign(state, normalizeState(boot.state));
+      state.rawEvents = Array.isArray(boot.events) ? boot.events.slice(-RAW_EVENT_CAP) : [];
+      if (boot.user) {
+        state.profile.nickname = boot.user.nickname || state.profile.nickname;
+        state.profile.username = boot.user.username || state.profile.username;
+        state.profile.spaceName = boot.user.spaceName || state.profile.spaceName;
+        state.research = Boolean(boot.user.research);
+      }
+      applyPublicWorld(boot.publicWorld, { render: false });
+      await migrateLegacyPublicContent();
+      $('#guestButton').textContent = '继续上次漫游';
+      if (!boot.state || hasBrowserStateToMigrate) {
+        await window.ZhereService.saveState(serializableState(), { immediate: true });
+        await window.ZhereService.flushState();
+      }
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+      localStorage.removeItem(SESSION_KEY);
+      localStorage.removeItem(LEGACY_SESSION_KEY);
+    } else {
+      localStorage.removeItem(SESSION_KEY);
+      localStorage.removeItem(LEGACY_SESSION_KEY);
+    }
+  } catch (error) {
+    console.error(error);
+    $('#guestButton').textContent = '服务暂不可用，请稍后重试';
+  }
+
+  worldVideos.forEach((video) => Object.assign(video, state.assetOverrides[video.id] || {}));
+  worldStage.classList.toggle('event-muted', state.eventChoice === 'replace' || state.eventChoice === 'mix');
+  if (!state.bottleState) spawnBottle();
+  renderScreens();
+  renderCreations();
+  if (state.worldMode === 'overworld') renderPlaced();
+  updateCounters();
+  refreshIdentity();
+  setInterval(persist, 15000);
+  setInterval(() => {
+    if (entry.classList.contains('is-gone')) syncPublicWorld({ render: true });
+  }, 10000);
+  if (state.worldMode === 'cottage') {
+    worldStage.classList.add('is-cottage');
+    worldArt.hidden = true;
+    homesteadLayer.hidden = false;
+    cottageExit.hidden = false;
+    renderPlaced();
+    renderHomestead();
+  }
+  renderWorld();
+  setTimeout(() => $('#loading').classList.add('is-gone'), 180);
+  setTimeout(() => { $('#loading').hidden = true; }, 900);
+  requestAnimationFrame(frame);
 }
-renderWorld();
-setTimeout(() => $('#loading').classList.add('is-gone'), 180);
-setTimeout(() => { $('#loading').hidden = true; }, 900);
-requestAnimationFrame(frame);
+
+startApp();

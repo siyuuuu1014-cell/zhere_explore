@@ -6,13 +6,17 @@
     <meta name="description" content="Zhere 开放世界玩法与数据采集原型（V7）：视频、需求、评论、虚拟竞价与用户痕迹共同生长的公共世界" />
     <title>Zhere | 开放公域</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='%238a9d7d' stroke='%2339423a' stroke-width='6'/%3E%3Cpath d='M22 38c12-2 18-10 20-20 3 12-2 24-17 28' fill='none' stroke='%23f7f4ea' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=15" />
+    <link rel="stylesheet" href="./formal-v4.css?v=15" />
   </head>
   <body>
     <!--
-      V7 THESIS: An open seaside-and-forest world where players leave videos, demands, comments, bids and traces.
-      NO fixed feature halls; everything happens where the player is standing.
-      Zones are probability ecologies, not locked regions. Virtual only, no real money.
+      THESIS: Zhere is a living media commons: exploration feeds a private homestead, while the public world stays shared and unowned; it refuses menu grids disguised as a game.
+      OWN-WORLD: Three-pixel dark-green linework, flat botanical fields, irregular paper signs and object-specific silhouettes in moss, sand, sea, amber and coral.
+      STORY: Read the land, follow paths, gather renewable finds, discover situated media, then return home to clear soil, grow crops, craft and build a lasting place.
+      FIRST VIEWPORT: A broad inhabited landscape with curved paths and authored scenery; the player stays central while one landmark, one media object and one gatherable form a readable triangle.
+      FORM: Established-world implementation from the approved element atlas; field-journal open world, seed key zhere-formal-v4-atlas.
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
     -->
     <div class="loading" id="loading" aria-live="polite">
       <div class="loading-mark">ZHERE</div>
@@ -22,12 +26,15 @@
 
     <main class="game" id="game" aria-label="Zhere 开放公域">
       <header class="topbar">
-        <button class="wordmark" id="aboutButton" aria-label="打开世界说明">ZHERE</button>
+        <button class="wordmark" id="aboutButton" aria-label="打开世界图鉴">ZHERE</button>
         <div class="place-name" aria-live="polite">
           <span>开放公域</span>
           <strong id="zoneName">镇中心</strong>
         </div>
         <div class="hud">
+          <button class="hud-button guide-button" id="guideButton" aria-label="打开世界图鉴">
+            <span class="guide-button-mark" aria-hidden="true">?</span>图鉴
+          </button>
           <button class="hud-button" id="bagButton" aria-label="打开背包">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9h12l1.5 11h-15L6 9Z"/><path d="M9 9V7a3 3 0 0 1 6 0v2"/></svg>
             背包 <kbd>B</kbd>
@@ -37,6 +44,10 @@
             收藏 <b id="favoritesCount">0</b>
           </button>
           <button class="hud-button" id="eventButton" aria-label="今日异象">异象</button>
+          <button class="hud-button homestead-button" id="homesteadButton" aria-label="前往我的地块">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 12 5l8 7v8H4Z"/><path d="M9 20v-6h6v6"/></svg>
+            地块 <kbd>H</kbd>
+          </button>
           <div class="counter wallet-counter"><span>灵感币</span><b id="walletCount">500</b></div>
           <div class="counter"><span>副本</span><b id="copyCount">0</b></div>
           <button class="avatar-button" id="profileButton" aria-label="打开角色与账户"><span id="topAvatar">秋</span></button>
@@ -48,7 +59,26 @@
           <div class="terrain-layer" id="terrainLayer" aria-hidden="true"></div>
           <div class="aura-layer" id="auraLayer" aria-hidden="true"></div>
           <div class="deco-layer" id="decoLayer" aria-hidden="true"></div>
+          <div class="resource-layer" id="resourceLayer" aria-label="可再生的世界资源"></div>
           <img class="world-art" id="worldArt" src="./assets/treehouse-settlement-map-v2.png" alt="我的小屋内部" draggable="false" hidden />
+
+          <section class="homestead-layer" id="homesteadLayer" aria-label="我的林间地块" hidden>
+            <div class="homestead-ground" aria-hidden="true">
+              <span class="home-pond"></span>
+              <span class="home-path"></span>
+              <span class="home-tree tree-a"></span>
+              <span class="home-tree tree-b"></span>
+              <span class="home-cliff"></span>
+            </div>
+            <button class="home-cabin" id="homeCabin" aria-label="进入小屋与建设簿">
+              <span class="cabin-roof"></span><span class="cabin-wall"></span><span class="cabin-door"></span><span class="cabin-window"></span><span class="cabin-chimney"></span>
+            </button>
+            <div class="home-buildings" id="homeBuildings" aria-label="已经建造的设施"></div>
+            <div class="plot-grid" id="plotGrid" aria-label="可以开荒和种植的土地"></div>
+            <button class="day-stone" id="dayStone" aria-label="休息并进入下一天">
+              <span class="day-stone-sun"></span><b>休息</b><small>进入明天</small>
+            </button>
+          </section>
 
           <div id="screenLayer" class="screen-layer" aria-label="公共视频对象"></div>
           <div id="placedLayer" class="placed-layer" aria-label="小窝摆放的副本"></div>
@@ -102,26 +132,53 @@
 
           <button class="cottage-exit" id="cottageExit" hidden>推开木门，回到公域</button>
 
-          <div class="player" id="player" aria-label="玩家角色">
+          <button class="player" id="player" aria-label="打开身边行动盘" aria-expanded="false">
             <span class="player-head"></span>
             <span class="player-body"></span>
             <span class="player-feet"></span>
-          </div>
+          </button>
+          <aside class="context-wheel" id="contextWheel" aria-label="身边行动" hidden>
+            <div><b id="contextWheelTitle">现在想做什么？</b><button class="context-wheel-close" id="contextWheelClose" type="button" aria-label="关闭身边行动盘">关闭</button></div>
+            <button type="button" data-context-action="observe"><kbd>E</kbd><span><b>观察附近</b><small id="contextObserveHint">看看身边有什么</small></span></button>
+            <button type="button" data-context-action="note"><kbd>N</kbd><span><b>留一张需求</b><small>纸条会落在脚边</small></span></button>
+            <button type="button" data-context-action="publish"><kbd>P</kbd><span><b>发布素材</b><small>从背包或本地上传</small></span></button>
+            <button type="button" data-context-action="journal"><kbd>J</kbd><span><b>翻开探索手账</b><small>回看素材、纸条和关系</small></span></button>
+          </aside>
           <div class="nearby" id="nearby" hidden>E</div>
           <div class="context-hint" id="contextHint">WASD 任意方向行走 · 世界没有边界</div>
           <div class="wayfinder" id="wayfinder" aria-live="polite"></div>
         </div>
       </section>
 
+      <section class="life-hud" id="lifeHud" aria-label="地块与采集状态">
+        <div class="day-dial"><span id="seasonName">初春</span><b>第 <em id="dayCount">1</em> 天</b><small id="weatherName">晴</small></div>
+        <div class="energy-meter"><span>体力</span><i><b id="energyBar"></b></i><strong id="energyCount">100</strong></div>
+        <div class="resource-pouch" aria-label="资源袋">
+          <span class="resource wood"><i></i><b id="woodCount">0</b><small>木</small></span>
+          <span class="resource stone"><i></i><b id="stoneCount">0</b><small>石</small></span>
+          <span class="resource seed"><i></i><b id="seedCount">0</b><small>种</small></span>
+          <span class="resource produce"><i></i><b id="produceCount">0</b><small>收成</small></span>
+        </div>
+      </section>
+
+      <nav class="action-dock" aria-label="快捷行动">
+        <button id="actionButton" aria-label="执行附近行动"><span class="dock-key">E</span><b>行动</b></button>
+        <button id="publishButton" aria-label="在当前位置发布视频或需求"><span class="dock-key">P</span><b>发布</b></button>
+        <button id="dockBagButton" aria-label="打开背包"><span class="dock-key">B</span><b>背包</b></button>
+        <button id="journalButton" aria-label="打开探索手账"><span class="dock-key">J</span><b>手账</b></button>
+        <button id="dockHomeButton" aria-label="前往我的地块"><span class="dock-key">H</span><b>回地块</b></button>
+        <button id="restButton" aria-label="休息并进入下一天"><span class="dock-key">R</span><b>过一天</b></button>
+      </nav>
+
       <section class="dialogue" id="dialogue" aria-live="polite">
-        <button class="dialogue-toggle" id="dialogueToggle" aria-label="收起对话">收起</button>
+        <button class="dialogue-toggle" id="dialogueToggle" aria-label="收起对话" aria-expanded="true">收起</button>
         <div class="dialogue-copy">
           <div class="speaker" id="speaker">木秋</div>
           <p id="dialogueText">这里是一片开放的公域。林子里安静，商业街上热闹，海边总有漂流瓶。你走到哪里，就可以在哪里留下东西。</p>
           <div class="dialogue-actions" id="dialogueActions"></div>
         </div>
         <img class="portrait" src="./assets/muqiu-flat.png" alt="管理员木秋" draggable="false" />
-        <div class="controls"><kbd>WASD</kbd> 行走 <kbd>E</kbd> 观察 <kbd>F</kbd> 互动 <kbd>G</kbd> 竞价 <kbd>B</kbd> 背包 <kbd>N</kbd> 留纸条 <kbd>Space</kbd> 播放</div>
+          <div class="controls"><kbd>WASD</kbd> 行走 <kbd>E</kbd> 行动 <kbd>?</kbd> 图鉴 <kbd>Q</kbd> 行动盘 <kbd>J</kbd> 手账 <kbd>P</kbd> 发布 <kbd>F</kbd> 互动 <kbd>G</kbd> 竞价 <kbd>B</kbd> 背包 <kbd>H</kbd> 地块 <kbd>R</kbd> 休息</div>
       </section>
     </main>
 
@@ -133,7 +190,7 @@
         <div class="entry-page is-active" data-entry-page="welcome">
           <span class="entry-kicker">树林与海岸之间，一片持续生长的开放公域</span>
           <h1>这儿</h1>
-          <p>你走到哪里，就能在哪里发布视频、留下需求、参与虚拟竞价。没有任务列表，没有功能大厅；所有痕迹都属于世界，副本才属于你。</p>
+          <p>在无边界公域发现影像、回应需求、收集会再生的材料；回到自己的林间地块清理土地、种植和建造，让每次远行都留下看得见的改变。</p>
           <div class="entry-actions">
             <button class="primary-button" data-entry-target="login">登录进入</button>
             <button class="paper-button" data-entry-target="register">注册角色</button>
@@ -189,6 +246,9 @@
       <div class="profile-head"><span class="large-avatar" id="drawerAvatar">秋</span><div><h2 id="drawerName">路过的风</h2><p id="drawerTitle">礁石小窝的整理者</p></div></div>
       <nav class="drawer-nav">
         <button data-panel="profile">角色与小窝</button>
+        <button data-panel="board">我的需求与草稿</button>
+        <button data-panel="journal">探索手账</button>
+        <button data-panel="guide">世界图鉴与玩法说明</button>
         <button data-panel="favorites">我的收藏</button>
         <button data-panel="data">数据与成长</button>
         <button data-panel="ledger">灵感币账本</button>
@@ -201,6 +261,7 @@
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-    <script src="./prototype.js"></script>
+    <script src="./service-client.js?v=16"></script>
+    <script src="./prototype.js?v=16"></script>
   </body>
 </html>

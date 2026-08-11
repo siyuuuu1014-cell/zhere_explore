@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="ZHERE 公共世界与交互元素设计图鉴 v1" />
+    <title>ZHERE 世界元素图鉴 v1</title>
+    <link rel="stylesheet" href="./element-design-board.css" />
+  </head>
+  <body>
+    <!--
+      THESIS: 用一次从林地走到小屋的真实旅程展示元素系统，拒绝把游戏设计稿排成同尺寸图标卡片墙。
+      OWN-WORLD: 深棕粗线、苔藓与海青平涂、生活场景剪影、纸签式操作控件。
+      STORY: 读者依次理解世界地貌、可发现物、可操作物、家园成长与界面反馈，并能直接对照实现状态。
+      FIRST VIEWPORT: 全宽连续世界横切面占据主体，目录贴在边缘，主要入口落在地貌起点。
+      FORM: 连续一日世界路线，结构候选第五项，seed 59321817。
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+    -->
+    <a class="skip-link" href="#boardMain">跳到设计内容</a>
+
+    <svg class="symbol-sprite" aria-hidden="true">
+      <defs>
+        <symbol id="i-leaf" viewBox="0 0 24 24">
+          <path d="M20 4C11 4 5 8 5 15c0 3 2 5 5 5 7 0 10-7 10-16Z" />
+          <path d="M5 20c3-5 7-8 12-11" />
+        </symbol>
+        <symbol id="i-route" viewBox="0 0 24 24">
+          <circle cx="6" cy="18" r="2.5" />
+          <circle cx="18" cy="6" r="2.5" />
+          <path d="M8.5 18c7 0 1-9 7-10" />
+        </symbol>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="m9 6 9 6-9 6Z" /></symbol>
+        <symbol id="i-hand" viewBox="0 0 24 24">
+          <path d="M8 11V6a2 2 0 0 1 4 0v4-2a2 2 0 0 1 4 0v3-1a2 2 0 0 1 4 0v4c0 5-3 8-8 8h-1c-3 0-5-2-7-5l-2-3a2 2 0 0 1 3-2l3 3" />
+        </symbol>
+        <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8v10h-7v-6h-4v6H3Z" /></symbol>
+        <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M8 4v16M11 9h7M11 13h5" /></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></symbol>
+      </defs>
+    </svg>
+
+    <header class="board-header">
+      <a class="board-brand" href="./index.html" aria-label="返回 ZHERE 游戏原型">
+        <span class="brand-leaf"><svg><use href="#i-leaf" /></svg></span>
+        <strong>ZHERE</strong>
+      </a>
+      <p>世界元素图鉴 <span>v1 · 实现前设计稿</span></p>
+      <div class="header-actions">
+        <button class="quiet-button" type="button" data-ambience="day" aria-pressed="true">日间</button>
+        <button class="quiet-button" type="button" data-ambience="dusk" aria-pressed="false">黄昏</button>
+        <a class="primary-link" href="#terrain">开始查看</a>
+      </div>
+    </header>
+
+    <nav class="route-index" aria-label="设计稿目录">
+      <a href="#terrain"><svg><use href="#i-route" /></svg><span>地貌</span></a>
+      <a href="#landmarks"><svg><use href="#i-leaf" /></svg><span>地标</span></a>
+      <a href="#media"><svg><use href="#i-play" /></svg><span>影像</span></a>
+      <a href="#gather"><svg><use href="#i-hand" /></svg><span>采集</span></a>
+      <a href="#homestead"><svg><use href="#i-home" /></svg><span>家园</span></a>
+      <a href="#interface"><svg><use href="#i-panel" /></svg><span>界面</span></a>
+      <a href="#coverage"><svg><use href="#i-check" /></svg><span>覆盖</span></a>
+    </nav>
+
+    <main id="boardMain">
+      <section class="world-opening" aria-labelledby="boardTitle">
+        <div class="opening-copy">
+          <h1 id="boardTitle">不是一套图标，<br />是一片会回应你的世界。</h1>
+          <p>所有元素都遵循同一条规则：先属于环境，再表达功能。地标带着生活痕迹，视频长成当地物件，操作反馈发生在角色与物体之间。</p>
+          <div class="opening-key">
+            <span><i class="line-sample line-world"></i>地图轮廓 3px</span>
+            <span><i class="line-sample line-action"></i>交互轮廓 4px</span>
+            <span><i class="line-sample line-ui"></i>界面轮廓 2px</span>
+          </div>
+        </div>
+
+        <div class="world-ribbon" aria-label="从森林到海岸的连续世界预览">
+          <div class="ribbon-sky">
+            <span class="cloud cloud-a"></span><span class="cloud cloud-b"></span>
+            <span class="sun-disc"></span>
+          </div>
+          <div class="ribbon-zone zone-forest">
+            <span class="tree t1"></span><span class="tree t2"></span><span class="tree t3"></span>
+            <span class="forest-screen mini-screen"><i></i></span>
+          </div>
+          <div class="ribbon-zone zone-hill">
+            <span class="hill-back"></span><span class="windmill"><i></i></span>
+            <span class="kite-player"><i></i></span>
+          </div>
+          <div class="ribbon-zone zone-town">
+            <span class="cottage-mini"><i></i></span><span class="notice-tree-mini"><i></i></span>
+          </div>
+          <div class="ribbon-zone zone-street">
+            <span class="shop-mini"><i></i></span><span class="lamp-mini"></span>
+          </div>
+          <div class="ribbon-zone zone-shore">
+            <span class="dock-mini"></span><span class="shell-player-mini"><i></i></span>
+          </div>
+          <div class="ribbon-zone zone-sea">
+            <span class="buoy-mini"><i></i></span><span class="boat-mini"></span>
+            <i class="wave w1"></i><i class="wave w2"></i><i class="wave w3"></i>
+          </div>
+          <svg class="world-route-line" viewBox="0 0 1200 360" preserveAspectRatio="none" aria-hidden="true">
+            <path d="M0 284C120 250 180 310 300 267s180-20 280 12 176-50 270-20 158 28 350-20" />
+          </svg>
+          <span class="walker" aria-hidden="true"><i class="walker-head"></i><i class="walker-body"></i><i class="walker-bag"></i></span>
+        </div>
+      </section>
+
+      <section class="chapter terrain-chapter" id="terrain" aria-labelledby="terrainTitle">
+        <header class="chapter-heading">
+          <div>
+            <h2 id="terrainTitle">地貌先讲故事</h2>
+            <p>区域不是六块不同颜色的地毯。每一块地表都由“底层性格、行走线索、生活痕迹”组成，并通过自然过渡继续延伸。</p>
+          </div>
+          <div class="rule-note"><strong>无硬边界</strong><span>雾、林缘、河汊与远路继续世界</span></div>
+        </header>
+
+        <div class="terrain-run" aria-label="六类地貌与过渡设计">
+          <article class="terrain-slice terrain-forest">
+            <div class="terrain-art"><i class="root-line"></i><i class="fern fern-a"></i><i class="fern fern-b"></i><i class="stump-dot"></i></div>
+            <h3>静叶林</h3><p>根系压出行走方向，蕨叶只聚在遮阴侧。</p>
+          </article>
+          <article class="terrain-slice terrain-hill">
+            <div class="terrain-art"><i class="contour c1"></i><i class="contour c2"></i><i class="grass-tuft g1"></i><i class="grass-tuft g2"></i></div>
+            <h3>风坡</h3><p>等高线和统一倾向的草说明风向与坡度。</p>
+          </article>
+          <article class="terrain-slice terrain-town">
+            <div class="terrain-art"><i class="stone-path"></i><i class="flower-patch"></i><i class="bench-mark"></i></div>
+            <h3>树下镇</h3><p>不规则石径被经常走过，门前留下花与坐痕。</p>
+          </article>
+          <article class="terrain-slice terrain-street">
+            <div class="terrain-art"><i class="cobble cb1"></i><i class="cobble cb2"></i><i class="awning-shadow"></i></div>
+            <h3>慢街</h3><p>石块尺度变小，檐影与摊位痕迹提示活动密度。</p>
+          </article>
+          <article class="terrain-slice terrain-shore">
+            <div class="terrain-art"><i class="tide-line"></i><i class="shell-mark sm1"></i><i class="shell-mark sm2"></i><i class="reed-mark"></i></div>
+            <h3>芦苇岸</h3><p>潮线、湿沙和芦苇把陆地慢慢交给海。</p>
+          </article>
+          <article class="terrain-slice terrain-sea">
+            <div class="terrain-art"><i class="sea-line sl1"></i><i class="sea-line sl2"></i><i class="sea-glint"></i></div>
+            <h3>回声海</h3><p>不同长度的平缓浪线维持方向感，不铺满纹理。</p>
+          </article>
+        </div>
+
+        <div class="transition-strip" aria-label="区域连接方式">
+          <div><span class="transition-icon forest-hill"></span><strong>林地 → 风坡</strong><small>根系逐渐变为等高线</small></div>
+          <div><span class="transition-icon town-street"></span><strong>树下镇 → 慢街</strong><small>土路逐渐嵌入石块</small></div>
+          <div><span class="transition-icon shore-sea"></span><strong>芦苇岸 → 回声海</strong><small>潮线与倒影替代边框</small></div>
+        </div>
+      </section>
+
+      <section class="chapter landmark-chapter" id="landmarks" aria-labelledby="landmarkTitle">
+        <header class="chapter-heading">
+          <div>
+            <h2 id="landmarkTitle">地标是一段生活，不是一枚按钮</h2>
+            <p>每个地标由主体、脚下基座、周围道具和一处动态线索构成。点击下方地标可查看统一的靠近状态。</p>
+          </div>
+          <div class="state-legend" aria-label="地标状态说明"><span>静置</span><span>靠近</span><span>使用中</span></div>
+        </header>
+
+        <div class="landmark-field" id="landmarkField">
+          <div class="field-path"></div>
+          <button class="landmark is-selected" type="button" data-landmark="我的小屋" data-kind="归属" style="--x:5%;--y:40%;--s:1.2">
+            <span class="lm-scene lm-cottage"><i class="roof"></i><i class="house"></i><i class="door"></i><i class="chimney"></i><i class="woodpile"></i></span><b>我的小屋</b>
+          </button>
+          <button class="landmark" type="button" data-landmark="公告树" data-kind="发布与索引" style="--x:18%;--y:18%;--s:1.05">
+            <span class="lm-scene lm-notice"><i class="trunk"></i><i class="crown"></i><i class="paper p1"></i><i class="paper p2"></i><i class="mailbox"></i></span><b>公告树</b>
+          </button>
+          <button class="landmark" type="button" data-landmark="共创工坊" data-kind="上传与制作" style="--x:32%;--y:44%;--s:1.1">
+            <span class="lm-scene lm-workshop"><i class="table"></i><i class="wheel"></i><i class="lamp"></i><i class="tools"></i></span><b>共创工坊</b>
+          </button>
+          <button class="landmark" type="button" data-landmark="枝头望远镜" data-kind="远方发现" style="--x:46%;--y:16%;--s:.95">
+            <span class="lm-scene lm-telescope"><i class="scope"></i><i class="tripod"></i><i class="flag"></i></span><b>枝头望远镜</b>
+          </button>
+          <button class="landmark" type="button" data-landmark="听风码头" data-kind="环境声音" style="--x:58%;--y:43%;--s:1.05">
+            <span class="lm-scene lm-dock"><i class="deck"></i><i class="posts"></i><i class="chimes"></i><i class="reeds"></i></span><b>听风码头</b>
+          </button>
+          <button class="landmark" type="button" data-landmark="海边长椅" data-kind="留言与停留" style="--x:72%;--y:23%;--s:.95">
+            <span class="lm-scene lm-bench"><i class="seat"></i><i class="legs"></i><i class="scarf"></i><i class="shell"></i></span><b>海边长椅</b>
+          </button>
+          <button class="landmark" type="button" data-landmark="回声水洼" data-kind="可忽略异象" style="--x:84%;--y:46%;--s:1.08">
+            <span class="lm-scene lm-puddle"><i class="pool"></i><i class="ring r1"></i><i class="ring r2"></i><i class="sprout"></i></span><b>回声水洼</b>
+          </button>
+        </div>
+
+        <div class="landmark-detail" aria-live="polite">
+          <div class="detail-orbit"><span></span><i></i></div>
+          <div><small>当前标本</small><h3 id="landmarkName">我的小屋</h3><p id="landmarkKind">归属 · 门灯呼吸、烟囱轻响；只有这里允许改造。</p></div>
+          <div class="state-samples">
+            <span><i class="state-dot idle"></i>静置：环境动作</span>
+            <span><i class="state-dot near"></i>靠近：地面回应</span>
+            <span><i class="state-dot active"></i>使用：主体变化</span>
+          </div>
+        </div>
+
+        <div class="minor-landmarks" aria-label="其余八类地标设计">
+          <span><i class="mini-lm clothesline"></i><b>胶片晾衣绳</b><small>并置与排序</small></span>
+          <span><i class="mini-lm doublewall"></i><b>双面放映墙</b><small>同时观看</small></span>
+          <span><i class="mini-lm mixtable"></i><b>混剪桌</b><small>顺序组合</small></span>
+          <span><i class="mini-lm swapbox"></i><b>交换箱</b><small>留下与取走</small></span>
+          <span><i class="mini-lm cafe"></i><b>咖啡橱窗</b><small>场景匹配</small></span>
+          <span><i class="mini-lm petshop"></i><b>宠物橱窗</b><small>场景匹配</small></span>
+          <span><i class="mini-lm blankframe"></i><b>空白画框</b><small>缺失与想象</small></span>
+          <span><i class="mini-lm neighbor"></i><b>邻居修理所</b><small>拜访与回应</small></span>
+        </div>
+
+        <div class="landmark-state-matrix" id="landmarkStates" aria-label="代表性地标状态帧">
+          <header><h3>代表性地标状态帧</h3><p>同一种状态规则落在不同物件上时，变化发生在物件自身，不只是加一圈高亮。</p></header>
+          <div class="state-matrix-head"><span>物件</span><span>静置</span><span>靠近</span><span>使用中</span></div>
+          <div class="state-matrix-row"><strong>公告树</strong><span class="state-frame tree-idle"><i></i><small>纸条随风</small></span><span class="state-frame tree-near"><i></i><small>根部亮起</small></span><span class="state-frame tree-active"><i></i><small>新纸长出</small></span></div>
+          <div class="state-matrix-row"><strong>共创工坊</strong><span class="state-frame shop-idle"><i></i><small>工作灯灭</small></span><span class="state-frame shop-near"><i></i><small>工具回应</small></span><span class="state-frame shop-active"><i></i><small>木轮转动</small></span></div>
+          <div class="state-matrix-row"><strong>海边长椅</strong><span class="state-frame bench-idle"><i></i><small>围巾轻摆</small></span><span class="state-frame bench-near"><i></i><small>贝壳显露</small></span><span class="state-frame bench-active"><i></i><small>坐痕下沉</small></span></div>
+        </div>
+      </section>
+
+      <section class="chapter media-chapter" id="media" aria-labelledby="mediaTitle">
+        <header class="chapter-heading">
+          <div><h2 id="mediaTitle">视频在不同地方，长成不同的东西</h2><p>内容主体不再永远藏在矩形屏幕里。播放、收藏与竞价状态通过物件本身变化，文字信息留在接近后出现的纸签上。</p></div>
+          <button class="demo-control" type="button" id="playAllMedia"><svg><use href="#i-play" /></svg>演示播放状态</button>
+        </header>
+
+        <div class="media-promenade" id="mediaPromenade">
+          <button class="media-object media-tree" type="button" aria-label="播放树洞剧场">
+            <span class="media-stage"><i class="trunk-ring"></i><i class="leaf-curtain l1"></i><i class="leaf-curtain l2"></i><i class="picture"></i><i class="play-mark"></i></span>
+            <strong>树洞剧场</strong><small>静叶林 · 树皮开合代替屏幕边框</small><em>播放</em>
+          </button>
+          <button class="media-object media-kite" type="button" aria-label="播放风筝投影">
+            <span class="media-stage"><i class="kite-sheet"></i><i class="kite-tail"></i><i class="projector"></i><i class="play-mark"></i></span>
+            <strong>风筝投影</strong><small>风坡 · 画面随风轻轻收放</small><em>播放</em>
+          </button>
+          <button class="media-object media-awning" type="button" aria-label="播放棚下灯箱">
+            <span class="media-stage"><i class="awning"></i><i class="lightbox"></i><i class="stool"></i><i class="play-mark"></i></span>
+            <strong>棚下灯箱</strong><small>树下镇 · 像路边临时放映</small><em>播放</em>
+          </button>
+          <button class="media-object media-marquee" type="button" aria-label="播放慢街招牌">
+            <span class="media-stage"><i class="sign"></i><i class="bulbs"></i><i class="post"></i><i class="play-mark"></i></span>
+            <strong>慢街招牌</strong><small>慢街 · 播放进度沿灯泡前进</small><em>播放</em>
+          </button>
+          <button class="media-object media-shell" type="button" aria-label="播放潮池镜片">
+            <span class="media-stage"><i class="shell-body"></i><i class="tide-lens"></i><i class="pebbles"></i><i class="play-mark"></i></span>
+            <strong>潮池镜片</strong><small>芦苇岸 · 水面亮起后出现内容</small><em>播放</em>
+          </button>
+          <button class="media-object media-buoy" type="button" aria-label="播放浮标信号">
+            <span class="media-stage"><i class="buoy"></i><i class="flag"></i><i class="signal"></i><i class="play-mark"></i></span>
+            <strong>浮标信号</strong><small>回声海 · 内容随浮标上下呼吸</small><em>播放</em>
+          </button>
+        </div>
+
+        <div class="media-state-rail">
+          <div><i class="media-state-shape idle"></i><strong>待机</strong><span>只有地点动作</span></div>
+          <div><i class="media-state-shape nearby"></i><strong>靠近</strong><span>纸签从物件后露出</span></div>
+          <div><i class="media-state-shape playing"></i><strong>播放</strong><span>环境节奏与内容同步</span></div>
+          <div><i class="media-state-shape saved"></i><strong>已收藏</strong><span>结上一片砖红色叶签</span></div>
+          <div><i class="media-state-shape bidding"></i><strong>竞价中</strong><span>树果币木牌挂到基座</span></div>
+        </div>
+      </section>
+
+      <section class="chapter gather-chapter" id="gather" aria-labelledby="gatherTitle">
+        <header class="chapter-heading">
+          <div><h2 id="gatherTitle">采集动作必须有前因和余韵</h2><p>可再生资源先通过剪影被认出，再通过角色动作、物体变化和飞向背包的奖励形成完整反馈。</p></div>
+          <button class="demo-control" type="button" id="resetGather">重置采集演示</button>
+        </header>
+
+        <div class="gather-scene" id="gatherScene">
+          <div class="gather-ground"><i></i><i></i><i></i></div>
+          <button class="forage forage-branch is-ready" type="button" data-label="树枝" aria-label="采集树枝"><i></i><i></i><span>树枝</span></button>
+          <button class="forage forage-stump is-ready" type="button" data-label="旧树桩" aria-label="采集旧树桩"><i></i><i></i><span>旧树桩</span></button>
+          <button class="forage forage-rock is-ready" type="button" data-label="卵石" aria-label="采集卵石"><i></i><i></i><span>卵石</span></button>
+          <button class="forage forage-grass is-ready" type="button" data-label="野草" aria-label="采集野草"><i></i><i></i><span>野草</span></button>
+          <button class="forage forage-shell is-ready" type="button" data-label="贝壳" aria-label="采集贝壳"><i></i><i></i><span>贝壳</span></button>
+          <span class="gather-player"><i class="head"></i><i class="body"></i><i class="bag"></i><i class="arm"></i></span>
+          <div class="reward-flight" aria-hidden="true"><i></i><span>木材 +1</span></div>
+          <p class="gather-message" role="status">选择一种资源，查看“准备 → 动作 → 耗尽”状态。</p>
+        </div>
+
+        <div class="creature-line" aria-label="角色与动物动作设计">
+          <div><span class="actor actor-player"><i></i><b></b></span><strong>玩家</strong><small>待机 / 行走 / 弯腰 / 举起</small></div>
+          <div><span class="actor actor-npc"><i></i><b></b></span><strong>NPC</strong><small>必须带 NPC 叶签</small></div>
+          <div><span class="actor actor-cat"><i></i><b></b></span><strong>猫</strong><small>蜷卧 / 跟随视线 / 伸懒腰</small></div>
+          <div><span class="actor actor-gull"><i></i><b></b></span><strong>海鸟</strong><small>掠过 / 落地 / 惊飞</small></div>
+        </div>
+
+        <div class="actor-state-board" id="actorStates" aria-label="角色与动物动作帧">
+          <header><h3>动作帧不是一句说明</h3><p>角色身体重心与工具方向必须说明动作发生了什么。</p></header>
+          <div class="actor-frames">
+            <span><i class="motion-person idle"></i><b>待机</b></span>
+            <span><i class="motion-person walk"></i><b>行走</b></span>
+            <span><i class="motion-person bend"></i><b>弯腰</b></span>
+            <span><i class="motion-person lift"></i><b>举起</b></span>
+            <span><i class="motion-cat curl"></i><b>猫蜷卧</b></span>
+            <span><i class="motion-cat stretch"></i><b>猫伸展</b></span>
+            <span><i class="motion-gull fly"></i><b>海鸟掠过</b></span>
+            <span><i class="motion-gull land"></i><b>海鸟落地</b></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="chapter homestead-chapter" id="homestead" aria-labelledby="homeTitle">
+        <header class="chapter-heading">
+          <div><h2 id="homeTitle">家园让时间留下痕迹</h2><p>田地保留清晰规则，但不再是整齐的表格。边缘、土块、杂草、湿度和生长高度共同表达状态。</p></div>
+          <div class="phase-switch" role="group" aria-label="切换农田状态">
+            <button class="is-active" type="button" data-phase="wild" aria-pressed="true">荒地</button><button type="button" data-phase="cleared" aria-pressed="false">清理</button><button type="button" data-phase="tilled" aria-pressed="false">翻土</button><button type="button" data-phase="planted" aria-pressed="false">播种</button><button type="button" data-phase="watered" aria-pressed="false">浇水</button><button type="button" data-phase="growing" aria-pressed="false">生长</button><button type="button" data-phase="mature" aria-pressed="false">成熟</button>
+          </div>
+        </header>
+
+        <div class="homestead-stage" data-phase="wild" id="homesteadStage">
+          <span class="home-cabin"><i class="roof"></i><i class="wall"></i><i class="window"></i><i class="door"></i><i class="smoke"></i></span>
+          <span class="home-well"><i></i><b></b></span>
+          <span class="home-greenhouse"><i></i><b></b></span>
+          <span class="home-workbench"><i></i><b></b></span>
+          <div class="plot patch-a"><i class="weed w-a"></i><i class="weed w-b"></i><i class="soil"></i><i class="seed s1"></i><i class="seed s2"></i><i class="crop cr1"></i><i class="crop cr2"></i><i class="water"></i></div>
+          <div class="plot patch-b"><i class="weed w-a"></i><i class="weed w-b"></i><i class="soil"></i><i class="seed s1"></i><i class="seed s2"></i><i class="crop cr1"></i><i class="crop cr2"></i><i class="water"></i></div>
+          <div class="plot patch-c"><i class="weed w-a"></i><i class="weed w-b"></i><i class="soil"></i><i class="seed s1"></i><i class="seed s2"></i><i class="crop cr1"></i><i class="crop cr2"></i><i class="water"></i></div>
+          <span class="home-path"></span>
+          <span class="craft birdhouse"><i></i><b></b></span>
+          <span class="craft projector"><i></i><b></b></span>
+          <span class="craft seedpress"><i></i><b></b></span>
+          <p class="home-caption"><strong id="phaseName">荒地</strong><span id="phaseDescription">杂草集中在地块边缘，中心仍能看出可清理范围。</span></p>
+        </div>
+
+        <div class="build-sequence" aria-label="建筑建设状态">
+          <div><span class="build-shape materials"><i></i></span><strong>材料就绪</strong><small>物品堆放在预计基座</small></div>
+          <div><span class="build-shape scaffolding"><i></i></span><strong>建造中</strong><small>脚手架表示变化，不用进度环</small></div>
+          <div><span class="build-shape complete"><i></i></span><strong>已完成</strong><small>灯光与周围道具开始工作</small></div>
+          <div><span class="build-shape upgrade"><i></i></span><strong>可升级</strong><small>屋顶挂一枚材料叶签</small></div>
+        </div>
+      </section>
+
+      <section class="chapter interface-chapter" id="interface" aria-labelledby="interfaceTitle">
+        <header class="chapter-heading">
+          <div><h2 id="interfaceTitle">界面退到世界边缘，动作回到物体附近</h2><p>常驻信息压缩为罗盘、日历、背包与工具带；只有需要阅读或编辑时，纸张面板才进入视野。</p></div>
+          <div class="viewport-switch" role="group" aria-label="界面尺寸预览"><button class="is-active" type="button" data-viewport="desktop" aria-pressed="true">桌面</button><button type="button" data-viewport="mobile" aria-pressed="false">移动</button></div>
+        </header>
+
+        <div class="hud-specimen" id="hudSpecimen">
+          <div class="hud-world">
+            <span class="hud-tree ht1"></span><span class="hud-tree ht2"></span><span class="hud-rock"></span><span class="hud-player"><i></i><b></b></span>
+            <header class="game-top-ui">
+              <span class="zone-compass"><i></i><strong>静叶林</strong><small>公告树 · 约 46 步</small></span>
+              <span class="day-leaf"><b>春 8</b><small>微风</small></span>
+              <button type="button" class="bag-knot" aria-label="背包"><i></i><b>12</b></button>
+            </header>
+            <div class="energy-vine" aria-label="体力 72%"><span></span><i></i></div>
+            <div class="context-action"><kbd>E</kbd><span><strong>拾起树枝</strong><small>会消耗 2 点体力</small></span></div>
+            <nav class="toolbelt" aria-label="工具带">
+              <button class="is-active" type="button" aria-pressed="true"><i class="tool-hand"></i><span>手</span></button>
+              <button type="button" aria-pressed="false"><i class="tool-hoe"></i><span>锄</span></button>
+              <button type="button" aria-pressed="false"><i class="tool-water"></i><span>壶</span></button>
+              <button type="button" aria-pressed="false"><i class="tool-seed"></i><span>种</span></button>
+            </nav>
+          </div>
+          <aside class="hud-notes">
+            <h3>常驻层只保留四件事</h3>
+            <ol><li><b>我在哪里</b><span>区域与最近信号</span></li><li><b>今天怎样</b><span>日期、天气、体力</span></li><li><b>我能做什么</b><span>上下文动作靠近物体出现</span></li><li><b>我手里有什么</b><span>工具与背包形成同一套物理隐喻</span></li></ol>
+          </aside>
+        </div>
+
+        <div class="interface-workbench">
+          <article class="dialogue-specimen">
+            <div class="portrait-figure"><span></span><i></i><b></b></div>
+            <div class="dialogue-paper"><small>木秋</small><p>潮水退下去以后，岸边可能会留下新的东西。也可能什么都没有。</p><div><button type="button">我去看看</button><button type="button">先留在这里</button></div></div>
+          </article>
+
+          <article class="sheet-specimen">
+            <header><div><h3>公告树</h3><p>世界里的纸条都挂在风的记忆里。</p></div><button type="button" aria-label="关闭面板">关闭</button></header>
+            <nav class="paper-tabs" role="tablist" aria-label="公告树分类"><button class="is-active" role="tab" type="button" data-sheet-tab="video" aria-selected="true" aria-controls="paperList">素材</button><button role="tab" type="button" data-sheet-tab="commission" aria-selected="false" aria-controls="paperList">委托</button><button role="tab" type="button" data-sheet-tab="need" aria-selected="false" aria-controls="paperList">需求</button></nav>
+            <label class="search-field"><span>搜索世界里的标题或纸条</span><input type="search" placeholder="例如：海边、猫、回声" /></label>
+            <div class="paper-list" id="paperList">
+              <button type="button"><i class="list-thumbnail thumb-a"></i><span><strong>风从旧招牌后面经过</strong><small>慢街 · 公共影像</small></span><em>定位</em></button>
+              <button type="button"><i class="list-thumbnail thumb-b"></i><span><strong>想找一段安静的海面</strong><small>个人需求 · 2 个回应</small></span><em>查看</em></button>
+            </div>
+            <footer><button class="paper-secondary" type="button">保存草稿</button><button class="paper-primary" type="button" id="showToast">在这里留纸条</button></footer>
+          </article>
+        </div>
+
+        <div class="feedback-line" aria-label="系统反馈与边缘状态">
+          <div class="feedback feedback-loading"><i></i><span><strong>正在接住这段影像</strong><small>保留当前内容，不清空界面</small></span></div>
+          <div class="feedback feedback-success"><i></i><span><strong>纸条已经挂上树梢</strong><small>可以留在这里，也可以去定位</small></span></div>
+          <div class="feedback feedback-error"><i></i><span><strong>影像文件没有保存下来</strong><small>地图物件仍已保留，可重新选择文件</small></span></div>
+          <div class="feedback feedback-empty"><i></i><span><strong>背包里还没有影子</strong><small>靠近公共影像即可收藏副本线索</small></span></div>
+          <div class="feedback feedback-disabled"><i></i><span><strong>今天还不能再浇水</strong><small>体力不足；休息后可以继续</small></span></div>
+        </div>
+
+        <div class="control-state-matrix" id="controlStates" aria-label="代表性控件状态">
+          <header><h3>控件状态必须落在真实按钮上</h3><p>颜色、文案、图形与可用性同时变化；不能只在规范末尾列出名称。</p></header>
+          <div>
+            <span><button type="button">默认 · 留纸条</button><small>可直接操作</small></span>
+            <span><button class="state-hover" type="button">悬停 · 留纸条</button><small>纸面抬起</small></span>
+            <span><button class="state-focus" type="button">焦点 · 留纸条</button><small>高对比焦点环</small></span>
+            <span><button class="state-loading" type="button"><i></i>正在挂上树梢</button><small>保留动作名称</small></span>
+            <span><button class="state-error" type="button">重试保存文件</button><small>错误给出恢复动作</small></span>
+            <span><button class="state-success" type="button">已经挂上树梢</button><small>确认结果</small></span>
+            <span><button type="button" disabled>体力不足</button><small>禁用说明原因</small></span>
+            <span><button class="state-empty" type="button">去附近看看</button><small>空状态引向世界</small></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="chapter coverage-chapter" id="coverage" aria-labelledby="coverageTitle">
+        <header class="chapter-heading">
+          <div><h2 id="coverageTitle">全部功能如何进入同一套设计语言</h2><p>下面不是新增页面，而是现有功能向四类界面骨架的归并关系。这样后续实现不会再次长出几十套不同面板。</p></div>
+          <div class="coverage-total"><strong>41</strong><span>类页面与状态已归类</span></div>
+        </header>
+
+        <div class="coverage-map">
+          <article>
+            <header><i class="coverage-shape world-sheet"></i><h3>世界纸张</h3><p>阅读一个对象，保留世界背景。</p></header>
+            <ul><li>视频详情 / 播放 / 标签 / 评论</li><li>需求详情 / 回应 / 合作</li><li>漂流瓶 / 长椅留言 / 异象</li><li>望远镜 / 声音码头 / 邻居空间</li></ul>
+          </article>
+          <article>
+            <header><i class="coverage-shape field-book"></i><h3>随身册页</h3><p>管理自己携带、收藏或发布的东西。</p></header>
+            <ul><li>背包 / 收藏 / 视频副本</li><li>公告树搜索 / 委托 / 需求</li><li>上传 / 草稿 / 发布位置</li><li>个人空间布置簿 / 建造清单</li></ul>
+          </article>
+          <article>
+            <header><i class="coverage-shape work-table"></i><h3>操作工作台</h3><p>需要排序、比较或组合时扩大操作面。</p></header>
+            <ul><li>竞价 / NPC 竞价状态</li><li>胶片晾衣绳 / 双面放映墙</li><li>混剪桌 / 交换箱</li><li>咖啡与宠物橱窗 / 空白画框</li></ul>
+          </article>
+          <article>
+            <header><i class="coverage-shape account-drawer"></i><h3>账户抽屉</h3><p>离开世界行为、处理长期设置。</p></header>
+            <ul><li>登录 / 注册 / 找回密码</li><li>角色资料 / 隐私 / 设备安全</li><li>数据与成长 / 虚拟账本</li><li>帮助反馈 / 管理员入口</li></ul>
+          </article>
+        </div>
+
+        <div class="implementation-rules">
+          <h3>实现时必须一起交付的状态</h3>
+          <div><span>默认</span><span>悬停</span><span>键盘焦点</span><span>靠近</span><span>激活</span><span>禁用</span><span>冷却</span><span>耗尽</span><span>空</span><span>加载</span><span>错误</span><span>成功</span></div>
+          <p>所有按钮保持至少 44×44px 触控区域；动效遵循减少动态偏好；NPC 竞价始终显示 NPC 身份；虚拟币始终说明不可提现、不可兑换。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="board-footer">
+      <div><strong>ZHERE 世界元素图鉴 v1</strong><p>非像素简笔画 · 粗线平涂 · 公共世界不可改造 · 个人小屋持续成长</p></div>
+      <a href="./index.html">返回当前游戏原型</a>
+    </footer>
+
+    <div class="demo-toast" id="demoToast" role="status" hidden><i></i><span><strong>纸条已经挂上树梢</strong><small>它会出现在你脚下，也会进入公告树索引。</small></span></div>
+    <script src="./element-design-board.js"></script>
+  </body>
+</html>
