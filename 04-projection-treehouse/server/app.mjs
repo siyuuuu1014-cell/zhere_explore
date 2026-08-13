@@ -74,7 +74,11 @@ async function readBytes(request, maxBytes) {
 }
 
 function validateIdentity(identity) {
-  return /^\+?[0-9][0-9\s-]{7,17}$/.test(identity) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity);
+  return /^1[3-9]\d{9}$/.test(identity) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity);
+}
+
+function internalUsername(identity) {
+  return `user-${createHash('sha256').update(identity).digest('hex').slice(0, 12)}`;
 }
 
 function cleanText(value, max = 200) {
@@ -86,6 +90,57 @@ function cleanCoordinate(value) {
   return Number.isFinite(number) ? Math.max(-1000000, Math.min(1000000, number)) : 0;
 }
 
+async function readVideoMultipart(request, config) {
+  const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+  const multipartBytes = await readBytes(request, config.maxVideoBytes + 1024 * 1024);
+  const webRequest = new Request(requestUrl, { method: 'POST', headers: request.headers, body: multipartBytes });
+  const form = await webRequest.formData();
+  const file = form.get('file');
+  if (!(file instanceof File) || !file.type.startsWith('video/')) {
+    throw Object.assign(new Error('invalid-media'), { status: 400, publicMessage: '请选择有效视频文件。' });
+  }
+  if (file.size > config.maxVideoBytes) {
+    throw Object.assign(new Error('media-too-large'), { status: 413, publicMessage: `视频不能超过 ${Math.floor(config.maxVideoBytes / 1024 / 1024)}MB。` });
+  }
+  const assetId = cleanText(form.get('assetId') || `u-${randomUUID()}`, 80).replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!/^[a-z0-9_-]{2,80}$/i.test(assetId)) {
+    throw Object.assign(new Error('invalid-asset-id'), { status: 400, publicMessage: '素材 ID 无效。' });
+  }
+  return {
+    form, file, assetId,
+    mediaInput: {
+      assetId,
+      title: cleanText(form.get('title') || file.name, 80),
+      description: cleanText(form.get('description'), 500),
+      fileName: cleanText(file.name, 180),
+      mime: file.type,
+      bytes: Buffer.from(await file.arrayBuffer()),
+    },
+  };
+}
+
+function publicAssetRecord(user, body, media, existing = null) {
+  const now = new Date().toISOString();
+  return {
+    id: cleanText(body.id, 80),
+    ownerId: user.id,
+    ownerName: user.nickname || '匿名旅人',
+    title: cleanText(body.title, 80) || '未命名素材',
+    description: cleanText(body.description, 500),
+    fileName: cleanText(media?.fileName, 180),
+    mime: media?.mime || cleanText(body.mime, 80),
+    hasMedia: Boolean(media),
+    status: 'published',
+    source: 'user',
+    spawn_source: '玩家发布',
+    wx: cleanCoordinate(body.wx), wy: cleanCoordinate(body.wy), zone: cleanText(body.zone, 40),
+    likes: Number(existing?.likes || 0), likedBy: existing?.likedBy || [], comments: existing?.comments || [], tagRecords: existing?.tagRecords || [], tags: existing?.tags || [],
+    dur: '—', res: media ? '已上传' : '示例', license: '个人', price: 0,
+    exposureRoll: Number(existing?.exposureRoll || Math.random()),
+    createdAt: existing?.createdAt || now, updatedAt: now,
+  };
+}
+
 function contentFreshness(record) {
   if (record.archived) return { archived: true, freshness: 'archived', freshnessLabel: '已归档' };
   const ageDays = Math.max(0, (Date.now() - (Date.parse(record.createdAt || record.updatedAt || 0) || Date.now())) / 86400000);
@@ -95,7 +150,7 @@ function contentFreshness(record) {
 }
 
 function publicAssetView(asset, viewerId) {
-  const { ownerId, comments = [], likedBy = [], tagRecords = [], ...publicAsset } = asset;
+  const { ownerId, comments = [], likedBy = [], tagRecords = [], _recordId, ...publicAsset } = asset;
   return {
     ...publicAsset,
     ...contentFreshness(asset),
@@ -194,11 +249,37 @@ export function createApp({ repository, config = defaultConfig }) {
   const headers = commonHeaders(config);
   const rateBuckets = new Map();
   const sessionCache = new Map();
+  let publicWorldCache = null;
   const sessionCacheTtlMs = 30_000;
+  const publicWorldCacheTtlMs = Math.max(0, Number(config.publicWorldCacheTtlMs) || 0);
+  const slowRequestThresholdMs = Math.max(0, Number(config.slowRequestThresholdMs) || 0);
   const sessionCleanupIntervalMs = Math.max(60_000, Number(config.sessionCleanupIntervalMs) || 15 * 60 * 1000);
   let lastSessionCleanupAt = 0;
   let sessionCleanup = null;
   const marketInsightMinSample = Math.max(3, Number(config.marketInsightMinSample) || 5);
+
+  function invalidatePublicWorldCache() {
+    publicWorldCache = null;
+  }
+
+  async function readPublicWorldSnapshot() {
+    if (publicWorldCache && publicWorldCache.expiresAt > Date.now()) return publicWorldCache.promise;
+    const entry = {
+      expiresAt: Date.now() + publicWorldCacheTtlMs,
+      promise: Promise.all([
+        repository.listPublicAssets({ includeDeleted: true }),
+        repository.listPublicDemands({ includeDeleted: true }),
+        repository.listPublicRecords({ includeDeleted: true }),
+      ]).then(([assets, demands, records]) => ({ assets, demands, records })),
+    };
+    publicWorldCache = entry;
+    try {
+      return await entry.promise;
+    } catch (error) {
+      if (publicWorldCache === entry) publicWorldCache = null;
+      throw error;
+    }
+  }
 
   function exposeUser(user) {
     const result = publicUser(user);
@@ -209,8 +290,9 @@ export function createApp({ repository, config = defaultConfig }) {
     return Boolean(user && config.adminIdentities?.includes(String(user.identity || '').toLowerCase()));
   }
 
-  async function ensureResearchIdentity(user) {
-    const subject = await repository.ensureResearchSubject(user.id, { createdAt: user.createdAt || new Date().toISOString() });
+  async function ensureResearchIdentity(user, { skipLookup = false } = {}) {
+    const subjectId = user.researchSubjectId || (skipLookup ? `rs-${randomUUID()}` : '');
+    const subject = await repository.ensureResearchSubject(user.id, { createdAt: user.createdAt || new Date().toISOString(), subjectId, skipLookup });
     if (!user.researchSubjectId || user.researchSubjectId !== subject.subject_id) {
       user.researchSubjectId = subject.subject_id;
       user.updatedAt = new Date().toISOString();
@@ -219,14 +301,14 @@ export function createApp({ repository, config = defaultConfig }) {
     return subject;
   }
 
-  async function recordConsent(user, researchAllowed, reason) {
-    const subject = await ensureResearchIdentity(user);
+  async function recordConsent(user, researchAllowed, reason, { subject = null, skipLookup = false } = {}) {
+    const researchSubject = subject || await ensureResearchIdentity(user, { skipLookup });
     const now = new Date().toISOString();
     return repository.recordResearchConsent({
-      consent_id: `consent-${randomUUID()}`, user_id: user.id, subject_id: subject.subject_id,
+      consent_id: `consent-${randomUUID()}`, user_id: user.id, subject_id: researchSubject.subject_id,
       consent_version: config.researchConsentVersion || 'research-v1', research_allowed: Boolean(researchAllowed),
       text_research_allowed: Boolean(researchAllowed), reason, effective_at: now,
-    });
+    }, { skipLookup });
   }
 
   async function ensureRegistrationConsent(user) {
@@ -298,25 +380,31 @@ export function createApp({ repository, config = defaultConfig }) {
     return String(request.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
   }
 
-  async function issueSession(request, response, user) {
-    const subject = user.researchSubjectId
+  async function issueSession(request, response, user, { subject: suppliedSubject = null } = {}) {
+    const subject = suppliedSubject || (user.researchSubjectId
       ? { subject_id: user.researchSubjectId }
-      : await ensureResearchIdentity(user);
+      : await ensureResearchIdentity(user));
     const token = createSessionToken();
     const maxAge = config.sessionDays * 86400;
     const session = {
       id: randomUUID(), userId: user.id, tokenHash: hashToken(token),
       createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + maxAge * 1000).toISOString(),
     };
-    await repository.createResearchSession({
+    const researchSession = {
         session_id: session.id, user_id: user.id, subject_id: subject.subject_id,
         started_at: session.createdAt, consent_version: config.researchConsentVersion || 'research-v1',
         research_allowed: Boolean(user.research), entry_surface: 'web_game', client_version: 'formal-v4', schema_version: '1',
-    });
+    };
     try {
-      await repository.createSession(session);
+      await Promise.all([
+        repository.createResearchSession(researchSession, { skipLookup: true }),
+        repository.createSession(session),
+      ]);
     } catch (error) {
-      await repository.endResearchSession(session.id, new Date().toISOString(), 'session-create-failed').catch(() => {});
+      await Promise.allSettled([
+        repository.endResearchSession(session.id, new Date().toISOString(), 'session-create-failed'),
+        repository.deleteSession(session.tokenHash),
+      ]);
       throw error;
     }
     sessionCache.set(session.tokenHash, { record: session, user, cachedUntil: Date.now() + sessionCacheTtlMs });
@@ -327,6 +415,11 @@ export function createApp({ repository, config = defaultConfig }) {
     const session = await currentSession(request);
     if (!session) apiError(response, 401, 'unauthorized', '请先登录。');
     return session?.user || null;
+  }
+
+  async function sessionBootstrap(user) {
+    const world = await repository.getWorldState(user.id);
+    return { state: world?.state || null, version: world?.version || 0 };
   }
 
   function sameOrigin(request) {
@@ -352,7 +445,7 @@ export function createApp({ repository, config = defaultConfig }) {
     if (url.pathname === '/api/auth/register' && request.method === 'POST') {
       const body = await readJson(request, 64 * 1024);
       const identity = normalizeIdentity(body.identity);
-      if (!validateIdentity(identity)) return apiError(response, 400, 'invalid-identity', '请输入有效邮箱或手机号。');
+      if (!validateIdentity(identity)) return apiError(response, 400, 'invalid-identity', '请输入有效邮箱或中国大陆 11 位手机号。');
       if (String(body.password || '').length < 8) return apiError(response, 400, 'weak-password', '密码至少需要 8 位。');
       if (body.password !== body.confirmPassword) return apiError(response, 400, 'password-mismatch', '两次密码不一致。');
       if (!body.ageConfirmed || !body.agreeTerms) return apiError(response, 400, 'consent-required', '请确认年龄并同意条款。');
@@ -361,22 +454,35 @@ export function createApp({ repository, config = defaultConfig }) {
         return apiError(response, 409, 'identity-exists', '该邮箱或手机号已经注册。');
       }
       const user = existingUser || {
-        id: randomUUID(), identity, username: String(body.username || '').trim().slice(0, 32),
+        id: randomUUID(), identity, username: String(body.username || '').trim().slice(0, 32) || internalUsername(identity),
         nickname: String(body.nickname || '').trim().slice(0, 32), spaceName: String(body.spaceName || '').trim().slice(0, 40),
         research: Boolean(body.research), passwordHash: hashPassword(String(body.password)), guest: false,
         failedLoginCount: 0, frozenUntil: null, registrationStatus: 'pending',
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
-      if (user.username.length < 2 || !user.nickname) return apiError(response, 400, 'profile-invalid', '用户名和昵称不能为空。');
-      if (!existingUser) await repository.createUser(user);
-      await ensureRegistrationConsent(user);
-      await issueSession(request, response, user);
+      if (!/^[A-Za-z0-9_-]{2,32}$/.test(user.username)) return apiError(response, 400, 'profile-invalid', '用户名只能使用 2–32 位字母、数字、下划线或短横线。');
+      if (!user.nickname || user.nickname.length > 16) return apiError(response, 400, 'profile-invalid', '昵称需要 1–16 个字符。');
+      if (!user.spaceName || user.spaceName.length > 24) return apiError(response, 400, 'profile-invalid', '小屋名称需要 1–24 个字符。');
+      if (!existingUser) {
+        user.researchSubjectId = `rs-${randomUUID()}`;
+        const [, subject] = await Promise.all([
+          repository.createUser(user),
+          ensureResearchIdentity(user, { skipLookup: true }),
+        ]);
+        await Promise.all([
+          recordConsent(user, user.research, 'registration', { subject, skipLookup: true }),
+          issueSession(request, response, user, { subject }),
+        ]);
+      } else {
+        await ensureRegistrationConsent(user);
+        await issueSession(request, response, user);
+      }
       if (user.registrationStatus !== 'complete') {
         user.registrationStatus = 'complete';
         user.updatedAt = new Date().toISOString();
         await repository.updateUser(user);
       }
-      return json(response, existingUser ? 200 : 201, { ok: true, resumed: Boolean(existingUser), user: exposeUser(user) });
+      return json(response, existingUser ? 200 : 201, { ok: true, resumed: Boolean(existingUser), user: exposeUser(user), ...await sessionBootstrap(user) });
     }
 
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
@@ -396,8 +502,11 @@ export function createApp({ repository, config = defaultConfig }) {
         user.failedLoginCount = 0; user.frozenUntil = null; user.updatedAt = new Date().toISOString();
         await repository.updateUser(user);
       }
-      await issueSession(request, response, user);
-      return json(response, 200, { ok: true, user: exposeUser(user) });
+      const [, bootstrap] = await Promise.all([
+        issueSession(request, response, user),
+        sessionBootstrap(user),
+      ]);
+      return json(response, 200, { ok: true, user: exposeUser(user), ...bootstrap });
     }
 
     if (url.pathname === '/api/auth/guest' && request.method === 'POST') {
@@ -407,15 +516,26 @@ export function createApp({ repository, config = defaultConfig }) {
         nickname: '路过的风', spaceName: '礁石小窝', research: false, passwordHash: '', guest: true,
         failedLoginCount: 0, frozenUntil: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
-      await repository.createUser(user);
-      await recordConsent(user, false, 'guest-registration');
-      await issueSession(request, response, user);
-      return json(response, 201, { ok: true, user: exposeUser(user) });
+      user.researchSubjectId = `rs-${randomUUID()}`;
+      const [, subject] = await Promise.all([
+        repository.createUser(user),
+        ensureResearchIdentity(user, { skipLookup: true }),
+      ]);
+      await Promise.all([
+        recordConsent(user, false, 'guest-registration', { subject, skipLookup: true }),
+        issueSession(request, response, user, { subject }),
+      ]);
+      return json(response, 201, { ok: true, user: exposeUser(user), ...await sessionBootstrap(user) });
     }
 
     if (url.pathname === '/api/auth/session' && request.method === 'GET') {
       const session = await currentSession(request);
-      return json(response, 200, { ok: true, authenticated: Boolean(session), user: exposeUser(session?.user) });
+      return json(response, 200, {
+        ok: true,
+        authenticated: Boolean(session),
+        user: exposeUser(session?.user),
+        ...(session ? await sessionBootstrap(session.user) : {}),
+      });
     }
 
     if (url.pathname === '/api/profile' && request.method === 'PUT') {
@@ -436,8 +556,10 @@ export function createApp({ repository, config = defaultConfig }) {
       if (token) {
         const tokenHash = hashToken(token);
         const record = sessionCache.get(tokenHash)?.record || await repository.getSession(tokenHash);
-        if (record?.id) await repository.endResearchSession(record.id, new Date().toISOString(), 'logout');
-        await repository.deleteSession(tokenHash);
+        await Promise.all([
+          record?.id ? repository.endResearchSession(record.id, new Date().toISOString(), 'logout') : Promise.resolve(),
+          repository.deleteSession(tokenHash),
+        ]);
         sessionCache.delete(tokenHash);
       }
       response.setHeader('set-cookie', sessionCookie('', { secure: secureSessionCookie(request), maxAge: 0 }));
@@ -447,7 +569,7 @@ export function createApp({ repository, config = defaultConfig }) {
     if (url.pathname === '/api/auth/forgot-password' && request.method === 'POST') {
       const body = await readJson(request, 32 * 1024);
       const identity = normalizeIdentity(body.identity);
-      if (!validateIdentity(identity)) return apiError(response, 400, 'invalid-identity', '请输入有效邮箱或手机号。');
+      if (!validateIdentity(identity)) return apiError(response, 400, 'invalid-identity', '请输入有效邮箱或中国大陆 11 位手机号。');
       if (allowPublicWrite(identity, 'forgot-password', 3, 60 * 60_000)) {
         await repository.createPasswordReset({
           id: randomUUID(), identity, note: String(body.note || '').slice(0, 500),
@@ -558,11 +680,10 @@ export function createApp({ repository, config = defaultConfig }) {
 
     if (url.pathname === '/api/public/world' && request.method === 'GET') {
       const user = await requireUser(request, response); if (!user) return;
-      let [allAssets, allDemands, allRecords] = await Promise.all([
-        repository.listPublicAssets({ includeDeleted: true }),
-        repository.listPublicDemands({ includeDeleted: true }),
-        repository.listPublicRecords({ includeDeleted: true }),
-      ]);
+      const snapshot = await readPublicWorldSnapshot();
+      let allAssets = snapshot.assets;
+      let allDemands = snapshot.demands;
+      let allRecords = snapshot.records;
       if (!allRecords.some((record) => record.kind === 'swap_offer' && record.status === 'published')) {
         const now = new Date().toISOString();
         const created = await repository.savePublicRecord({
@@ -571,7 +692,10 @@ export function createApp({ repository, config = defaultConfig }) {
           payload: { assetId: 'v-old-radio', note: '换一个你觉得适合雨夜的东西。', by: '木秋（NPC）', npc: true },
           createdAt: now, updatedAt: now,
         });
-        if (created) allRecords = [...allRecords, created];
+        if (created) {
+          allRecords = [...allRecords, created];
+          invalidatePublicWorldCache();
+        }
       }
       const snapshotAt = new Date().toISOString();
       const since = Number.isNaN(Date.parse(url.searchParams.get('since') || '')) ? null : Date.parse(url.searchParams.get('since'));
@@ -620,14 +744,17 @@ export function createApp({ repository, config = defaultConfig }) {
       if (!/^[a-z0-9_.:-]{8,100}$/i.test(clientIdempotencyKey)) return apiError(response, 400, 'invalid-idempotency-key', '报价请求标识无效，请重新提交。');
       const idempotencyKey = createHash('sha256').update(`${user.id}:${clientIdempotencyKey}`).digest('hex');
       const now = new Date().toISOString();
-      const bidId = `bid-${randomUUID()}`;
+      // Stable IDs make a partially completed Feishu write safe to retry and
+      // let Bid and Transaction be persisted in parallel.
+      const bidId = `bid-${idempotencyKey.slice(0, 40)}`;
+      const transactionId = `txn-${idempotencyKey.slice(0, 40)}`;
       const result = await repository.createAcceptedBidTransaction({
         bid: {
           bid_id: bidId, user_id: user.id, material_id: materialId, bid_time: now,
           bid_price: bidPrice, counter_price: null, bid_status: 'accepted', bidder_type: 'player', idempotency_key: idempotencyKey,
         },
         transaction: {
-          transaction_id: `txn-${randomUUID()}`, bid_id: bidId, material_id: materialId, user_id: user.id,
+          transaction_id: transactionId, bid_id: bidId, material_id: materialId, user_id: user.id,
           transaction_time: now, bid_price: bidPrice, transaction_price: bidPrice, is_valid: true,
         },
         basePriceTransactionCount: config.basePriceTransactionCount,
@@ -804,6 +931,42 @@ export function createApp({ repository, config = defaultConfig }) {
       return json(response, 200, { ok: true, ...result });
     }
 
+    if (url.pathname === '/api/public/assets/upload' && request.method === 'POST') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!allowPublicWrite(user.id, 'asset-upload-publish', 20, 60 * 60_000)) return apiError(response, 429, 'rate-limited', '发布过于频繁，请稍后再试。');
+      let upload;
+      try { upload = await readVideoMultipart(request, config); }
+      catch (error) { return apiError(response, error.status || 400, error.message || 'invalid-media', error.publicMessage || '视频上传格式无效。'); }
+
+      const { form, assetId, mediaInput } = upload;
+      const [existingMedia, existingPublic] = await Promise.all([
+        repository.getMedia(assetId),
+        repository.getPublicAssetCore ? repository.getPublicAssetCore(assetId) : repository.getPublicAsset(assetId),
+      ]);
+      if (existingMedia && existingMedia.userId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
+      if (existingPublic && existingPublic.ownerId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
+      if (existingPublic?.moderationStatus === 'hidden') return apiError(response, 403, 'asset-hidden', '该素材已被隐藏，不能通过重试重新发布。');
+      if (existingPublic?.status === 'published' && existingPublic.moderationStatus !== 'hidden') {
+        return json(response, 200, { ok: true, duplicate: true, reusedMedia: Boolean(existingMedia), asset: publicAssetView(existingPublic, user.id) });
+      }
+
+      // Feishu cannot wrap Drive and Bitable in one transaction. Keeping a
+      // successfully uploaded private media row lets the same asset id resume
+      // publication without uploading the file again after a partial failure.
+      const media = existingMedia || await repository.saveMedia({ userId: user.id, ...mediaInput });
+      const body = {
+        id: assetId,
+        title: form.get('title'), description: form.get('description'),
+        wx: form.get('wx'), wy: form.get('wy'), zone: form.get('zone'),
+      };
+      const record = await repository.savePublicAsset(publicAssetRecord(user, body, media, existingPublic), { existing: existingPublic, skipLookup: !existingPublic });
+      return json(response, existingPublic ? 200 : 201, {
+        ok: true, duplicate: false, reusedMedia: Boolean(existingMedia),
+        asset: publicAssetView(record, user.id),
+        media: { id: media.id, fileName: media.fileName, mime: media.mime, size: media.size, mediaUrl: `/api/media/${encodeURIComponent(media.id)}` },
+      });
+    }
+
     if (url.pathname === '/api/public/assets' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
       if (!allowPublicWrite(user.id, 'asset-publish', 20, 60 * 60_000)) return apiError(response, 429, 'rate-limited', '发布过于频繁，请稍后再试。');
@@ -813,27 +976,10 @@ export function createApp({ repository, config = defaultConfig }) {
       const media = await repository.getMedia(assetId);
       if (!media) return apiError(response, 400, 'media-required', '公开视频必须先上传可播放的视频文件。');
       if (media && media.userId !== user.id) return apiError(response, 403, 'asset-owner-mismatch', '不能发布其他用户的素材文件。');
-      const existing = await repository.getPublicAsset(assetId);
+      const existing = repository.getPublicAssetCore ? await repository.getPublicAssetCore(assetId) : await repository.getPublicAsset(assetId);
       if (existing && existing.ownerId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
-      const now = new Date().toISOString();
-      const record = await repository.savePublicAsset({
-        id: assetId,
-        ownerId: user.id,
-        ownerName: user.nickname || '匿名旅人',
-        title: cleanText(body.title, 80) || '未命名素材',
-        description: cleanText(body.description, 500),
-        fileName: media ? cleanText(media.fileName, 180) : '',
-        mime: media?.mime || cleanText(body.mime, 80),
-        hasMedia: Boolean(media),
-        status: 'published',
-        source: 'user',
-        spawn_source: '玩家发布',
-        wx: cleanCoordinate(body.wx), wy: cleanCoordinate(body.wy), zone: cleanText(body.zone, 40),
-        likes: Number(existing?.likes || 0), likedBy: existing?.likedBy || [], comments: existing?.comments || [], tagRecords: existing?.tagRecords || [], tags: existing?.tags || [],
-        dur: '—', res: media ? '已上传' : '示例', license: '个人', price: 0,
-        exposureRoll: Number(existing?.exposureRoll || Math.random()),
-        createdAt: existing?.createdAt || now, updatedAt: now,
-      });
+      if (existing?.moderationStatus === 'hidden') return apiError(response, 403, 'asset-hidden', '该素材已被隐藏，不能重新发布。');
+      const record = await repository.savePublicAsset(publicAssetRecord(user, { ...body, id: assetId }, media, existing), { existing, skipLookup: !existing });
       return json(response, existing ? 200 : 201, { ok: true, asset: publicAssetView(record, user.id) });
     }
 
@@ -933,7 +1079,7 @@ export function createApp({ repository, config = defaultConfig }) {
       const body = await readJson(request, 128 * 1024);
       const demandId = cleanText(body.id, 80) || `n-${randomUUID()}`;
       if (!/^[a-z0-9_-]{2,80}$/i.test(demandId)) return apiError(response, 400, 'invalid-demand-id', '需求 ID 无效。');
-      const existing = await repository.getPublicDemand(demandId);
+      const existing = await repository.getPublicDemandCore(demandId);
       if (existing && existing.ownerId !== user.id) return apiError(response, 409, 'demand-id-exists', '该需求 ID 已被使用。');
       const title = cleanText(body.title, 48);
       if (!title) return apiError(response, 400, 'demand-title-required', '请填写需求标题。');
@@ -947,7 +1093,7 @@ export function createApp({ repository, config = defaultConfig }) {
         wx: cleanCoordinate(body.wx), wy: cleanCoordinate(body.wy), zone: cleanText(body.zone, 40),
         refAsset: cleanText(body.refAsset, 80) || null, assetLinks: Array.isArray(existing?.assetLinks) ? existing.assetLinks : [],
         createdAt: existing?.createdAt || now, updatedAt: now,
-      });
+      }, { skipLookup: !existing });
       const withResponses = { ...record, responses: existing?.responses || [] };
       return json(response, existing ? 200 : 201, { ok: true, demand: publicDemandView(withResponses, user.id) });
     }
@@ -993,19 +1139,31 @@ export function createApp({ repository, config = defaultConfig }) {
       const user = await requireUser(request, response); if (!user) return;
       if (!allowPublicWrite(user.id, 'demand-response', 40)) return apiError(response, 429, 'rate-limited', '回应过于频繁，请稍后再试。');
       const demandId = decodeURIComponent(responseMatch[1]);
-      const demand = await repository.getPublicDemand(demandId);
-      if (!demand) return apiError(response, 404, 'demand-not-found', '需求不存在。');
-      if (demand.status !== 'open') return apiError(response, 409, 'demand-closed', '该需求已经关闭。');
       const body = await readJson(request, 64 * 1024);
       const text = cleanText(body.text, 500);
       const assetId = cleanText(body.assetId, 80) || null;
+      const requestedResponseId = cleanText(body.id, 80);
+      if (requestedResponseId && !/^[a-z0-9_.:-]{8,80}$/i.test(requestedResponseId)) return apiError(response, 400, 'invalid-response-id', '回应请求标识无效，请重新提交。');
+      const responseId = requestedResponseId || `response-${randomUUID()}`;
       if (!text && !assetId) return apiError(response, 400, 'empty-response', '请选择视频或填写回应。');
-      if (assetId && !assetId.startsWith('v-') && !(await repository.getPublicAsset(assetId))) return apiError(response, 400, 'asset-not-public', '回应视频必须先发布到公共世界。');
+      const [demand, publicAsset, existingResponse] = await Promise.all([
+        repository.getPublicDemandCore(demandId),
+        assetId && !assetId.startsWith('v-') ? repository.getPublicAsset(assetId) : Promise.resolve(null),
+        repository.getPublicResponse(responseId),
+      ]);
+      if (!demand) return apiError(response, 404, 'demand-not-found', '需求不存在。');
+      if (demand.status !== 'open') return apiError(response, 409, 'demand-closed', '该需求已经关闭。');
+      if (assetId && !assetId.startsWith('v-') && !publicAsset) return apiError(response, 400, 'asset-not-public', '回应视频必须先发布到公共世界。');
+      if (existingResponse) {
+        if (existingResponse.demandId !== demandId || existingResponse.ownerId !== user.id) return apiError(response, 409, 'response-id-exists', '该回应请求标识已被使用。');
+        const { ownerId: _ownerId, _recordId, ...publicResponse } = existingResponse;
+        return json(response, 200, { ok: true, response: { ...publicResponse, owner: 'me' }, duplicate: true });
+      }
       const record = await repository.createPublicResponse({
-        id: cleanText(body.id, 80) || `response-${randomUUID()}`,
+        id: responseId,
         demandId, ownerId: user.id, ownerName: user.nickname || '匿名旅人', name: user.nickname || '匿名旅人',
         text, assetId, assetTitle: cleanText(body.assetTitle, 80), status: 'published', createdAt: new Date().toISOString(), at: '刚刚',
-      });
+      }, { skipLookup: true });
       return json(response, 201, { ok: true, response: { ...record, owner: 'me' } });
     }
 
@@ -1014,18 +1172,15 @@ export function createApp({ repository, config = defaultConfig }) {
       const user = await requireUser(request, response); if (!user) return;
       const demandId = decodeURIComponent(responseItemMatch[1]);
       const responseId = decodeURIComponent(responseItemMatch[2]);
-      const demand = await repository.getPublicDemand(demandId);
-      if (!demand) return apiError(response, 404, 'demand-not-found', '需求不存在。');
-      if (!(demand.responses || []).some((item) => item.id === responseId)) return apiError(response, 404, 'response-not-found', '该需求下不存在这条回应。');
       if (request.method === 'DELETE') {
-        const result = await repository.updatePublicResponse(responseId, user.id, { status: 'deleted' });
+        const result = await repository.updatePublicResponse(responseId, user.id, { status: 'deleted' }, { demandId });
         if (result == null) return apiError(response, 404, 'response-not-found', '回应不存在。');
         if (!result) return apiError(response, 403, 'not-response-owner', '只能删除自己的回应。');
         return json(response, 200, { ok: true, deleted: true });
       }
       const body = await readJson(request, 32 * 1024);
       const text = cleanText(body.text, 500);
-      const result = await repository.updatePublicResponse(responseId, user.id, { text });
+      const result = await repository.updatePublicResponse(responseId, user.id, { text }, { demandId });
       if (result == null) return apiError(response, 404, 'response-not-found', '回应不存在。');
       if (!result) return apiError(response, 403, 'not-response-owner', '只能修改自己的回应。');
       const { ownerId, ...publicResponse } = result;
@@ -1036,11 +1191,14 @@ export function createApp({ repository, config = defaultConfig }) {
     if (demandLinkMatch && request.method === 'PUT') {
       const user = await requireUser(request, response); if (!user) return;
       const demandId = decodeURIComponent(demandLinkMatch[1]);
-      const demand = await repository.getPublicDemand(demandId);
-      if (!demand) return apiError(response, 404, 'demand-not-found', '需求不存在。');
       const body = await readJson(request, 16 * 1024);
       const assetId = cleanText(body.assetId, 80);
-      if (!assetId || (!assetId.startsWith('v-') && !(await repository.getPublicAsset(assetId)))) return apiError(response, 400, 'asset-not-public', '只能关联公共素材。');
+      const [demand, publicAsset] = await Promise.all([
+        repository.getPublicDemandCore(demandId),
+        assetId && !assetId.startsWith('v-') ? repository.getPublicAsset(assetId) : Promise.resolve(null),
+      ]);
+      if (!demand) return apiError(response, 404, 'demand-not-found', '需求不存在。');
+      if (!assetId || (!assetId.startsWith('v-') && !publicAsset)) return apiError(response, 400, 'asset-not-public', '只能关联公共素材。');
       const links = new Set(demand.assetLinks || []);
       const linkRecords = Array.isArray(demand.assetLinkRecords) ? [...demand.assetLinkRecords] : [];
       if (body.active === false) links.delete(assetId); else links.add(assetId);
@@ -1048,7 +1206,7 @@ export function createApp({ repository, config = defaultConfig }) {
         ? linkRecords.filter((item) => item.assetId !== assetId)
         : linkRecords.some((item) => item.assetId === assetId) ? linkRecords : [...linkRecords, { assetId, ownerId: user.id, createdAt: new Date().toISOString() }];
       const updated = await repository.savePublicDemand({ ...demand, assetLinks: [...links], assetLinkRecords: nextLinkRecords, updatedAt: new Date().toISOString() });
-      return json(response, 200, { ok: true, demand: publicDemandView({ ...updated, responses: demand.responses || [] }, user.id) });
+      return json(response, 200, { ok: true, demand: publicDemandView(updated, user.id) });
     }
 
     const publicSwapClaimMatch = url.pathname.match(/^\/api\/public\/swaps\/([^/]+)\/claim$/);
@@ -1197,18 +1355,15 @@ export function createApp({ repository, config = defaultConfig }) {
 
     if (url.pathname === '/api/media' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
-      const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-      const multipartBytes = await readBytes(request, config.maxVideoBytes + 1024 * 1024);
-      const webRequest = new Request(requestUrl, { method: 'POST', headers: request.headers, body: multipartBytes });
-      const form = await webRequest.formData();
-      const file = form.get('file');
-      if (!(file instanceof File) || !file.type.startsWith('video/')) return apiError(response, 400, 'invalid-media', '请选择有效视频文件。');
-      if (file.size > config.maxVideoBytes) return apiError(response, 413, 'media-too-large', `视频不能超过 ${Math.floor(config.maxVideoBytes / 1024 / 1024)}MB。`);
-      const assetId = String(form.get('assetId') || `u-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+      let upload;
+      try { upload = await readVideoMultipart(request, config); }
+      catch (error) { return apiError(response, error.status || 400, error.message || 'invalid-media', error.publicMessage || '视频上传格式无效。'); }
+      const { assetId, mediaInput } = upload;
+      const existing = await repository.getMedia(assetId);
+      if (existing && existing.userId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
+      if (existing) return json(response, 200, { ok: true, duplicate: true, asset: { ...existing, storageKey: undefined, mediaUrl: `/api/media/${encodeURIComponent(existing.id)}` } });
       const asset = await repository.saveMedia({
-        userId: user.id, assetId, title: String(form.get('title') || file.name).slice(0, 80),
-        description: String(form.get('description') || '').slice(0, 500), fileName: file.name.slice(0, 180),
-        mime: file.type, bytes: Buffer.from(await file.arrayBuffer()),
+        userId: user.id, ...mediaInput,
       });
       return json(response, 201, { ok: true, asset: { ...asset, storageKey: undefined, mediaUrl: `/api/media/${encodeURIComponent(asset.id)}` } });
     }
@@ -1280,6 +1435,16 @@ export function createApp({ repository, config = defaultConfig }) {
     const requestId = randomUUID();
     response.setHeader('x-request-id', requestId);
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+    const startedAt = performance.now();
+    response.once('finish', () => {
+      const durationMs = Number((performance.now() - startedAt).toFixed(1));
+      if (url.pathname.startsWith('/api/public/') && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && response.statusCode < 400) {
+        invalidatePublicWorldCache();
+      }
+      if (slowRequestThresholdMs && url.pathname.startsWith('/api/') && durationMs >= slowRequestThresholdMs) {
+        console.warn(JSON.stringify({ level: 'warn', kind: 'slow-request', requestId, method: request.method, path: url.pathname, status: response.statusCode, durationMs, repository: config.repository, at: new Date().toISOString() }));
+      }
+    });
     try {
       if (url.pathname.startsWith('/api/')) await handleApi(request, response, url);
       else await serveStatic(request, response, url);

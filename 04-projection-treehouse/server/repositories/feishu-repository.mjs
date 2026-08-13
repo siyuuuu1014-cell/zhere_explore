@@ -251,10 +251,10 @@ export class FeishuRepository {
     await this.#update('users', record.record_id, { identity: user.identity, password_hash: user.passwordHash || '', payload_json: JSON.stringify(user) });
     return user;
   }
-  async ensureResearchSubject(userId, { sourceSystem = 'web_game', createdAt = new Date().toISOString() } = {}) {
-    const existing = await this.#find('researchSubjects', 'user_id', userId);
+  async ensureResearchSubject(userId, { sourceSystem = 'web_game', createdAt = new Date().toISOString(), subjectId = '', skipLookup = false } = {}) {
+    const existing = skipLookup ? null : await this.#find('researchSubjects', 'user_id', userId);
     if (existing) return JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
-    const subject = { subject_id: `rs-${randomUUID()}`, user_id: userId, source_system: sourceSystem, status: 'active', created_at: createdAt, updated_at: createdAt };
+    const subject = { subject_id: subjectId || `rs-${randomUUID()}`, user_id: userId, source_system: sourceSystem, status: 'active', created_at: createdAt, updated_at: createdAt };
     await this.#create('researchSubjects', { subject_id: subject.subject_id, user_id: userId, source_system: sourceSystem, status: subject.status, payload_json: JSON.stringify(subject) });
     return subject;
   }
@@ -262,8 +262,8 @@ export class FeishuRepository {
     const record = await this.#find('researchSubjects', 'user_id', userId);
     return record ? JSON.parse(this.#plain(record.fields.payload_json) || '{}') : null;
   }
-  async recordResearchConsent(record) {
-    const existing = await this.#find('researchConsents', 'consent_id', record.consent_id);
+  async recordResearchConsent(record, { skipLookup = false } = {}) {
+    const existing = skipLookup ? null : await this.#find('researchConsents', 'consent_id', record.consent_id);
     if (existing) return JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
     await this.#create('researchConsents', {
       consent_id: record.consent_id, user_id: record.user_id, subject_id: record.subject_id,
@@ -275,8 +275,8 @@ export class FeishuRepository {
   async listResearchConsents(userId) {
     return (await this.#recordsMatching('researchConsents', [{ field: 'user_id', value: userId }])).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}'));
   }
-  async createResearchSession(record) {
-    const existing = await this.#find('researchSessions', 'session_id', record.session_id);
+  async createResearchSession(record, { skipLookup = false } = {}) {
+    const existing = skipLookup ? null : await this.#find('researchSessions', 'session_id', record.session_id);
     if (existing) return JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
     await this.#create('researchSessions', {
       session_id: record.session_id, user_id: record.user_id, subject_id: record.subject_id,
@@ -351,18 +351,24 @@ export class FeishuRepository {
       .filter((asset) => includeDeleted || (asset.status === 'published' && asset.moderationStatus !== 'hidden'));
   }
   async getPublicAsset(assetId) {
-    const record = await this.#find('publicAssets', 'asset_id', assetId);
-    if (!record) return null;
-    const asset = JSON.parse(this.#plain(record.fields.payload_json) || '{}');
+    const asset = await this.getPublicAssetCore(assetId);
+    if (!asset) return null;
     return asset.status === 'published' && asset.moderationStatus !== 'hidden' ? asset : null;
   }
-  async savePublicAsset(record) {
-    const existing = await this.#find('publicAssets', 'asset_id', record.id);
+  async getPublicAssetCore(assetId) {
+    const record = await this.#find('publicAssets', 'asset_id', assetId);
+    if (!record) return null;
+    return { ...JSON.parse(this.#plain(record.fields.payload_json) || '{}'), _recordId: record.record_id };
+  }
+  async savePublicAsset(record, { existing: suppliedExisting = null, skipLookup = false } = {}) {
+    const existing = suppliedExisting?._recordId ? { record_id: suppliedExisting._recordId, fields: { payload_json: JSON.stringify(suppliedExisting) } } : (skipLookup ? null : await this.#find('publicAssets', 'asset_id', record.id));
     if (existing) {
       const previous = JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
       if (previous.ownerId !== record.ownerId) throw new Error('public-asset-owner-conflict');
-      await this.#update('publicAssets', existing.record_id, { owner_id: record.ownerId, status: record.status, payload_json: JSON.stringify({ ...previous, ...record }) });
-      return { ...previous, ...record };
+      const merged = { ...previous, ...record };
+      delete merged._recordId;
+      await this.#update('publicAssets', existing.record_id, { owner_id: record.ownerId, status: record.status, payload_json: JSON.stringify(merged) });
+      return merged;
     }
     await this.#create('publicAssets', { asset_id: record.id, owner_id: record.ownerId, status: record.status, payload_json: JSON.stringify(record) });
     return record;
@@ -465,25 +471,40 @@ export class FeishuRepository {
     return demands.map((demand) => ({ ...demand, responses: responsesByDemand.get(demand.id) || [] }));
   }
   async getPublicDemand(demandId) {
+    const demand = await this.getPublicDemandCore(demandId);
+    if (!demand) return null;
+    const { _recordId, ...publicDemand } = demand;
+    const responses = (await this.#recordsMatching('publicResponses', [{ field: 'demand_id', value: demandId }]))
+      .map((item) => JSON.parse(this.#plain(item.fields.payload_json) || '{}'))
+      .filter((response) => response.status !== 'deleted' && response.moderationStatus !== 'hidden');
+    return { ...publicDemand, responses };
+  }
+
+  async getPublicDemandCore(demandId) {
     const record = await this.#find('publicDemands', 'demand_id', demandId);
     if (!record) return null;
     const demand = JSON.parse(this.#plain(record.fields.payload_json) || '{}');
     if (demand.status === 'deleted' || demand.moderationStatus === 'hidden') return null;
-    const responses = (await this.#recordsMatching('publicResponses', [{ field: 'demand_id', value: demandId }]))
-      .map((item) => JSON.parse(this.#plain(item.fields.payload_json) || '{}'))
-      .filter((response) => response.status !== 'deleted' && response.moderationStatus !== 'hidden');
-    return { ...demand, responses };
+    return { ...demand, _recordId: record.record_id };
   }
-  async savePublicDemand(record) {
-    const existing = await this.#find('publicDemands', 'demand_id', record.id);
+
+  async savePublicDemand(record, { skipLookup = false } = {}) {
+    const { _recordId, responses: _responses, ...cleanRecord } = record;
+    if (_recordId) {
+      await this.#update('publicDemands', _recordId, {
+        owner_id: cleanRecord.ownerId, status: cleanRecord.status, payload_json: JSON.stringify(cleanRecord),
+      });
+      return cleanRecord;
+    }
+    const existing = skipLookup ? null : await this.#find('publicDemands', 'demand_id', cleanRecord.id);
     if (existing) {
       const previous = JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
-      if (previous.ownerId !== record.ownerId) throw new Error('public-demand-owner-conflict');
-      await this.#update('publicDemands', existing.record_id, { owner_id: record.ownerId, status: record.status, payload_json: JSON.stringify({ ...previous, ...record }) });
-      return { ...previous, ...record };
+      if (previous.ownerId !== cleanRecord.ownerId) throw new Error('public-demand-owner-conflict');
+      await this.#update('publicDemands', existing.record_id, { owner_id: cleanRecord.ownerId, status: cleanRecord.status, payload_json: JSON.stringify({ ...previous, ...cleanRecord }) });
+      return { ...previous, ...cleanRecord };
     }
-    await this.#create('publicDemands', { demand_id: record.id, owner_id: record.ownerId, status: record.status, payload_json: JSON.stringify(record) });
-    return record;
+    await this.#create('publicDemands', { demand_id: cleanRecord.id, owner_id: cleanRecord.ownerId, status: cleanRecord.status, payload_json: JSON.stringify(cleanRecord) });
+    return cleanRecord;
   }
   async deletePublicDemand(demandId, ownerId) {
     const existing = await this.#find('publicDemands', 'demand_id', demandId);
@@ -494,17 +515,26 @@ export class FeishuRepository {
     await this.#update('publicDemands', existing.record_id, { status: 'deleted', payload_json: JSON.stringify(demand) });
     return true;
   }
-  async createPublicResponse(record) {
-    const existing = await this.#find('publicResponses', 'response_id', record.id);
+  async getPublicResponse(responseId) {
+    const existing = await this.#find('publicResponses', 'response_id', responseId);
+    if (!existing) return null;
+    const response = JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
+    if (response.status === 'deleted' || response.moderationStatus === 'hidden') return null;
+    return { ...response, _recordId: existing.record_id };
+  }
+
+  async createPublicResponse(record, { skipLookup = false } = {}) {
+    const existing = skipLookup ? null : await this.#find('publicResponses', 'response_id', record.id);
     if (existing) return JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
     await this.#create('publicResponses', { response_id: record.id, demand_id: record.demandId, owner_id: record.ownerId, payload_json: JSON.stringify(record) });
     return record;
   }
-  async updatePublicResponse(responseId, ownerId, patch) {
+  async updatePublicResponse(responseId, ownerId, patch, { demandId = '' } = {}) {
     return this.#withLock(`response:${responseId}`, async () => {
       const existing = await this.#find('publicResponses', 'response_id', responseId);
       if (!existing) return null;
       const response = JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
+      if (demandId && response.demandId !== demandId) return null;
       if (response.ownerId !== ownerId) return false;
       Object.assign(response, patch, { updatedAt: new Date().toISOString() });
       await this.#update('publicResponses', existing.record_id, { payload_json: JSON.stringify(response) });
@@ -649,19 +679,28 @@ export class FeishuRepository {
   }
   async createAcceptedBidTransaction({ bid, transaction, basePriceTransactionCount }) {
     return this.#withLock(`pricing:${bid.material_id}`, async () => {
-      const [existingBidRecord, existingPurchaseRecords] = await Promise.all([
+      const [existingBidRecord, existingTransactionRecord, existingPurchaseRecords, materialTransactionRecords, existingPricingRecord] = await Promise.all([
         this.#find('bids', 'idempotency_key', bid.idempotency_key),
+        this.#find('transactions', 'bid_id', bid.bid_id),
         this.#recordsMatching('transactions', [
           { field: 'user_id', value: bid.user_id }, { field: 'material_id', value: bid.material_id },
         ]),
+        this.#recordsMatching('transactions', [{ field: 'material_id', value: bid.material_id }]),
+        this.#find('basePrices', 'material_id', bid.material_id),
       ]);
       const savedBid = existingBidRecord ? JSON.parse(this.#plain(existingBidRecord.fields.payload_json) || '{}') : bid;
-      const existingTransactionRecord = existingBidRecord ? await this.#find('transactions', 'bid_id', savedBid.bid_id) : null;
+      // Historical bids used generated IDs. When replaying one of those
+      // idempotency keys, resolve its transaction with the stored bid ID so
+      // the retry never creates a second transaction.
+      let matchedTransactionRecord = existingTransactionRecord;
+      if (existingBidRecord && savedBid.bid_id && savedBid.bid_id !== bid.bid_id && !matchedTransactionRecord) {
+        matchedTransactionRecord = await this.#find('transactions', 'bid_id', savedBid.bid_id);
+      }
       if (!existingBidRecord) {
         const existingPurchase = existingPurchaseRecords
           .map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}'))
           .find((item) => item.user_id === bid.user_id && item.material_id === bid.material_id && item.is_valid === true);
-        if (existingPurchase) {
+        if (existingPurchase && existingPurchase.bid_id !== bid.bid_id) {
           const purchaseBidRecord = await this.#find('bids', 'bid_id', existingPurchase.bid_id);
           const pricingRecord = await this.#find('basePrices', 'material_id', bid.material_id);
           return {
@@ -673,34 +712,36 @@ export class FeishuRepository {
           };
         }
       }
-      if (!existingBidRecord) {
-        await this.#create('bids', {
+      const createBid = existingBidRecord
+        ? Promise.resolve()
+        : this.#create('bids', {
           bid_id: bid.bid_id, user_id: bid.user_id, material_id: bid.material_id,
           bid_time: bid.bid_time, bid_price: bid.bid_price, bid_status: bid.bid_status,
           idempotency_key: bid.idempotency_key, payload_json: JSON.stringify(bid),
         });
-      }
 
-      const savedTransaction = existingTransactionRecord
-        ? JSON.parse(this.#plain(existingTransactionRecord.fields.payload_json) || '{}')
+      const savedTransaction = matchedTransactionRecord
+        ? JSON.parse(this.#plain(matchedTransactionRecord.fields.payload_json) || '{}')
         : { ...transaction, bid_id: savedBid.bid_id };
-      if (!existingTransactionRecord) {
-        await this.#create('transactions', {
+      const createTransaction = matchedTransactionRecord
+        ? Promise.resolve()
+        : this.#create('transactions', {
           transaction_id: savedTransaction.transaction_id, bid_id: savedTransaction.bid_id,
           user_id: savedTransaction.user_id, material_id: savedTransaction.material_id,
           transaction_time: savedTransaction.transaction_time, bid_price: savedTransaction.bid_price,
           transaction_price: savedTransaction.transaction_price, is_valid: savedTransaction.is_valid,
           payload_json: JSON.stringify(savedTransaction),
         });
-      }
 
-      const [materialTransactionRecords, existingPricingRecord] = await Promise.all([
-        this.#recordsMatching('transactions', [{ field: 'material_id', value: savedBid.material_id }]),
-        this.#find('basePrices', 'material_id', savedBid.material_id),
-      ]);
-      const allMaterialTransactions = materialTransactionRecords
+      // Deterministic IDs allow these independent writes to run together. A
+      // retry repairs either side if Feishu accepted only one request.
+      await Promise.all([createBid, createTransaction]);
+      const priorMaterialTransactions = materialTransactionRecords
         .map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}'))
         .filter((item) => item.material_id === savedBid.material_id);
+      const allMaterialTransactions = priorMaterialTransactions.some((item) => item.transaction_id === savedTransaction.transaction_id)
+        ? priorMaterialTransactions
+        : [...priorMaterialTransactions, savedTransaction];
       const calculated = calculateBasePrice(allMaterialTransactions, basePriceTransactionCount);
       const previous = existingPricingRecord ? JSON.parse(this.#plain(existingPricingRecord.fields.payload_json) || '{}') : null;
       const now = new Date().toISOString();
@@ -719,7 +760,7 @@ export class FeishuRepository {
       };
       if (existingPricingRecord) await this.#update('basePrices', existingPricingRecord.record_id, pricingFields);
       else await this.#create('basePrices', pricingFields);
-      return { bid: savedBid, transaction: savedTransaction, pricing, materialTransactions: allMaterialTransactions, duplicate: Boolean(existingBidRecord && existingTransactionRecord) };
+      return { bid: savedBid, transaction: savedTransaction, pricing, materialTransactions: allMaterialTransactions, duplicate: Boolean(existingBidRecord && matchedTransactionRecord) };
     });
   }
   async getMaterialPricing(materialId) {

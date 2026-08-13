@@ -123,13 +123,13 @@ export class LocalRepository {
     });
   }
 
-  async ensureResearchSubject(userId, { sourceSystem = 'web_game', createdAt = new Date().toISOString() } = {}) {
+  async ensureResearchSubject(userId, { sourceSystem = 'web_game', createdAt = new Date().toISOString(), subjectId = '' } = {}) {
     return this.#mutate((store) => {
       store.researchSubjects ||= [];
       const existing = store.researchSubjects.find((subject) => subject.user_id === userId);
       if (existing) return existing;
       const subject = {
-        subject_id: `rs-${randomUUID()}`, user_id: userId, source_system: sourceSystem,
+        subject_id: subjectId || `rs-${randomUUID()}`, user_id: userId, source_system: sourceSystem,
         status: 'active', created_at: createdAt, updated_at: createdAt,
       };
       store.researchSubjects.push(subject);
@@ -280,6 +280,10 @@ export class LocalRepository {
     return ((await this.#read()).publicAssets || []).find((asset) => asset.id === assetId && asset.status === 'published' && asset.moderationStatus !== 'hidden') || null;
   }
 
+  async getPublicAssetCore(assetId) {
+    return ((await this.#read()).publicAssets || []).find((asset) => asset.id === assetId) || null;
+  }
+
   async savePublicAsset(record) {
     return this.#mutate((store) => {
       store.publicAssets ||= [];
@@ -391,7 +395,12 @@ export class LocalRepository {
     return (await this.listPublicDemands()).find((demand) => demand.id === demandId) || null;
   }
 
-  async savePublicDemand(record) {
+  async getPublicDemandCore(demandId) {
+    const demand = ((await this.#read()).publicDemands || []).find((item) => item.id === demandId);
+    return demand && demand.status !== 'deleted' && demand.moderationStatus !== 'hidden' ? { ...demand } : null;
+  }
+
+  async savePublicDemand(record, _options = {}) {
     return this.#mutate((store) => {
       store.publicDemands ||= [];
       const index = store.publicDemands.findIndex((demand) => demand.id === record.id);
@@ -413,19 +422,25 @@ export class LocalRepository {
     });
   }
 
-  async createPublicResponse(record) {
+  async getPublicResponse(responseId) {
+    const response = ((await this.#read()).publicResponses || []).find((item) => item.id === responseId);
+    return response && response.status !== 'deleted' && response.moderationStatus !== 'hidden' ? { ...response } : null;
+  }
+
+  async createPublicResponse(record, { skipLookup = false } = {}) {
     return this.#mutate((store) => {
       store.publicResponses ||= [];
-      if (store.publicResponses.some((response) => response.id === record.id)) return store.publicResponses.find((response) => response.id === record.id);
+      if (!skipLookup && store.publicResponses.some((response) => response.id === record.id)) return store.publicResponses.find((response) => response.id === record.id);
       store.publicResponses.push(record);
       return record;
     });
   }
 
-  async updatePublicResponse(responseId, ownerId, patch) {
+  async updatePublicResponse(responseId, ownerId, patch, { demandId = '' } = {}) {
     return this.#mutate((store) => {
       const response = (store.publicResponses || []).find((item) => item.id === responseId);
       if (!response) return null;
+      if (demandId && response.demandId !== demandId) return null;
       if (response.ownerId !== ownerId) return false;
       Object.assign(response, patch, { updatedAt: new Date().toISOString() });
       return response;

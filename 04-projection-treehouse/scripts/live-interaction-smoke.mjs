@@ -92,12 +92,12 @@ try {
   form.set('file', new File([bytes], `${runId}.mp4`, { type: 'video/mp4' }));
   form.set('assetId', cleanup.assetId);
   form.set('title', `${runId} 测试视频`);
-  await a.request('上传视频资产', '/api/media', { method: 'POST', form, expect: [201] });
-  await a.request('发布公共素材', '/api/public/assets', {
-    method: 'POST',
-    body: { id: cleanup.assetId, title: `${runId} 测试素材`, description: '自动化交互回归测试，测试后撤回。', wx: 120, wy: 120, zone: 'town' },
-    expect: [201],
-  });
+  form.set('description', '自动化交互回归测试，测试后撤回。');
+  form.set('wx', '120');
+  form.set('wy', '120');
+  form.set('zone', 'town');
+  const combinedPublish = await a.request('上传并发布公共素材', '/api/public/assets/upload', { method: 'POST', form, expect: [201] });
+  assert(combinedPublish.asset.id === cleanup.assetId && combinedPublish.asset.mediaUrl, '上传并发布没有返回可播放的公共素材。');
 
   const worldB = await b.request('账号B首次读取公共世界', '/api/public/world?limit=200');
   assert(worldB.assets.some((item) => item.id === cleanup.assetId), '跨账号读取失败：账号B看不到账号A发布的素材。');

@@ -12,15 +12,17 @@ let cookie;
 let secondCookie;
 let server;
 let dataDir;
+let repository;
 
 before(async () => {
   dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhere-server-test-'));
-  const repository = new LocalRepository(dataDir);
+  repository = new LocalRepository(dataDir);
   await repository.init();
   const config = {
     isProduction: false, repository: 'local', appDir: path.resolve(import.meta.dirname, '..'), dataDir,
     sessionDays: 30, sessionCookieSecure: 'auto', maxJsonBytes: 2 * 1024 * 1024, maxVideoBytes: 1024 * 1024,
-    publicWriteLimit: 60, basePriceTransactionCount: 10, adminIdentities: ['player@example.com'],
+    publicWriteLimit: 60, publicWorldCacheTtlMs: 3000, slowRequestThresholdMs: 0,
+    basePriceTransactionCount: 10, adminIdentities: ['player@example.com'],
   };
   server = createApp({ repository, config });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -69,6 +71,49 @@ test('a completed registration cannot be replayed through the register endpoint'
   assert.equal((await response.json()).error.code, 'identity-exists');
 });
 
+test('register rejects malformed public profile fields', async () => {
+  const cases = [
+    { username: '中文名', nickname: '旅人', spaceName: '小屋', message: /用户名只能使用/ },
+    { username: 'valid-user', nickname: '这是一个明显超过十六个字符限制的昵称内容', spaceName: '小屋', message: /昵称需要/ },
+    { username: 'valid-user', nickname: '旅人', spaceName: '这是一个明显超过二十四个字符限制的小屋名称内容用于测试', message: /小屋名称需要/ },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const response = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        identity: `invalid-profile-${index}@example.com`, username: item.username, nickname: item.nickname, spaceName: item.spaceName,
+        password: 'correct-horse', confirmPassword: 'correct-horse', ageConfirmed: true, agreeTerms: true, research: false,
+      }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error.message, item.message);
+  }
+});
+
+test('register accepts an exact mainland phone number and creates the internal username', async () => {
+  const invalidPhone = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      identity: '1380013800', nickname: '手机旅人', spaceName: '河岸小屋',
+      password: 'correct-horse', confirmPassword: 'correct-horse', ageConfirmed: true, agreeTerms: true, research: false,
+    }),
+  });
+  assert.equal(invalidPhone.status, 400);
+
+  const response = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      identity: '13800138000', nickname: '手机旅人', spaceName: '河岸小屋',
+      password: 'correct-horse', confirmPassword: 'correct-horse', ageConfirmed: true, agreeTerms: true, research: false,
+    }),
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.match(body.user.username, /^user-[a-f0-9]{12}$/);
+  assert.equal(body.state, null);
+  assert.equal(body.version, 0);
+});
+
 test('session cookie auto mode follows HTTPS proxy headers', async () => {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
@@ -76,6 +121,8 @@ test('session cookie auto mode follows HTTPS proxy headers', async () => {
   });
   assert.equal(response.status, 200);
   assert.match(response.headers.get('set-cookie'), /; Secure/i);
+  const body = await response.json();
+  assert.equal(Object.prototype.hasOwnProperty.call(body, 'state'), true);
 });
 
 test('forgot password is an explicit rate-limited manual request', async () => {
@@ -209,6 +256,71 @@ test('video upload rejects a declared body larger than the configured envelope b
   assert.equal(response.status, 413);
 });
 
+test('combined video upload and publication is idempotent and immediately public', async () => {
+  const makeForm = () => {
+    const form = new FormData();
+    form.set('assetId', 'u-combined-video');
+    form.set('title', '一站式发布视频');
+    form.set('description', '上传与公共发布共用一次请求');
+    form.set('wx', '128');
+    form.set('wy', '-44');
+    form.set('zone', 'town');
+    form.set('file', new File([Buffer.from('combined-mp4-data')], 'combined.mp4', { type: 'video/mp4' }));
+    return form;
+  };
+  const first = await fetch(`${baseUrl}/api/public/assets/upload`, { method: 'POST', headers: { cookie }, body: makeForm() });
+  assert.equal(first.status, 201);
+  const firstBody = await first.json();
+  assert.equal(firstBody.asset.id, 'u-combined-video');
+  assert.equal(firstBody.asset.owner, 'me');
+  assert.equal(firstBody.asset.mediaUrl, '/api/media/u-combined-video');
+  assert.equal(firstBody.reusedMedia, false);
+
+  const repeated = await fetch(`${baseUrl}/api/public/assets/upload`, { method: 'POST', headers: { cookie }, body: makeForm() });
+  assert.equal(repeated.status, 200);
+  const repeatedBody = await repeated.json();
+  assert.equal(repeatedBody.duplicate, true);
+  assert.equal(repeatedBody.reusedMedia, true);
+
+  const world = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(world.assets.filter((asset) => asset.id === 'u-combined-video').length, 1);
+  const media = await fetch(`${baseUrl}/api/media/u-combined-video`, { headers: { cookie } });
+  assert.equal(Buffer.from(await media.arrayBuffer()).toString(), 'combined-mp4-data');
+});
+
+test('combined publication resumes from an uploaded private file after a partial write failure', async () => {
+  const makeForm = () => {
+    const form = new FormData();
+    form.set('assetId', 'u-resumable-video');
+    form.set('title', '可恢复发布');
+    form.set('wx', '72');
+    form.set('wy', '36');
+    form.set('zone', 'shore');
+    form.set('file', new File([Buffer.from('resumable-video-data')], 'resumable.mp4', { type: 'video/mp4' }));
+    return form;
+  };
+  const original = repository.savePublicAsset.bind(repository);
+  let failOnce = true;
+  repository.savePublicAsset = async (...args) => {
+    if (failOnce) { failOnce = false; throw new Error('simulated-public-table-failure'); }
+    return original(...args);
+  };
+  try {
+    const interrupted = await fetch(`${baseUrl}/api/public/assets/upload`, { method: 'POST', headers: { cookie }, body: makeForm() });
+    assert.equal(interrupted.status, 500);
+    const privateMedia = await fetch(`${baseUrl}/api/media/u-resumable-video`, { headers: { cookie } });
+    assert.equal(privateMedia.status, 200);
+
+    const resumed = await fetch(`${baseUrl}/api/public/assets/upload`, { method: 'POST', headers: { cookie }, body: makeForm() });
+    assert.equal(resumed.status, 201);
+    const body = await resumed.json();
+    assert.equal(body.reusedMedia, true);
+    assert.equal(body.asset.id, 'u-resumable-video');
+  } finally {
+    repository.savePublicAsset = original;
+  }
+});
+
 test('public assets, public demands, and responses are shared across accounts with ownership checks', async () => {
   const privateBeforePublish = await fetch(`${baseUrl}/api/media/u-test-video`);
   assert.equal(privateBeforePublish.status, 401);
@@ -266,6 +378,17 @@ test('public assets, public demands, and responses are shared across accounts wi
     body: JSON.stringify({ id: 'response-second', text: '我建议采用这段视频。', assetId: 'u-test-video', assetTitle: '雨后的街角' }),
   });
   assert.equal(response.status, 201);
+  const repeatedResponse = await fetch(`${baseUrl}/api/public/demands/n-public-test/responses`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie },
+    body: JSON.stringify({ id: 'response-second', text: '我建议采用这段视频。', assetId: 'u-test-video', assetTitle: '雨后的街角' }),
+  });
+  assert.equal(repeatedResponse.status, 200);
+  assert.equal((await repeatedResponse.json()).duplicate, true);
+
+  const wrongDemandResponseEdit = await fetch(`${baseUrl}/api/public/demands/not-the-parent/responses/response-second`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', cookie: secondCookie }, body: JSON.stringify({ text: '不应保存' }),
+  });
+  assert.equal(wrongDemandResponseEdit.status, 404);
 
   const crossUserPurchase = await fetch(`${baseUrl}/api/pricing/materials/u-test-video/bids`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie },
@@ -382,6 +505,8 @@ test('public interactions, ownership management, delta sync, and moderation are 
   });
   assert.equal(reaction.status, 200);
   assert.equal((await reaction.json()).asset.likes, 1);
+  const worldImmediatelyAfterReaction = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie: secondCookie } }).then((response) => response.json());
+  assert.equal(worldImmediatelyAfterReaction.assets.some((asset) => asset.id === 'u-test-video' && asset.likes === 1), true);
   const tag = await fetch(`${baseUrl}/api/public/assets/u-test-video/tags/%E9%9B%A8%E5%A4%9C`, {
     method: 'PUT', headers: { 'content-type': 'application/json', cookie: secondCookie }, body: JSON.stringify({ active: true }),
   });

@@ -1,3 +1,5 @@
 .data/
+.tmp-modular-test-data/
+.qa-data/
 .env
 server-data/

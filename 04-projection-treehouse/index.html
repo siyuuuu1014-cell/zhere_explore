@@ -2,12 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="description" content="Zhere 开放世界玩法与数据采集原型（V7）：视频、需求、评论、虚拟竞价与用户痕迹共同生长的公共世界" />
     <title>Zhere | 开放公域</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='%238a9d7d' stroke='%2339423a' stroke-width='6'/%3E%3Cpath d='M22 38c12-2 18-10 20-20 3 12-2 24-17 28' fill='none' stroke='%23f7f4ea' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./styles.css?v=19" />
-    <link rel="stylesheet" href="./formal-v4.css?v=22" />
+    <link rel="stylesheet" href="./styles.css?v=21" />
+    <link rel="stylesheet" href="./formal-v4.css?v=26" />
   </head>
   <body>
     <!--
@@ -74,6 +74,14 @@
               <span class="home-tree tree-a"></span>
               <span class="home-tree tree-b"></span>
               <span class="home-cliff"></span>
+              <span class="home-fence"><i></i><i></i><i></i><i></i><i></i></span>
+              <span class="home-stone-path"><i></i><i></i><i></i><i></i><i></i></span>
+              <span class="home-flower-patch flowers-a"></span>
+              <span class="home-flower-patch flowers-b"></span>
+              <span class="home-laundry"><i></i><i></i><i></i></span>
+              <span class="home-woodpile"><i></i><i></i><i></i></span>
+              <span class="home-lantern lantern-a"></span>
+              <span class="home-lantern lantern-b"></span>
             </div>
             <button class="home-cabin" id="homeCabin" aria-label="进入小屋与建设簿">
               <span class="cabin-roof"></span><span class="cabin-wall"></span><span class="cabin-door"></span><span class="cabin-window"></span><span class="cabin-chimney"></span>
@@ -222,15 +230,14 @@
         <form class="entry-page register-page" data-entry-page="register" id="registerForm" novalidate>
           <h2>创建角色</h2>
           <div class="field-grid">
-            <label>邮箱或手机号<input name="identity" autocomplete="username" required /></label>
-            <label>用户名<input name="username" autocomplete="nickname" required /></label>
-            <label>昵称<input name="nickname" value="路过的风" required /></label>
-            <label>小屋名称<input name="spaceName" value="礁石小窝" required /></label>
-            <label>密码<input name="password" type="password" minlength="8" required /></label>
-            <label>确认密码<input name="confirmPassword" type="password" minlength="8" required /></label>
+            <label class="register-field">邮箱或手机号<input name="identity" autocomplete="username" inputmode="email" maxlength="80" placeholder="name@example.com / 13800138000" aria-describedby="identityError" required /><small class="field-error" id="identityError" aria-live="polite"></small></label>
+            <label class="register-field">昵称<input name="nickname" value="路过的风" minlength="1" maxlength="16" aria-describedby="nicknameError" required /><small class="field-error" id="nicknameError" aria-live="polite"></small></label>
+            <label class="register-field">小屋名称<input name="spaceName" value="礁石小窝" minlength="1" maxlength="24" aria-describedby="spaceNameError" required /><small class="field-error" id="spaceNameError" aria-live="polite"></small></label>
+            <label class="register-field">密码<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="至少 8 位" aria-describedby="passwordError" required /><small class="field-error" id="passwordError" aria-live="polite"></small></label>
+            <label class="register-field register-field-wide">确认密码<input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="再次输入相同密码" aria-describedby="confirmPasswordError" required /><small class="field-error" id="confirmPasswordError" aria-live="polite"></small></label>
           </div>
           <label class="check-label"><input type="checkbox" name="age" required /> 我已满 16 周岁</label>
-          <label class="check-label"><input type="checkbox" name="terms" required /> 我同意使用条款与隐私说明</label>
+          <div class="check-label"><input id="termsConsent" type="checkbox" name="terms" required /> <span><label for="termsConsent">我已阅读并同意</label><button class="legal-link" type="button" data-legal="terms">使用条款</button>与<button class="legal-link" type="button" data-legal="privacy">隐私说明</button></span></div>
           <label class="check-label"><input type="checkbox" name="research" checked /> 我愿意参与推荐与模型研究，可随时退出且保留账户</label>
           <p class="form-error" id="registerError" role="alert"></p>
           <button class="primary-button" type="submit">创建并进入</button>
@@ -244,6 +251,12 @@
           <button class="primary-button" type="submit">提交申请</button>
         </form>
       </div>
+      <section class="entry-legal" id="entryLegal" role="dialog" aria-modal="true" aria-labelledby="entryLegalTitle" hidden>
+        <div class="entry-legal-paper">
+          <button class="entry-legal-close" id="entryLegalClose" type="button" aria-label="关闭说明">关闭</button>
+          <div id="entryLegalContent"></div>
+        </div>
+      </section>
     </section>
 
     <div class="scrim" id="scrim" hidden></div>
@@ -275,7 +288,15 @@
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-  <script src="./service-client.js?v=21"></script>
-  <script src="./prototype.js?v=28"></script>
+  <script src="./service-client.js?v=23"></script>
+  <script src="./world-foundation.js?v=1"></script>
+  <script src="./ui-shell.js?v=1"></script>
+  <script src="./telemetry-system.js?v=1"></script>
+  <script src="./public-content.js?v=1"></script>
+  <script src="./pricing-system.js?v=1"></script>
+  <script src="./world-renderer.js?v=3"></script>
+  <script src="./world-movement.js?v=1"></script>
+  <script src="./homestead-system.js?v=1"></script>
+  <script src="./prototype.js?v=46"></script>
   </body>
 </html>

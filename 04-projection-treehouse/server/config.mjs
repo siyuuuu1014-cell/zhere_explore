@@ -19,6 +19,8 @@ export const config = {
   maxJsonBytes: 2 * 1024 * 1024,
   maxVideoBytes: Number(process.env.ZHERE_MAX_VIDEO_BYTES || (repository === 'feishu' ? 20 : 100) * 1024 * 1024),
   publicWriteLimit: Number(process.env.ZHERE_PUBLIC_WRITE_LIMIT || 60),
+  publicWorldCacheTtlMs: Math.max(0, Number(process.env.ZHERE_PUBLIC_WORLD_CACHE_TTL_MS || 3000)),
+  slowRequestThresholdMs: Math.max(0, Number(process.env.ZHERE_SLOW_REQUEST_THRESHOLD_MS || 1500)),
   researchConsentVersion: String(process.env.RESEARCH_CONSENT_VERSION || 'research-v1'),
   basePriceTransactionCount: Math.max(1, Math.floor(Number(process.env.BASE_PRICE_TRANSACTION_COUNT) || 10)),
   marketInsightMinSample: Math.max(3, Math.floor(Number(process.env.MARKET_INSIGHT_MIN_SAMPLE) || 5)),

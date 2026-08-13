@@ -14,6 +14,7 @@
   let flushingEvents = null;
   let worldVersion = 0;
   let worldConflict = null;
+  let authEpoch = 0;
 
   class ServiceError extends Error {
     constructor(message, code, status, details = null) {
@@ -170,54 +171,66 @@
   }
 
   async function bootstrap() {
+    const epoch = authEpoch;
     await restoreEvents().catch(() => {});
     const session = await request('/auth/session');
+    if (epoch !== authEpoch) return { authenticated: false, superseded: true, user: null, state: null, events: [] };
     authenticated = session.authenticated;
     currentUser = session.user;
     if (!authenticated) return { authenticated: false, user: null, state: null, events: [] };
     await discardForeignEvents().catch(() => {});
-    const [world, recent] = await Promise.all([request('/world-state'), request('/events/recent')]);
+    const hasBundledState = Object.prototype.hasOwnProperty.call(session, 'state');
+    const [world, recent] = hasBundledState
+      ? [{ state: session.state, version: session.version || 0 }, { events: session.events || [] }]
+      : await Promise.all([request('/world-state'), request('/events/recent')]);
+    if (epoch !== authEpoch) return { authenticated: false, superseded: true, user: null, state: null, events: [] };
     worldVersion = Number(world.version || 0);
     flushEvents().catch(() => {});
     return { authenticated: true, user: currentUser, state: world.state, version: world.version, events: recent.events || [] };
   }
 
   async function authenticate(path, payload) {
+    authEpoch += 1;
     // Feishu-backed registration also creates research identity, consent and
     // session rows. Keep the client timeout above that transactional envelope.
     const body = await request(path, { method: 'POST', body: JSON.stringify(payload), timeoutMs: 30_000 });
     authenticated = true;
     currentUser = body.user;
     await discardForeignEvents().catch(() => {});
-    const [world, recent] = await Promise.all([request('/world-state'), request('/events/recent')]);
+    const hasBundledState = Object.prototype.hasOwnProperty.call(body, 'state');
+    const [world, recent] = hasBundledState
+      ? [{ state: body.state, version: body.version || 0 }, { events: body.events || [] }]
+      : await Promise.all([request('/world-state'), request('/events/recent')]);
     worldVersion = Number(world.version || 0);
     flushEvents().catch(() => {});
     return { ...body, state: world.state, version: world.version, events: recent.events || [] };
   }
 
   async function loadSessionExtras() {
-    if (!authenticated) return { publicWorld: null, purchases: [], notifications: [], degraded: [] };
+    if (!authenticated) return { publicWorld: null, purchases: [], notifications: [], events: [], degraded: [] };
     const results = await Promise.allSettled([
-      loadPublicWorld(), request('/pricing/purchases'), request('/notifications'),
+      loadPublicWorld(), request('/pricing/purchases'), request('/notifications'), request('/events/recent'),
     ]);
-    const keys = ['publicWorld', 'purchases', 'notifications'];
+    const keys = ['publicWorld', 'purchases', 'notifications', 'events'];
     const degraded = results.flatMap((result, index) => result.status === 'rejected' ? [{ key: keys[index], error: result.reason }] : []);
     return {
       publicWorld: results[0].status === 'fulfilled' ? results[0].value : null,
       purchases: results[1].status === 'fulfilled' ? (results[1].value.purchases || []) : null,
       notifications: results[2].status === 'fulfilled' ? (results[2].value.notifications || []) : null,
+      events: results[3].status === 'fulfilled' ? (results[3].value.events || []) : null,
       degraded,
     };
   }
 
   async function logout() {
-    await flushState({ keepalive: true }).catch(() => {});
-    await flushEvents({ keepalive: true }).catch(() => {});
-    await request('/auth/logout', { method: 'POST', body: '{}' });
+    authEpoch += 1;
+    const pendingFlushes = [flushState({ keepalive: true }), flushEvents({ keepalive: true })];
     authenticated = false;
     currentUser = null;
     worldVersion = 0;
     worldConflict = null;
+    await Promise.allSettled(pendingFlushes);
+    await request('/auth/logout', { method: 'POST', body: '{}' });
   }
 
   async function resolveWorldStateConflict(choice) {
@@ -244,6 +257,19 @@
     form.set('description', description || '');
     form.set('file', file, file.name);
     return request('/media', { method: 'POST', body: form });
+  }
+
+  async function uploadAndPublishAsset({ assetId, title, description, file, wx, wy, zone }) {
+    const form = new FormData();
+    form.set('assetId', assetId);
+    form.set('title', title);
+    form.set('description', description || '');
+    form.set('wx', String(wx));
+    form.set('wy', String(wy));
+    form.set('zone', zone || '');
+    form.set('file', file, file.name);
+    // A stable asset id makes a timeout-safe retry idempotent on the server.
+    return request('/public/assets/upload', { method: 'POST', body: form, timeoutMs: 60_000, retries: 1 });
   }
 
   async function forgotPassword(payload) {
@@ -296,6 +322,7 @@
   const publicWorld = {
     load: (options) => loadPublicWorld(options),
     publishAsset: (payload) => request('/public/assets', { method: 'POST', body: JSON.stringify(payload) }),
+    uploadAndPublishAsset,
     updateAsset: (assetId, payload) => request(`/public/assets/${encodeURIComponent(assetId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     deleteAsset: (assetId) => request(`/public/assets/${encodeURIComponent(assetId)}`, { method: 'DELETE', body: '{}' }),
     setAssetReaction: (assetId, liked) => request(`/public/assets/${encodeURIComponent(assetId)}/reaction`, { method: 'PUT', body: JSON.stringify({ liked }) }),
