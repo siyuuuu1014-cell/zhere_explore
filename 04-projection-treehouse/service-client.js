@@ -4,32 +4,53 @@
   const API = '/api';
   const EVENT_DB = 'zhere-service-queue';
   const EVENT_STORE = 'events';
-  const CRITICAL_EVENTS = new Set(['register', 'login', 'logout', 'publish_asset', 'upload_to_bag', 'bid_raise', 'bid_win', 'bid_lose', 'research_consent_change', 'deletion_request']);
+  const CRITICAL_EVENTS = new Set(['register', 'login', 'logout', 'publish_asset', 'upload_to_bag', 'bid_submit', 'bid_accepted', 'research_consent_change', 'deletion_request', 'feedback']);
   const pendingEvents = new Map();
   let authenticated = false;
   let currentUser = null;
   let stateTimer = null;
   let pendingState = null;
+  let flushingState = null;
   let flushingEvents = null;
+  let worldVersion = 0;
+  let worldConflict = null;
 
   class ServiceError extends Error {
-    constructor(message, code, status) {
+    constructor(message, code, status, details = null) {
       super(message);
       this.name = 'ServiceError';
       this.code = code;
       this.status = status;
+      this.details = details;
     }
   }
 
   async function request(path, options = {}) {
-    const response = await fetch(`${API}${path}`, {
-      credentials: 'same-origin',
-      ...options,
-      headers: options.body instanceof FormData ? options.headers : { 'content-type': 'application/json', ...options.headers },
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new ServiceError(body.error?.message || '服务暂时不可用。', body.error?.code || 'request-failed', response.status);
-    return body;
+    const { timeoutMs = options.body instanceof FormData ? 45_000 : 12_000, retries: requestedRetries, ...fetchOptions } = options;
+    const method = String(fetchOptions.method || 'GET').toUpperCase();
+    const retries = requestedRetries ?? (method === 'GET' ? 1 : 0);
+    let lastError;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const response = await fetch(`${API}${path}`, {
+          credentials: 'same-origin',
+          ...fetchOptions,
+          signal: fetchOptions.signal || AbortSignal.timeout(timeoutMs),
+          headers: fetchOptions.body instanceof FormData ? fetchOptions.headers : { 'content-type': 'application/json', ...fetchOptions.headers },
+        });
+        const body = await response.json().catch(() => ({}));
+        if (response.ok) return body;
+        const error = new ServiceError(body.error?.message || '服务暂时不可用。', body.error?.code || 'request-failed', response.status, body.conflict || body.error?.details || null);
+        if (attempt >= retries || (response.status < 500 && response.status !== 429)) throw error;
+        lastError = error;
+      } catch (error) {
+        const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+        lastError = timedOut ? new ServiceError('服务器响应超时，请稍后重试。', 'request-timeout', 0) : error;
+        if (attempt >= retries || (!timedOut && error instanceof ServiceError && error.status < 500 && error.status !== 429)) throw lastError;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+    }
+    throw lastError;
   }
 
   function openEventDb() {
@@ -107,23 +128,41 @@
     if (critical || pendingEvents.size >= 20) queueMicrotask(() => flushEvents().catch(() => {}));
   }
 
-  async function flushState({ keepalive = false } = {}) {
+  async function flushState({ keepalive = false, force = false } = {}) {
     clearTimeout(stateTimer);
     stateTimer = null;
-    if (!authenticated || !pendingState) return null;
+    if (!authenticated) return null;
+    if (flushingState) {
+      await flushingState;
+      return pendingState && !worldConflict ? flushState({ keepalive, force }) : null;
+    }
+    if (!pendingState) return null;
     const state = pendingState;
     pendingState = null;
+    const operation = request('/world-state', { method: 'PUT', body: JSON.stringify({ state, baseVersion: worldVersion, force }), keepalive });
+    flushingState = operation;
     try {
-      return await request('/world-state', { method: 'PUT', body: JSON.stringify({ state }), keepalive });
+      const result = await operation;
+      worldVersion = Number(result.version || worldVersion);
+      worldConflict = null;
+      return result;
     } catch (error) {
-      pendingState = state;
+      // A newer snapshot queued while this request was in flight must win.
+      pendingState ||= state;
+      if (error.code === 'world-state-conflict') {
+        worldConflict = error.details;
+        window.dispatchEvent(new CustomEvent('zhere:world-state-conflict', { detail: worldConflict }));
+      }
       throw error;
+    } finally {
+      if (flushingState === operation) flushingState = null;
     }
   }
 
   function saveState(state, { immediate = false } = {}) {
     pendingState = state;
     if (!authenticated) return Promise.resolve(null);
+    if (worldConflict && !immediate) return Promise.resolve(null);
     clearTimeout(stateTimer);
     if (immediate) return flushState();
     stateTimer = setTimeout(() => flushState().catch(() => {}), 650);
@@ -137,19 +176,38 @@
     currentUser = session.user;
     if (!authenticated) return { authenticated: false, user: null, state: null, events: [] };
     await discardForeignEvents().catch(() => {});
-    const [world, recent, publicWorld] = await Promise.all([request('/world-state'), request('/events/recent'), loadPublicWorld()]);
+    const [world, recent] = await Promise.all([request('/world-state'), request('/events/recent')]);
+    worldVersion = Number(world.version || 0);
     flushEvents().catch(() => {});
-    return { authenticated: true, user: currentUser, state: world.state, version: world.version, events: recent.events || [], publicWorld };
+    return { authenticated: true, user: currentUser, state: world.state, version: world.version, events: recent.events || [] };
   }
 
   async function authenticate(path, payload) {
-    const body = await request(path, { method: 'POST', body: JSON.stringify(payload) });
+    // Feishu-backed registration also creates research identity, consent and
+    // session rows. Keep the client timeout above that transactional envelope.
+    const body = await request(path, { method: 'POST', body: JSON.stringify(payload), timeoutMs: 30_000 });
     authenticated = true;
     currentUser = body.user;
     await discardForeignEvents().catch(() => {});
-    const [world, recent, publicWorld] = await Promise.all([request('/world-state'), request('/events/recent'), loadPublicWorld()]);
+    const [world, recent] = await Promise.all([request('/world-state'), request('/events/recent')]);
+    worldVersion = Number(world.version || 0);
     flushEvents().catch(() => {});
-    return { ...body, state: world.state, version: world.version, events: recent.events || [], publicWorld };
+    return { ...body, state: world.state, version: world.version, events: recent.events || [] };
+  }
+
+  async function loadSessionExtras() {
+    if (!authenticated) return { publicWorld: null, purchases: [], notifications: [], degraded: [] };
+    const results = await Promise.allSettled([
+      loadPublicWorld(), request('/pricing/purchases'), request('/notifications'),
+    ]);
+    const keys = ['publicWorld', 'purchases', 'notifications'];
+    const degraded = results.flatMap((result, index) => result.status === 'rejected' ? [{ key: keys[index], error: result.reason }] : []);
+    return {
+      publicWorld: results[0].status === 'fulfilled' ? results[0].value : null,
+      purchases: results[1].status === 'fulfilled' ? (results[1].value.purchases || []) : null,
+      notifications: results[2].status === 'fulfilled' ? (results[2].value.notifications || []) : null,
+      degraded,
+    };
   }
 
   async function logout() {
@@ -158,6 +216,25 @@
     await request('/auth/logout', { method: 'POST', body: '{}' });
     authenticated = false;
     currentUser = null;
+    worldVersion = 0;
+    worldConflict = null;
+  }
+
+  async function resolveWorldStateConflict(choice) {
+    if (!worldConflict) return null;
+    if (choice === 'server') {
+      const conflict = worldConflict;
+      pendingState = null;
+      worldVersion = Number(conflict.version || 0);
+      worldConflict = null;
+      return conflict;
+    }
+    if (choice === 'local') {
+      worldVersion = Number(worldConflict.version || 0);
+      worldConflict = null;
+      return flushState({ force: true });
+    }
+    return null;
   }
 
   async function uploadMedia({ assetId, title, description, file }) {
@@ -173,10 +250,20 @@
     return request('/auth/forgot-password', { method: 'POST', body: JSON.stringify(payload) });
   }
 
+  async function updateProfile(payload) {
+    const result = await request('/profile', { method: 'PUT', body: JSON.stringify(payload) });
+    currentUser = result.user;
+    return result;
+  }
+
   async function updateResearchConsent(active) {
     const result = await request('/privacy/consent', { method: 'PUT', body: JSON.stringify({ active: Boolean(active) }) });
     currentUser = result.user;
     return result;
+  }
+
+  async function getResearchStatus() {
+    return request('/privacy/research-status');
   }
 
   async function exportAccountData() {
@@ -214,24 +301,39 @@
     setAssetReaction: (assetId, liked) => request(`/public/assets/${encodeURIComponent(assetId)}/reaction`, { method: 'PUT', body: JSON.stringify({ liked }) }),
     setAssetTag: (assetId, tag, active) => request(`/public/assets/${encodeURIComponent(assetId)}/tags/${encodeURIComponent(tag)}`, { method: 'PUT', body: JSON.stringify({ active }) }),
     commentOnAsset: (assetId, payload) => request(`/public/assets/${encodeURIComponent(assetId)}/comments`, { method: 'POST', body: JSON.stringify(payload) }),
-    updateAssetComment: (assetId, commentId, text) => request(`/public/assets/${encodeURIComponent(assetId)}/comments/${encodeURIComponent(commentId)}`, { method: 'PATCH', body: JSON.stringify({ text }) }),
-    deleteAssetComment: (assetId, commentId) => request(`/public/assets/${encodeURIComponent(assetId)}/comments/${encodeURIComponent(commentId)}`, { method: 'DELETE', body: '{}' }),
-    createDemand: (payload) => request('/public/demands', { method: 'POST', body: JSON.stringify(payload) }),
+    updateAssetComment: (assetId, commentId, text) => request(`/public/assets/${encodeURIComponent(assetId)}/comments/${encodeURIComponent(commentId)}`, { method: 'PATCH', body: JSON.stringify({ text }), timeoutMs: 25_000 }),
+    deleteAssetComment: (assetId, commentId) => request(`/public/assets/${encodeURIComponent(assetId)}/comments/${encodeURIComponent(commentId)}`, { method: 'DELETE', body: '{}', timeoutMs: 25_000 }),
+    createDemand: (payload) => request('/public/demands', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 20_000 }),
     updateDemand: (demandId, payload) => request(`/public/demands/${encodeURIComponent(demandId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
     deleteDemand: (demandId) => request(`/public/demands/${encodeURIComponent(demandId)}`, { method: 'DELETE', body: '{}' }),
-    respondToDemand: (demandId, payload) => request(`/public/demands/${encodeURIComponent(demandId)}/responses`, { method: 'POST', body: JSON.stringify(payload) }),
-    updateDemandResponse: (demandId, responseId, payload) => request(`/public/demands/${encodeURIComponent(demandId)}/responses/${encodeURIComponent(responseId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-    deleteDemandResponse: (demandId, responseId) => request(`/public/demands/${encodeURIComponent(demandId)}/responses/${encodeURIComponent(responseId)}`, { method: 'DELETE', body: '{}' }),
+    respondToDemand: (demandId, payload) => request(`/public/demands/${encodeURIComponent(demandId)}/responses`, { method: 'POST', body: JSON.stringify(payload), timeoutMs: 20_000 }),
+    updateDemandResponse: (demandId, responseId, payload) => request(`/public/demands/${encodeURIComponent(demandId)}/responses/${encodeURIComponent(responseId)}`, { method: 'PATCH', body: JSON.stringify(payload), timeoutMs: 25_000 }),
+    deleteDemandResponse: (demandId, responseId) => request(`/public/demands/${encodeURIComponent(demandId)}/responses/${encodeURIComponent(responseId)}`, { method: 'DELETE', body: '{}', timeoutMs: 25_000 }),
     setDemandLink: (demandId, assetId, active = true) => request(`/public/demands/${encodeURIComponent(demandId)}/links`, { method: 'PUT', body: JSON.stringify({ assetId, active }) }),
     saveRecord: (payload) => request('/public/records', { method: 'POST', body: JSON.stringify(payload) }),
     deleteRecord: (recordId) => request(`/public/records/${encodeURIComponent(recordId)}`, { method: 'DELETE', body: '{}' }),
+    claimSwap: (offerId, payload) => request(`/public/swaps/${encodeURIComponent(offerId)}/claim`, { method: 'POST', body: JSON.stringify(payload) }),
     report: (payload) => request('/public/reports', { method: 'POST', body: JSON.stringify(payload) }),
   };
+
+  const notifications = { load: () => request('/notifications') };
 
   const admin = {
     reports: () => request('/admin/reports'),
     updateReport: (reportId, status) => request(`/admin/reports/${encodeURIComponent(reportId)}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
     moderate: (targetType, targetId, hidden) => request(`/admin/moderation/${encodeURIComponent(targetType)}/${encodeURIComponent(targetId)}`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
+    setTransactionValidity: (transactionId, isValid) => request(`/admin/pricing/transactions/${encodeURIComponent(transactionId)}`, { method: 'PATCH', body: JSON.stringify({ is_valid: Boolean(isValid) }) }),
+    pricingExportUrl: `${API}/admin/pricing/export.csv`,
+    researchExportUrl: `${API}/admin/research/events.csv`,
+  };
+
+  const pricing = {
+    submitBid: (materialId, bidPrice, idempotencyKey) => request(`/pricing/materials/${encodeURIComponent(materialId)}/bids`, {
+      method: 'POST', body: JSON.stringify({ bid_price: bidPrice, idempotency_key: idempotencyKey }), timeoutMs: 30_000,
+    }),
+    material: (materialId) => request(`/pricing/materials/${encodeURIComponent(materialId)}`),
+    insight: (materialId) => request(`/pricing/materials/${encodeURIComponent(materialId)}/insight`),
+    purchases: () => request('/pricing/purchases'),
   };
 
   setInterval(() => flushEvents().catch(() => {}), 8000);
@@ -239,7 +341,7 @@
   window.addEventListener('pagehide', () => {
     queueMicrotask(() => {
       if (!authenticated) return;
-      if (pendingState && navigator.sendBeacon) navigator.sendBeacon(`${API}/world-state`, new Blob([JSON.stringify({ state: pendingState })], { type: 'application/json' }));
+      if (pendingState && navigator.sendBeacon) navigator.sendBeacon(`${API}/world-state`, new Blob([JSON.stringify({ state: pendingState, baseVersion: worldVersion })], { type: 'application/json' }));
       if (pendingEvents.size && navigator.sendBeacon) {
         const events = [...pendingEvents.values()].slice(0, 100).map(({ queue_user_id, ...event }) => event);
         navigator.sendBeacon(`${API}/events/batch`, new Blob([JSON.stringify({ events })], { type: 'application/json' }));
@@ -255,13 +357,17 @@
     guest: () => authenticate('/auth/guest', {}),
     logout,
     forgotPassword,
+    updateProfile,
+    loadSessionExtras,
     saveState,
     flushState,
+    resolveWorldStateConflict,
     events: { enqueue: enqueueEvent, flush: flushEvents },
     media: { upload: uploadMedia, url: (assetId) => `${API}/media/${encodeURIComponent(assetId)}` },
-    publicWorld,
+    pricing,
+    publicWorld, notifications,
     admin,
-    privacy: { updateConsent: updateResearchConsent, exportData: exportAccountData, anonymize: anonymizeAccount },
+    privacy: { updateConsent: updateResearchConsent, researchStatus: getResearchStatus, exportData: exportAccountData, anonymize: anonymizeAccount },
     isAuthenticated: () => authenticated,
     user: () => currentUser,
   };

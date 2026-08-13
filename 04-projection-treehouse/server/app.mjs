@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { config as defaultConfig } from './config.mjs';
+import { normalizeBidPrice } from './pricing.mjs';
+import { EVENT_TYPES, deriveSignals, validateTelemetryEvent } from './event-schema.mjs';
 import {
   createSessionToken,
   hashPassword,
@@ -15,7 +17,7 @@ import {
 } from './security.mjs';
 
 const APP_PREFIX = '/04-projection-treehouse/';
-const ESSENTIAL_EVENTS = new Set(['register', 'login', 'logout', 'research_consent_change', 'deletion_request', 'data_export']);
+const ESSENTIAL_EVENTS = new Set(['register', 'login', 'logout', 'research_consent_change', 'deletion_request', 'data_export', 'feedback']);
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg',
@@ -32,6 +34,17 @@ function apiError(response, status, code, message) {
   json(response, status, { ok: false, error: { code, message } });
 }
 
+function csv(response, fileName, rows) {
+  const escape = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`;
+  const body = Buffer.from(`\uFEFF${rows.map((row) => row.map(escape).join(',')).join('\r\n')}`, 'utf8');
+  response.writeHead(200, {
+    'content-type': 'text/csv; charset=utf-8',
+    'content-disposition': `attachment; filename="${fileName}"`,
+    'content-length': body.length,
+  });
+  response.end(body);
+}
+
 async function readJson(request, maxBytes) {
   const chunks = [];
   let size = 0;
@@ -45,28 +58,23 @@ async function readJson(request, maxBytes) {
   catch { throw Object.assign(new Error('invalid-json'), { status: 400 }); }
 }
 
-function validateIdentity(identity) {
-  return /^\+?[0-9][0-9\s-]{7,17}$/.test(identity) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity);
+async function readBytes(request, maxBytes) {
+  const declaredSize = Number(request.headers['content-length'] || 0);
+  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
+    throw Object.assign(new Error('payload-too-large'), { status: 413 });
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) throw Object.assign(new Error('payload-too-large'), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
-function validateEvent(event) {
-  if (!event || typeof event !== 'object') return null;
-  if (!/^[a-z0-9_:-]{2,80}$/i.test(String(event.event_id || ''))) return null;
-  if (!/^[a-z0-9_:-]{2,80}$/i.test(String(event.raw_event || ''))) return null;
-  const createdAt = Number.isNaN(Date.parse(event.created_at)) ? new Date().toISOString() : event.created_at;
-  return {
-    event_id: String(event.event_id),
-    raw_event: String(event.raw_event),
-    details: event.details && typeof event.details === 'object' ? event.details : {},
-    created_at: createdAt,
-    schema_version: Math.max(1, Math.min(100, Number(event.schema_version) || 1)),
-    session_id: String(event.session_id || '').slice(0, 100),
-    session_sequence: Math.max(0, Number(event.session_sequence) || 0),
-    research_consent: Boolean(event.research_consent),
-    experiment_id: String(event.experiment_id || ''),
-    experiment_group: String(event.experiment_group || ''),
-    derived_signals: {},
-  };
+function validateIdentity(identity) {
+  return /^\+?[0-9][0-9\s-]{7,17}$/.test(identity) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity);
 }
 
 function cleanText(value, max = 200) {
@@ -78,10 +86,19 @@ function cleanCoordinate(value) {
   return Number.isFinite(number) ? Math.max(-1000000, Math.min(1000000, number)) : 0;
 }
 
+function contentFreshness(record) {
+  if (record.archived) return { archived: true, freshness: 'archived', freshnessLabel: '已归档' };
+  const ageDays = Math.max(0, (Date.now() - (Date.parse(record.createdAt || record.updatedAt || 0) || Date.now())) / 86400000);
+  if (ageDays <= 7) return { archived: false, freshness: 'new', freshnessLabel: '新落地' };
+  if (ageDays <= 30) return { archived: false, freshness: 'settled', freshnessLabel: '已安放' };
+  return { archived: false, freshness: 'old', freshnessLabel: '旧内容' };
+}
+
 function publicAssetView(asset, viewerId) {
   const { ownerId, comments = [], likedBy = [], tagRecords = [], ...publicAsset } = asset;
   return {
     ...publicAsset,
+    ...contentFreshness(asset),
     owner: ownerId === viewerId ? 'me' : 'other',
     liked: likedBy.includes(viewerId),
     likes: likedBy.length || Number(asset.likes || 0),
@@ -95,14 +112,72 @@ function publicDemandView(demand, viewerId) {
   const { ownerId, responses = [], ...publicDemand } = demand;
   return {
     ...publicDemand,
+    ...contentFreshness(demand),
     owner: ownerId === viewerId ? 'me' : 'other',
     responses: responses.filter((response) => response.status !== 'deleted' && response.moderationStatus !== 'hidden').map(({ ownerId: responseOwnerId, ...response }) => ({ ...response, owner: responseOwnerId === viewerId ? 'me' : 'other' })),
+  };
+}
+
+async function pricingInsight(repository, viewerId, materialId, minimumSample) {
+  const pricing = await repository.listAllPricing();
+  const valid = (pricing.transactions || [])
+    .filter((transaction) => transaction.material_id === materialId && transaction.is_valid === true)
+    .sort((a, b) => String(a.transaction_time).localeCompare(String(b.transaction_time)));
+  const personal = valid.find((transaction) => transaction.user_id === viewerId);
+  if (!personal) return { eligible: false, sample_count: null, minimum_sample: minimumSample, cohort: null, personal: null };
+  const prices = valid.map((transaction) => Number(transaction.transaction_price)).filter(Number.isFinite).sort((a, b) => a - b);
+  const canReveal = prices.length >= minimumSample;
+  const middle = Math.floor(prices.length / 2);
+  const median = prices.length % 2 ? prices[middle] : (prices[middle - 1] + prices[middle]) / 2;
+  return {
+    eligible: true,
+    sample_count: prices.length,
+    minimum_sample: minimumSample,
+    personal: { bid_price: personal.bid_price, transaction_price: personal.transaction_price, transaction_time: personal.transaction_time },
+    cohort: canReveal ? {
+      minimum: prices[0], maximum: prices[prices.length - 1],
+      mean: Number((prices.reduce((sum, price) => sum + price, 0) / prices.length).toFixed(2)),
+      median: Number(median.toFixed(2)),
+    } : null,
   };
 }
 
 function publicRecordView(record, viewerId) {
   const { ownerId, ...publicRecord } = record;
   return { ...publicRecord, owner: ownerId === viewerId ? 'me' : 'other' };
+}
+
+async function notificationFeed(repository, viewerId) {
+  const [assets, demands, records] = await Promise.all([
+    repository.listPublicAssetsByOwner(viewerId, { includeDeleted: true }),
+    repository.listPublicDemandsByOwner(viewerId, { includeDeleted: true }),
+    repository.listPublicRecordsByOwner(viewerId, { includeDeleted: true }),
+  ]);
+  const transactions = await repository.listValidTransactionsForMaterials(assets.map((asset) => asset.id));
+  const notices = [];
+  const push = (notice) => notices.push({ read: false, ...notice });
+  assets.filter((asset) => asset.ownerId === viewerId).forEach((asset) => {
+    (asset.comments || []).filter((item) => item.ownerId !== viewerId && item.status !== 'deleted').forEach((item) => push({
+      id: `comment:${item.id}`, kind: item.parentId ? 'comment_reply' : 'asset_comment', title: item.parentId ? '有人回复了素材留言' : '素材收到了新留言',
+      summary: `${item.ownerName || item.name || '一位旅人'}在《${asset.title}》旁留下了回应`, targetType: 'asset', targetId: asset.id, createdAt: item.createdAt,
+    }));
+  });
+  demands.filter((demand) => demand.ownerId === viewerId).forEach((demand) => {
+    (demand.responses || []).filter((item) => item.ownerId !== viewerId && item.status !== 'deleted').forEach((item) => push({
+      id: `response:${item.id}`, kind: 'demand_response', title: '需求收到了新回应', summary: `${item.ownerName || item.name || '一位旅人'}回应了「${demand.title}」`, targetType: 'demand', targetId: demand.id, createdAt: item.createdAt,
+    }));
+    (demand.assetLinkRecords || []).filter((item) => item.ownerId !== viewerId).forEach((item) => push({
+      id: `link:${demand.id}:${item.assetId}`, kind: 'demand_link', title: '需求关联了一段素材', summary: `「${demand.title}」出现了新的素材关系`, targetType: 'demand', targetId: demand.id, createdAt: item.createdAt,
+    }));
+  });
+  const assetById = new Map(assets.map((asset) => [asset.id, asset]));
+  transactions.filter((transaction) => assetById.has(transaction.material_id) && transaction.user_id !== viewerId).forEach((transaction) => push({
+    id: `bid:${transaction.transaction_id}`, kind: 'asset_bid', title: '素材收到了一次模拟报价', summary: `《${assetById.get(transaction.material_id)?.title || '一段素材'}》形成了一笔有效模拟成交`, targetType: 'asset', targetId: transaction.material_id, createdAt: transaction.transaction_time,
+  }));
+  records.filter((record) => record.ownerId === viewerId && record.kind === 'swap_offer' && record.status === 'deleted' && record.claimedBy).forEach((record) => push({
+    id: `swap:${record.id}:${record.claimedAt || record.updatedAt}`, kind: 'swap_claim', title: '交换箱有了回声', summary: '另一位旅人带走了你的副本，并留下了新的东西', targetType: 'record', targetId: record.replacementId || record.id, createdAt: record.claimedAt || record.updatedAt,
+  }));
+  return notices.filter((notice) => notice.createdAt).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
 }
 
 function commonHeaders(config) {
@@ -118,6 +193,12 @@ function commonHeaders(config) {
 export function createApp({ repository, config = defaultConfig }) {
   const headers = commonHeaders(config);
   const rateBuckets = new Map();
+  const sessionCache = new Map();
+  const sessionCacheTtlMs = 30_000;
+  const sessionCleanupIntervalMs = Math.max(60_000, Number(config.sessionCleanupIntervalMs) || 15 * 60 * 1000);
+  let lastSessionCleanupAt = 0;
+  let sessionCleanup = null;
+  const marketInsightMinSample = Math.max(3, Number(config.marketInsightMinSample) || 5);
 
   function exposeUser(user) {
     const result = publicUser(user);
@@ -126,6 +207,32 @@ export function createApp({ repository, config = defaultConfig }) {
 
   function isAdmin(user) {
     return Boolean(user && config.adminIdentities?.includes(String(user.identity || '').toLowerCase()));
+  }
+
+  async function ensureResearchIdentity(user) {
+    const subject = await repository.ensureResearchSubject(user.id, { createdAt: user.createdAt || new Date().toISOString() });
+    if (!user.researchSubjectId || user.researchSubjectId !== subject.subject_id) {
+      user.researchSubjectId = subject.subject_id;
+      user.updatedAt = new Date().toISOString();
+      await repository.updateUser(user);
+    }
+    return subject;
+  }
+
+  async function recordConsent(user, researchAllowed, reason) {
+    const subject = await ensureResearchIdentity(user);
+    const now = new Date().toISOString();
+    return repository.recordResearchConsent({
+      consent_id: `consent-${randomUUID()}`, user_id: user.id, subject_id: subject.subject_id,
+      consent_version: config.researchConsentVersion || 'research-v1', research_allowed: Boolean(researchAllowed),
+      text_research_allowed: Boolean(researchAllowed), reason, effective_at: now,
+    });
+  }
+
+  async function ensureRegistrationConsent(user) {
+    const consents = await repository.listResearchConsents(user.id);
+    if (consents.some((consent) => consent.reason === 'registration')) return consents.at(-1);
+    return recordConsent(user, user.research, 'registration');
   }
 
   function allowPublicWrite(userId, scope = 'public', limit = config.publicWriteLimit || 60, windowMs = 60_000) {
@@ -155,24 +262,65 @@ export function createApp({ repository, config = defaultConfig }) {
   async function currentSession(request) {
     const token = parseCookies(request.headers.cookie).zhere_session;
     if (!token) return null;
-    const record = await repository.getSession(hashToken(token));
+    const tokenHash = hashToken(token);
+    const cached = sessionCache.get(tokenHash);
+    if (cached && cached.cachedUntil > Date.now() && Date.parse(cached.record.expiresAt) > Date.now()) return cached;
+    if (cached) sessionCache.delete(tokenHash);
+    const record = await repository.getSession(tokenHash);
     if (!record || Date.parse(record.expiresAt) <= Date.now()) {
-      if (record) await repository.deleteSession(record.tokenHash);
+      if (record) {
+        if (record.id) await repository.endResearchSession(record.id, record.expiresAt || new Date().toISOString(), 'session-expired').catch(() => {});
+        await repository.deleteSession(record.tokenHash);
+      }
       return null;
     }
     const user = await repository.getUser(record.userId);
-    return user ? { record, user } : null;
+    if (!user) return null;
+    const session = { record, user, cachedUntil: Date.now() + sessionCacheTtlMs };
+    sessionCache.set(tokenHash, session);
+    return session;
   }
 
-  async function issueSession(response, user) {
+  function maybeCleanupExpiredSessions() {
+    if (typeof repository.cleanupExpiredSessions !== 'function') return;
+    const now = Date.now();
+    if (sessionCleanup || now - lastSessionCleanupAt < sessionCleanupIntervalMs) return;
+    lastSessionCleanupAt = now;
+    sessionCleanup = repository.cleanupExpiredSessions(new Date(now).toISOString())
+      .catch((error) => console.warn('Expired session cleanup failed:', error.message))
+      .finally(() => { sessionCleanup = null; });
+  }
+
+  function secureSessionCookie(request) {
+    if (config.sessionCookieSecure === 'true') return true;
+    if (config.sessionCookieSecure === 'false') return false;
+    if (request.socket?.encrypted) return true;
+    return String(request.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+  }
+
+  async function issueSession(request, response, user) {
+    const subject = user.researchSubjectId
+      ? { subject_id: user.researchSubjectId }
+      : await ensureResearchIdentity(user);
     const token = createSessionToken();
     const maxAge = config.sessionDays * 86400;
     const session = {
       id: randomUUID(), userId: user.id, tokenHash: hashToken(token),
       createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + maxAge * 1000).toISOString(),
     };
-    await repository.createSession(session);
-    response.setHeader('set-cookie', sessionCookie(token, { secure: config.isProduction, maxAge }));
+    await repository.createResearchSession({
+        session_id: session.id, user_id: user.id, subject_id: subject.subject_id,
+        started_at: session.createdAt, consent_version: config.researchConsentVersion || 'research-v1',
+        research_allowed: Boolean(user.research), entry_surface: 'web_game', client_version: 'formal-v4', schema_version: '1',
+    });
+    try {
+      await repository.createSession(session);
+    } catch (error) {
+      await repository.endResearchSession(session.id, new Date().toISOString(), 'session-create-failed').catch(() => {});
+      throw error;
+    }
+    sessionCache.set(session.tokenHash, { record: session, user, cachedUntil: Date.now() + sessionCacheTtlMs });
+    response.setHeader('set-cookie', sessionCookie(token, { secure: secureSessionCookie(request), maxAge }));
   }
 
   async function requireUser(request, response) {
@@ -188,6 +336,7 @@ export function createApp({ repository, config = defaultConfig }) {
   }
 
   async function handleApi(request, response, url) {
+    maybeCleanupExpiredSessions();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !sameOrigin(request)) return apiError(response, 403, 'bad-origin', '请求来源无效。');
     if (request.method === 'OPTIONS') { response.writeHead(204, headers); return response.end(); }
 
@@ -207,17 +356,27 @@ export function createApp({ repository, config = defaultConfig }) {
       if (String(body.password || '').length < 8) return apiError(response, 400, 'weak-password', '密码至少需要 8 位。');
       if (body.password !== body.confirmPassword) return apiError(response, 400, 'password-mismatch', '两次密码不一致。');
       if (!body.ageConfirmed || !body.agreeTerms) return apiError(response, 400, 'consent-required', '请确认年龄并同意条款。');
-      if (await repository.findUserByIdentity(identity)) return apiError(response, 409, 'identity-exists', '该邮箱或手机号已经注册。');
-      const user = {
+      const existingUser = await repository.findUserByIdentity(identity);
+      if (existingUser && (existingUser.registrationStatus !== 'pending' || !verifyPassword(String(body.password || ''), existingUser.passwordHash))) {
+        return apiError(response, 409, 'identity-exists', '该邮箱或手机号已经注册。');
+      }
+      const user = existingUser || {
         id: randomUUID(), identity, username: String(body.username || '').trim().slice(0, 32),
         nickname: String(body.nickname || '').trim().slice(0, 32), spaceName: String(body.spaceName || '').trim().slice(0, 40),
         research: Boolean(body.research), passwordHash: hashPassword(String(body.password)), guest: false,
-        failedLoginCount: 0, frozenUntil: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        failedLoginCount: 0, frozenUntil: null, registrationStatus: 'pending',
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
       if (user.username.length < 2 || !user.nickname) return apiError(response, 400, 'profile-invalid', '用户名和昵称不能为空。');
-      await repository.createUser(user);
-      await issueSession(response, user);
-      return json(response, 201, { ok: true, user: exposeUser(user) });
+      if (!existingUser) await repository.createUser(user);
+      await ensureRegistrationConsent(user);
+      await issueSession(request, response, user);
+      if (user.registrationStatus !== 'complete') {
+        user.registrationStatus = 'complete';
+        user.updatedAt = new Date().toISOString();
+        await repository.updateUser(user);
+      }
+      return json(response, existingUser ? 200 : 201, { ok: true, resumed: Boolean(existingUser), user: exposeUser(user) });
     }
 
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
@@ -233,9 +392,11 @@ export function createApp({ repository, config = defaultConfig }) {
         await repository.updateUser(user);
         return apiError(response, 401, 'invalid-credentials', '账户或密码不正确。');
       }
-      user.failedLoginCount = 0; user.frozenUntil = null; user.updatedAt = new Date().toISOString();
-      await repository.updateUser(user);
-      await issueSession(response, user);
+      if (user.failedLoginCount || user.frozenUntil) {
+        user.failedLoginCount = 0; user.frozenUntil = null; user.updatedAt = new Date().toISOString();
+        await repository.updateUser(user);
+      }
+      await issueSession(request, response, user);
       return json(response, 200, { ok: true, user: exposeUser(user) });
     }
 
@@ -247,7 +408,8 @@ export function createApp({ repository, config = defaultConfig }) {
         failedLoginCount: 0, frozenUntil: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
       await repository.createUser(user);
-      await issueSession(response, user);
+      await recordConsent(user, false, 'guest-registration');
+      await issueSession(request, response, user);
       return json(response, 201, { ok: true, user: exposeUser(user) });
     }
 
@@ -256,17 +418,43 @@ export function createApp({ repository, config = defaultConfig }) {
       return json(response, 200, { ok: true, authenticated: Boolean(session), user: exposeUser(session?.user) });
     }
 
+    if (url.pathname === '/api/profile' && request.method === 'PUT') {
+      const user = await requireUser(request, response); if (!user) return;
+      const body = await readJson(request, 16 * 1024);
+      const nickname = cleanText(body.nickname, 32);
+      const spaceName = cleanText(body.spaceName, 40);
+      if (!nickname) return apiError(response, 400, 'profile-invalid', '昵称不能为空。');
+      user.nickname = nickname;
+      if (spaceName) user.spaceName = spaceName;
+      user.updatedAt = new Date().toISOString();
+      await repository.updateUser(user);
+      return json(response, 200, { ok: true, user: exposeUser(user) });
+    }
+
     if (url.pathname === '/api/auth/logout' && request.method === 'POST') {
       const token = parseCookies(request.headers.cookie).zhere_session;
-      if (token) await repository.deleteSession(hashToken(token));
-      response.setHeader('set-cookie', sessionCookie('', { secure: config.isProduction, maxAge: 0 }));
+      if (token) {
+        const tokenHash = hashToken(token);
+        const record = sessionCache.get(tokenHash)?.record || await repository.getSession(tokenHash);
+        if (record?.id) await repository.endResearchSession(record.id, new Date().toISOString(), 'logout');
+        await repository.deleteSession(tokenHash);
+        sessionCache.delete(tokenHash);
+      }
+      response.setHeader('set-cookie', sessionCookie('', { secure: secureSessionCookie(request), maxAge: 0 }));
       return json(response, 200, { ok: true });
     }
 
     if (url.pathname === '/api/auth/forgot-password' && request.method === 'POST') {
       const body = await readJson(request, 32 * 1024);
-      await repository.createPasswordReset({ id: randomUUID(), identity: normalizeIdentity(body.identity), note: String(body.note || '').slice(0, 500), createdAt: new Date().toISOString(), status: 'pending' });
-      return json(response, 202, { ok: true, message: '如果账户存在，管理员会发送重置指引。' });
+      const identity = normalizeIdentity(body.identity);
+      if (!validateIdentity(identity)) return apiError(response, 400, 'invalid-identity', '请输入有效邮箱或手机号。');
+      if (allowPublicWrite(identity, 'forgot-password', 3, 60 * 60_000)) {
+        await repository.createPasswordReset({
+          id: randomUUID(), identity, note: String(body.note || '').slice(0, 500),
+          channel: 'manual-admin', createdAt: new Date().toISOString(), status: 'pending',
+        });
+      }
+      return json(response, 202, { ok: true, mode: 'manual-admin', message: '人工重置申请已提交。管理员核验后会发送指引；当前不会自动发送邮件或短信。' });
     }
 
     if (url.pathname === '/api/privacy/consent' && request.method === 'PUT') {
@@ -276,18 +464,36 @@ export function createApp({ repository, config = defaultConfig }) {
       user.researchConsentUpdatedAt = new Date().toISOString();
       user.updatedAt = user.researchConsentUpdatedAt;
       await repository.updateUser(user);
+      await recordConsent(user, user.research, 'settings-change');
       return json(response, 200, { ok: true, user: exposeUser(user) });
+    }
+
+    if (url.pathname === '/api/privacy/research-status' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      const health = await repository.getResearchHealth(user.id);
+      const latestEventAgeMs = health.lastEventAt ? Math.max(0, Date.now() - Date.parse(health.lastEventAt)) : null;
+      const collecting = Boolean(user.research && health.subjectReady);
+      return json(response, 200, {
+        ok: true,
+        status: collecting ? (health.eventCount > 0 ? 'collecting' : 'ready') : 'paused',
+        collecting, consent_version: config.researchConsentVersion || 'research-v1',
+        event_count: health.eventCount, last_event_at: health.lastEventAt,
+        last_event_age_ms: latestEventAgeMs, consent_record_count: health.consentRecordCount,
+      });
     }
 
     if (url.pathname === '/api/privacy/export' && request.method === 'GET') {
       const user = await requireUser(request, response); if (!user) return;
-      const [world, assets, events, publicAssets, publicDemands, publicRecords] = await Promise.all([
+      const [world, assets, events, publicAssets, publicDemands, publicRecords, pricing, researchSubject, researchConsents] = await Promise.all([
         repository.getWorldState(user.id),
         repository.listMediaByUser(user.id),
         repository.allEvents(user.id),
         repository.listPublicAssets({ includeDeleted: true }),
         repository.listPublicDemands({ includeDeleted: true }),
         repository.listPublicRecords({ includeDeleted: true }),
+        repository.listPricingByUser(user.id),
+        repository.getResearchSubject(user.id),
+        repository.listResearchConsents(user.id),
       ]);
       const ownedPublicAssets = publicAssets.filter((asset) => asset.ownerId === user.id);
       const ownedPublicDemands = publicDemands.filter((demand) => demand.ownerId === user.id);
@@ -305,6 +511,11 @@ export function createApp({ repository, config = defaultConfig }) {
           public_demands: ownedPublicDemands.map(({ responses, ...demand }) => demand),
           public_responses: ownedPublicResponses,
           public_records: publicRecords.filter((record) => record.ownerId === user.id),
+          bids: pricing.bids,
+          transactions: pricing.transactions,
+          base_prices: pricing.basePrices,
+          research_subject: researchSubject ? { subject_id: researchSubject.subject_id, source_system: researchSubject.source_system, status: researchSubject.status, created_at: researchSubject.created_at } : null,
+          research_consents: researchConsents.map(({ user_id, ...consent }) => consent),
           raw_events: events,
         },
       });
@@ -325,7 +536,8 @@ export function createApp({ repository, config = defaultConfig }) {
         nextState.profile = { ...nextState.profile, nickname: '匿名旅人', username: anonymousName };
         await repository.saveWorldState(user.id, nextState);
       }
-      await repository.anonymizeUserData(user.id);
+      const anonymized = await repository.anonymizeUserData(user.id);
+      const anonymousId = anonymized?.anonymousId || anonymousName;
       user.identity = `${anonymousName}@deleted.local`;
       user.username = anonymousName;
       user.nickname = '匿名旅人';
@@ -334,24 +546,37 @@ export function createApp({ repository, config = defaultConfig }) {
       user.guest = true;
       user.anonymized = true;
       user.anonymizedAt = new Date().toISOString();
+      user.researchSubjectId = null;
+      user.anonymousDataId = anonymousId;
       user.updatedAt = user.anonymizedAt;
       await repository.updateUser(user);
       await repository.deleteSessionsByUser(user.id);
-      response.setHeader('set-cookie', sessionCookie('', { secure: config.isProduction, maxAge: 0 }));
+      for (const [tokenHash, cached] of sessionCache) if (cached.user.id === user.id) sessionCache.delete(tokenHash);
+      response.setHeader('set-cookie', sessionCookie('', { secure: secureSessionCookie(request), maxAge: 0 }));
       return json(response, 200, { ok: true, anonymized: true });
     }
 
     if (url.pathname === '/api/public/world' && request.method === 'GET') {
       const user = await requireUser(request, response); if (!user) return;
-      const snapshotAt = new Date().toISOString();
-      const since = Number.isNaN(Date.parse(url.searchParams.get('since') || '')) ? null : Date.parse(url.searchParams.get('since'));
-      const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
-      const limit = Math.max(10, Math.min(200, Number(url.searchParams.get('limit')) || 100));
-      const [allAssets, allDemands, allRecords] = await Promise.all([
+      let [allAssets, allDemands, allRecords] = await Promise.all([
         repository.listPublicAssets({ includeDeleted: true }),
         repository.listPublicDemands({ includeDeleted: true }),
         repository.listPublicRecords({ includeDeleted: true }),
       ]);
+      if (!allRecords.some((record) => record.kind === 'swap_offer' && record.status === 'published')) {
+        const now = new Date().toISOString();
+        const created = await repository.savePublicRecord({
+          id: 'swap-npc-welcome', kind: 'swap_offer', ownerId: 'npc-muqiu', ownerName: '木秋（NPC）', name: '木秋（NPC）',
+          status: 'published', moderationStatus: 'visible',
+          payload: { assetId: 'v-old-radio', note: '换一个你觉得适合雨夜的东西。', by: '木秋（NPC）', npc: true },
+          createdAt: now, updatedAt: now,
+        });
+        if (created) allRecords = [...allRecords, created];
+      }
+      const snapshotAt = new Date().toISOString();
+      const since = Number.isNaN(Date.parse(url.searchParams.get('since') || '')) ? null : Date.parse(url.searchParams.get('since'));
+      const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
+      const limit = Math.max(10, Math.min(200, Number(url.searchParams.get('limit')) || 100));
       const changed = (item) => !since || Date.parse(item.updatedAt || item.createdAt || 0) > since;
       const assets = allAssets.filter(changed);
       const demands = allDemands.filter((demand) => changed(demand) || (demand.responses || []).some(changed));
@@ -373,6 +598,212 @@ export function createApp({ repository, config = defaultConfig }) {
       });
     }
 
+    if (url.pathname === '/api/notifications' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      const notifications = await notificationFeed(repository, user.id);
+      return json(response, 200, { ok: true, notifications, refreshedAt: new Date().toISOString() });
+    }
+
+    const pricingBidMatch = url.pathname.match(/^\/api\/pricing\/materials\/([^/]+)\/bids$/);
+    if (pricingBidMatch && request.method === 'POST') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!allowPublicWrite(user.id, 'pricing-bid', 30, 60_000)) return apiError(response, 429, 'rate-limited', '报价过于频繁，请稍后再试。');
+      const materialId = cleanText(decodeURIComponent(pricingBidMatch[1]), 80);
+      if (!/^[a-z0-9_-]{2,80}$/i.test(materialId)) return apiError(response, 400, 'invalid-material-id', '素材 ID 无效。');
+      const publicAsset = materialId.startsWith('v-') ? null : await repository.getPublicAsset(materialId);
+      if (!materialId.startsWith('v-') && !publicAsset) return apiError(response, 404, 'material-not-found', '素材不存在或已不可见。');
+      if (publicAsset?.ownerId === user.id) return apiError(response, 403, 'owner-cannot-bid', '发布者不能为自己发布的素材报价。');
+      const body = await readJson(request, 32 * 1024);
+      const bidPrice = normalizeBidPrice(body.bid_price);
+      if (bidPrice == null) return apiError(response, 400, 'invalid-bid-price', '请输入大于 0、最多保留两位小数的报价。');
+      const clientIdempotencyKey = cleanText(body.idempotency_key, 100);
+      if (!/^[a-z0-9_.:-]{8,100}$/i.test(clientIdempotencyKey)) return apiError(response, 400, 'invalid-idempotency-key', '报价请求标识无效，请重新提交。');
+      const idempotencyKey = createHash('sha256').update(`${user.id}:${clientIdempotencyKey}`).digest('hex');
+      const now = new Date().toISOString();
+      const bidId = `bid-${randomUUID()}`;
+      const result = await repository.createAcceptedBidTransaction({
+        bid: {
+          bid_id: bidId, user_id: user.id, material_id: materialId, bid_time: now,
+          bid_price: bidPrice, counter_price: null, bid_status: 'accepted', bidder_type: 'player', idempotency_key: idempotencyKey,
+        },
+        transaction: {
+          transaction_id: `txn-${randomUUID()}`, bid_id: bidId, material_id: materialId, user_id: user.id,
+          transaction_time: now, bid_price: bidPrice, transaction_price: bidPrice, is_valid: true,
+        },
+        basePriceTransactionCount: config.basePriceTransactionCount,
+      });
+      if (result.alreadyPurchased) {
+        return apiError(response, 409, 'material-already-acquired', '你已经购入过这段素材，每个账户对同一素材只能报价一次。');
+      }
+      // The accepted transaction already contains every value needed for the
+      // current user's immediate result. Derive the first post-bid insight from
+      // the material transaction set used above instead of scanning all three
+      // pricing tables again on the critical response path.
+      const materialTransactions = result.materialTransactions || (typeof repository.listTransactionsForMaterial === 'function'
+        ? await repository.listTransactionsForMaterial(materialId)
+        : (await repository.listAllPricing()).transactions.filter((item) => item.material_id === materialId));
+      const validPrices = materialTransactions.filter((item) => item.is_valid === true)
+        .map((item) => Number(item.transaction_price)).filter(Number.isFinite).sort((a, b) => a - b);
+      const canReveal = validPrices.length >= marketInsightMinSample;
+      const midpoint = Math.floor(validPrices.length / 2);
+      const insight = {
+        eligible: true,
+        sample_count: validPrices.length,
+        minimum_sample: marketInsightMinSample,
+        personal: { bid_price: result.transaction.bid_price, transaction_price: result.transaction.transaction_price, transaction_time: result.transaction.transaction_time },
+        cohort: canReveal ? {
+          minimum: validPrices[0], maximum: validPrices.at(-1),
+          mean: Number((validPrices.reduce((sum, price) => sum + price, 0) / validPrices.length).toFixed(2)),
+          median: Number((validPrices.length % 2 ? validPrices[midpoint] : (validPrices[midpoint - 1] + validPrices[midpoint]) / 2).toFixed(2)),
+        } : null,
+      };
+      const { materialTransactions: _, ...publicResult } = result;
+      return json(response, result.duplicate ? 200 : 201, { ok: true, ...publicResult, insight, base_price_transaction_count: config.basePriceTransactionCount });
+    }
+
+    const materialInsightMatch = url.pathname.match(/^\/api\/pricing\/materials\/([^/]+)\/insight$/);
+    if (materialInsightMatch && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      const materialId = cleanText(decodeURIComponent(materialInsightMatch[1]), 80);
+      if (!/^[a-z0-9_-]{2,80}$/i.test(materialId)) return apiError(response, 400, 'invalid-material-id', '素材 ID 无效。');
+      return json(response, 200, { ok: true, insight: await pricingInsight(repository, user.id, materialId, marketInsightMinSample) });
+    }
+
+    if (url.pathname === '/api/pricing/purchases' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      const pricing = await repository.listPricingByUser(user.id);
+      const bidsById = new Map(pricing.bids.map((bid) => [bid.bid_id, bid]));
+      const basePricesByMaterial = new Map(pricing.basePrices.map((item) => [item.material_id, item]));
+      const purchases = pricing.transactions
+        .filter((transaction) => transaction.is_valid === true)
+        .map((transaction) => {
+          const bid = bidsById.get(transaction.bid_id);
+          const basePrice = basePricesByMaterial.get(transaction.material_id);
+          return {
+            ...transaction,
+            bid_status: bid?.bid_status || 'accepted',
+            base_price: basePrice?.base_price ?? null,
+            valid_transaction_count: basePrice?.valid_transaction_count ?? null,
+            base_price_transaction_count: config.basePriceTransactionCount,
+          };
+        });
+      return json(response, 200, { ok: true, purchases });
+    }
+
+    const materialPricingMatch = url.pathname.match(/^\/api\/pricing\/materials\/([^/]+)$/);
+    if (materialPricingMatch && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      const materialId = cleanText(decodeURIComponent(materialPricingMatch[1]), 80);
+      if (!/^[a-z0-9_-]{2,80}$/i.test(materialId)) return apiError(response, 400, 'invalid-material-id', '素材 ID 无效。');
+      const insight = await pricingInsight(repository, user.id, materialId, marketInsightMinSample);
+      const pricing = insight.eligible && insight.cohort
+        ? await repository.getMaterialPricing(materialId)
+        : { material_id: materialId, base_price: null, valid_transaction_count: insight.eligible ? insight.sample_count : null, sample_transaction_ids: [] };
+      return json(response, 200, { ok: true, pricing, insight, base_price_transaction_count: config.basePriceTransactionCount });
+    }
+
+    if (url.pathname === '/api/admin/pricing/export.csv' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!isAdmin(user)) return apiError(response, 403, 'admin-required', '需要管理员权限。');
+      const [pricing, assets] = await Promise.all([repository.listAllPricing(), repository.listPublicAssets({ includeDeleted: true })]);
+      const transactionsByBid = new Map(pricing.transactions.map((transaction) => [transaction.bid_id, transaction]));
+      const basePricesByMaterial = new Map(pricing.basePrices.map((item) => [item.material_id, item]));
+      const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+      const rows = [[
+        'bid_id', 'transaction_id', 'material_id', 'user_id', 'timestamp', 'bid_price', 'counter_price', 'transaction_price', 'bid_status', 'is_valid',
+        'base_price', 'base_price_valid_transaction_count', 'base_price_formed_at', 'base_price_sample_transaction_ids',
+        'quality_score', 'heat_score', 'scarcity_score', 'training_value_score',
+      ]];
+      for (const bid of pricing.bids.sort((a, b) => String(a.bid_time).localeCompare(String(b.bid_time)))) {
+        const transaction = transactionsByBid.get(bid.bid_id);
+        const basePrice = basePricesByMaterial.get(bid.material_id);
+        const asset = assetsById.get(bid.material_id) || {};
+        rows.push([
+          bid.bid_id, transaction?.transaction_id ?? '', bid.material_id, bid.user_id, bid.bid_time, bid.bid_price, bid.counter_price ?? '',
+          transaction?.transaction_price ?? '', bid.bid_status, transaction?.is_valid ?? '', basePrice?.base_price ?? '',
+          basePrice?.valid_transaction_count ?? '', basePrice?.formed_at ?? '', (basePrice?.sample_transaction_ids || []).join('|'),
+          asset.quality_score ?? '', asset.heat_score ?? '', asset.scarcity_score ?? '', asset.training_value_score ?? '',
+        ]);
+      }
+      return csv(response, `zhere-pricing-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+    }
+
+    if (url.pathname === '/api/admin/research/events.csv' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!isAdmin(user)) return apiError(response, 403, 'admin-required', '需要管理员权限。');
+      const events = await repository.listAllEvents();
+      const rows = [[
+        'row_type', 'event_id', 'research_subject_id', 'session_id', 'session_sequence', 'timestamp', 'event_type',
+        'asset_id', 'impression_id', 'impression_batch_id', 'zone_id', 'rank', 'recommendation_score',
+        'visibility_duration_ms', 'distance_to_player', 'watch_seconds', 'media_duration', 'milestone',
+        'watch_ratio', 'positive_feedback', 'negative_feedback', 'conversion', 'bid_id', 'transaction_id', 'bid_price', 'transaction_price',
+        'experiment_id', 'experiment_group', 'schema_version', 'derived_schema_version', 'details_json',
+      ]];
+      for (const event of events.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))) {
+        const details = event.details && typeof event.details === 'object' ? event.details : {};
+        const impressions = event.raw_event === 'impression_batch' && Array.isArray(details.impressions) ? details.impressions : null;
+        const entries = impressions?.length ? impressions : [details];
+        const derived = Number(event.derived_signals?.derived_schema_version) >= 1 ? event.derived_signals : deriveSignals(event.raw_event, details);
+        for (const entry of entries) rows.push([
+          impressions ? 'impression' : 'event', event.event_id, event.research_subject_id || '', event.session_id || '', event.session_sequence ?? '',
+          event.created_at || '', event.raw_event || '', entry.asset_id || details.asset_id || '', entry.impression_id || details.impression_id || '',
+          entry.impression_batch_id || details.impression_batch_id || '', entry.zone_id || details.zone_id || '', entry.rank ?? '',
+          entry.recommendation_score ?? '', entry.visibility_duration_ms ?? '', entry.distance_to_player ?? '',
+          derived.watch_seconds ?? (event.raw_event === 'watch_time' ? details.duration ?? '' : ''), details.media_duration ?? details.duration ?? '', derived.completion_milestone ?? details.milestone ?? '',
+          derived.watch_ratio ?? '', derived.positive_feedback ?? '', derived.negative_feedback ?? '', derived.conversion ?? '',
+          details.bid_id ?? '', details.transaction_id ?? '', details.bid_price ?? '', details.transaction_price ?? '',
+          event.experiment_id || '', event.experiment_group || '', event.schema_version || '', derived.derived_schema_version ?? '', JSON.stringify(entry),
+        ]);
+      }
+      return csv(response, `zhere-research-events-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+    }
+
+    if (url.pathname === '/api/admin/research/health' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!isAdmin(user)) return apiError(response, 403, 'admin-required', '需要管理员权限。');
+      const [events, pricing] = await Promise.all([repository.listAllEvents(), repository.listAllPricing()]);
+      const duplicatePurchases = [];
+      const validGroups = Map.groupBy((pricing.transactions || []).filter((item) => item.is_valid === true), (item) => `${item.user_id}\u0000${item.material_id}`);
+      for (const group of validGroups.values()) if (group.length > 1) duplicatePurchases.push({
+        user_id: group[0].user_id, material_id: group[0].material_id,
+        transaction_ids: group.map((item) => item.transaction_id), count: group.length,
+      });
+      const eventTypeCounts = Object.fromEntries([...Map.groupBy(events, (event) => event.raw_event).entries()].map(([key, values]) => [key, values.length]));
+      const impressions = events.flatMap((event) => event.raw_event === 'impression_batch' && Array.isArray(event.details?.impressions) ? event.details.impressions : []);
+      const impressionIds = new Set(impressions.map((item) => item.impression_id).filter(Boolean));
+      const attributedEvents = events.filter((event) => event.details?.impression_id);
+      const orphanAttributions = attributedEvents.filter((event) => !impressionIds.has(event.details.impression_id));
+      const unknownEvents = events.filter((event) => !EVENT_TYPES.has(event.raw_event));
+      const lastEventAt = events.map((event) => event.created_at).filter(Boolean).sort().at(-1) || null;
+      return json(response, 200, {
+        ok: true, checked_at: new Date().toISOString(),
+        summary: {
+          event_count: events.length, impression_count: impressions.length, attributed_event_count: attributedEvents.length,
+          orphan_attribution_count: orphanAttributions.length, unknown_event_count: unknownEvents.length,
+          bid_count: pricing.bids?.length || 0, transaction_count: pricing.transactions?.length || 0,
+          valid_transaction_count: (pricing.transactions || []).filter((item) => item.is_valid === true).length,
+          duplicate_valid_purchase_group_count: duplicatePurchases.length, last_event_at: lastEventAt,
+        },
+        event_type_counts: eventTypeCounts,
+        issues: {
+          duplicate_valid_purchases: duplicatePurchases.slice(0, 100),
+          orphan_attribution_event_ids: orphanAttributions.slice(0, 100).map((event) => event.event_id),
+          unknown_event_types: [...new Set(unknownEvents.map((event) => event.raw_event))],
+        },
+      });
+    }
+
+    const pricingTransactionMatch = url.pathname.match(/^\/api\/admin\/pricing\/transactions\/([^/]+)$/);
+    if (pricingTransactionMatch && request.method === 'PATCH') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!isAdmin(user)) return apiError(response, 403, 'admin-required', '需要管理员权限。');
+      const body = await readJson(request, 16 * 1024);
+      if (typeof body.is_valid !== 'boolean') return apiError(response, 400, 'invalid-transaction-status', '请明确设置交易是否有效。');
+      const result = await repository.setTransactionValidity(decodeURIComponent(pricingTransactionMatch[1]), body.is_valid, config.basePriceTransactionCount);
+      if (!result) return apiError(response, 404, 'transaction-not-found', '交易不存在。');
+      return json(response, 200, { ok: true, ...result });
+    }
+
     if (url.pathname === '/api/public/assets' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
       if (!allowPublicWrite(user.id, 'asset-publish', 20, 60 * 60_000)) return apiError(response, 429, 'rate-limited', '发布过于频繁，请稍后再试。');
@@ -380,6 +811,7 @@ export function createApp({ repository, config = defaultConfig }) {
       const assetId = cleanText(body.id, 80);
       if (!/^[a-z0-9_-]{2,80}$/i.test(assetId)) return apiError(response, 400, 'invalid-asset-id', '素材 ID 无效。');
       const media = await repository.getMedia(assetId);
+      if (!media) return apiError(response, 400, 'media-required', '公开视频必须先上传可播放的视频文件。');
       if (media && media.userId !== user.id) return apiError(response, 403, 'asset-owner-mismatch', '不能发布其他用户的素材文件。');
       const existing = await repository.getPublicAsset(assetId);
       if (existing && existing.ownerId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
@@ -416,6 +848,7 @@ export function createApp({ repository, config = defaultConfig }) {
       if (body.wx != null) patch.wx = cleanCoordinate(body.wx);
       if (body.wy != null) patch.wy = cleanCoordinate(body.wy);
       if (body.zone != null) patch.zone = cleanText(body.zone, 40);
+      if (typeof body.archived === 'boolean') patch.archived = body.archived;
       const result = await repository.updatePublicAsset(decodeURIComponent(assetMatch[1]), user.id, patch);
       if (result == null) return apiError(response, 404, 'public-asset-not-found', '公共素材不存在。');
       if (!result) return apiError(response, 403, 'not-asset-owner', '只有发布者可以修改素材。');
@@ -539,6 +972,7 @@ export function createApp({ repository, config = defaultConfig }) {
         quantity: body.quantity != null ? Math.max(1, Math.min(99, Number(body.quantity) || 1)) : existing.quantity,
         budget: body.budget != null ? Math.max(0, Math.min(9999, Number(body.budget) || 0)) : existing.budget,
         deadline: body.deadline != null ? cleanText(body.deadline, 20) : existing.deadline,
+        ...(typeof body.archived === 'boolean' ? { archived: body.archived } : {}),
         updatedAt: new Date().toISOString(),
       });
       return json(response, 200, { ok: true, demand: publicDemandView({ ...updated, responses: existing.responses || [] }, user.id) });
@@ -608,16 +1042,39 @@ export function createApp({ repository, config = defaultConfig }) {
       const assetId = cleanText(body.assetId, 80);
       if (!assetId || (!assetId.startsWith('v-') && !(await repository.getPublicAsset(assetId)))) return apiError(response, 400, 'asset-not-public', '只能关联公共素材。');
       const links = new Set(demand.assetLinks || []);
+      const linkRecords = Array.isArray(demand.assetLinkRecords) ? [...demand.assetLinkRecords] : [];
       if (body.active === false) links.delete(assetId); else links.add(assetId);
-      const updated = await repository.savePublicDemand({ ...demand, assetLinks: [...links], updatedAt: new Date().toISOString() });
+      const nextLinkRecords = body.active === false
+        ? linkRecords.filter((item) => item.assetId !== assetId)
+        : linkRecords.some((item) => item.assetId === assetId) ? linkRecords : [...linkRecords, { assetId, ownerId: user.id, createdAt: new Date().toISOString() }];
+      const updated = await repository.savePublicDemand({ ...demand, assetLinks: [...links], assetLinkRecords: nextLinkRecords, updatedAt: new Date().toISOString() });
       return json(response, 200, { ok: true, demand: publicDemandView({ ...updated, responses: demand.responses || [] }, user.id) });
+    }
+
+    const publicSwapClaimMatch = url.pathname.match(/^\/api\/public\/swaps\/([^/]+)\/claim$/);
+    if (publicSwapClaimMatch && request.method === 'POST') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!allowPublicWrite(user.id, 'public-swap', 20)) return apiError(response, 429, 'rate-limited', '交换操作过于频繁，请稍后再试。');
+      const body = await readJson(request, 32 * 1024);
+      const offerId = cleanText(decodeURIComponent(publicSwapClaimMatch[1]), 80);
+      const replacementAssetId = cleanText(body.replacementAssetId, 80);
+      const note = cleanText(body.note, 100) || '没有留话，但心意在。';
+      if (!/^[a-z0-9_-]{2,80}$/i.test(replacementAssetId)) return apiError(response, 400, 'invalid-replacement-asset', '请选择一枚有效副本放入交换箱。');
+      if (!replacementAssetId.startsWith('v-') && !(await repository.getPublicAsset(replacementAssetId))) return apiError(response, 400, 'replacement-not-public', '只能交换仍在公共世界中的素材副本。');
+      const result = await repository.claimPublicSwap({
+        offerId, user, replacementAssetId, note, newRecordId: `swap-${randomUUID()}`, now: new Date().toISOString(),
+      });
+      if (!result) return apiError(response, 409, 'swap-offer-gone', '这枚副本刚刚被别人换走了，请刷新交换箱。');
+      if (result.ownOffer) return apiError(response, 409, 'swap-own-offer', '不能取回自己放进交换箱的副本，请等待下一位玩家回应。');
+      if (result.sameAsset) return apiError(response, 409, 'swap-same-asset', '请换一枚不同的副本。');
+      return json(response, 201, { ok: true, gainedAssetId: result.gainedAssetId, offer: publicRecordView(result.offer, user.id) });
     }
 
     if (url.pathname === '/api/public/records' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
       if (!allowPublicWrite(user.id, 'public-record', 50)) return apiError(response, 429, 'rate-limited', '公共互动过于频繁，请稍后再试。');
       const body = await readJson(request, 64 * 1024);
-      const allowedKinds = new Set(['asset_relation', 'bench_message', 'bottle_reply', 'swap_offer', 'follow']);
+      const allowedKinds = new Set(['asset_relation', 'bench_message', 'bottle_reply', 'follow']);
       const kind = cleanText(body.kind, 40);
       if (!allowedKinds.has(kind)) return apiError(response, 400, 'invalid-record-kind', '公共互动类型无效。');
       const id = cleanText(body.id, 80) || `${kind}-${randomUUID()}`;
@@ -703,21 +1160,34 @@ export function createApp({ repository, config = defaultConfig }) {
       const user = await requireUser(request, response); if (!user) return;
       const body = await readJson(request, config.maxJsonBytes);
       if (!body.state || typeof body.state !== 'object' || Array.isArray(body.state)) return apiError(response, 400, 'invalid-state', '世界状态格式无效。');
-      const record = await repository.saveWorldState(user.id, body.state);
-      return json(response, 200, { ok: true, version: record.version, updatedAt: record.updatedAt });
+      const expectedVersion = body.force === true ? null : (Number.isInteger(body.baseVersion) ? body.baseVersion : null);
+      try {
+        const record = await repository.saveWorldState(user.id, body.state, expectedVersion);
+        return json(response, 200, { ok: true, version: record.version, updatedAt: record.updatedAt });
+      } catch (error) {
+        if (error.code !== 'world-state-conflict') throw error;
+        const current = error.current || await repository.getWorldState(user.id);
+        return json(response, 409, {
+          ok: false,
+          error: { code: 'world-state-conflict', message: '这份进度已在另一个页面更新。' },
+          conflict: { state: current?.state || null, version: current?.version || 0, updatedAt: current?.updatedAt || null },
+        });
+      }
     }
 
     if (url.pathname === '/api/events/batch' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
       const body = await readJson(request, config.maxJsonBytes);
       const rawEvents = Array.isArray(body.events) ? body.events.slice(0, 200) : [];
-      const validated = rawEvents.map((event) => ({ raw: event, event: validateEvent(event) }));
+      const validated = rawEvents.map((event) => ({ raw: event, ...validateTelemetryEvent(event) }));
       const events = validated.map((entry) => entry.event).filter(Boolean);
       const rejectedIds = validated.filter((entry) => !entry.event && entry.raw?.event_id).map((entry) => String(entry.raw.event_id));
-      if (!events.length) return json(response, 200, { ok: true, accepted: [], acknowledged: [], rejected: rejectedIds.length, rejected_ids: rejectedIds });
+      const rejectionReasons = Object.fromEntries(validated.filter((entry) => !entry.event && entry.raw?.event_id).map((entry) => [String(entry.raw.event_id), entry.error]));
+      if (!events.length) return json(response, 200, { ok: true, accepted: [], acknowledged: [], rejected: rejectedIds.length, rejected_ids: rejectedIds, rejection_reasons: rejectionReasons });
       const allowedEvents = user.research ? events : events.filter((event) => ESSENTIAL_EVENTS.has(event.raw_event));
-      const accepted = await repository.appendEvents(user.id, allowedEvents);
-      return json(response, 200, { ok: true, accepted, acknowledged: events.map((event) => event.event_id), rejected: rejectedIds.length, rejected_ids: rejectedIds });
+      const subject = await ensureResearchIdentity(user);
+      const accepted = await repository.appendEvents(user.id, allowedEvents, subject.subject_id);
+      return json(response, 200, { ok: true, accepted, acknowledged: events.map((event) => event.event_id), rejected: rejectedIds.length, rejected_ids: rejectedIds, rejection_reasons: rejectionReasons });
     }
 
     if (url.pathname === '/api/events/recent' && request.method === 'GET') {
@@ -728,7 +1198,8 @@ export function createApp({ repository, config = defaultConfig }) {
     if (url.pathname === '/api/media' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
       const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-      const webRequest = new Request(requestUrl, { method: 'POST', headers: request.headers, body: request, duplex: 'half' });
+      const multipartBytes = await readBytes(request, config.maxVideoBytes + 1024 * 1024);
+      const webRequest = new Request(requestUrl, { method: 'POST', headers: request.headers, body: multipartBytes });
       const form = await webRequest.formData();
       const file = form.get('file');
       if (!(file instanceof File) || !file.type.startsWith('video/')) return apiError(response, 400, 'invalid-media', '请选择有效视频文件。');
@@ -749,22 +1220,37 @@ export function createApp({ repository, config = defaultConfig }) {
       if (!asset) return apiError(response, 404, 'media-not-found', '没有找到该视频。');
       const publicAsset = await repository.getPublicAsset(assetId);
       if (asset.userId !== user.id && !publicAsset) return apiError(response, 403, 'media-private', '该视频尚未发布到公共世界。');
-      const bytes = await repository.readMedia(asset);
+      const mediaSize = Number(asset.size || 0);
       const range = request.headers.range?.match(/^bytes=(\d*)-(\d*)$/);
       if (range) {
-        const start = range[1] ? Number(range[1]) : 0;
-        const end = range[2] ? Math.min(Number(range[2]), bytes.length - 1) : bytes.length - 1;
-        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= bytes.length) {
-          response.writeHead(416, { 'content-range': `bytes */${bytes.length}` });
+        const suffixLength = !range[1] && range[2] ? Number(range[2]) : null;
+        const start = suffixLength != null ? Math.max(0, mediaSize - suffixLength) : (range[1] ? Number(range[1]) : 0);
+        const end = suffixLength != null ? mediaSize - 1 : (range[2] ? Math.min(Number(range[2]), mediaSize - 1) : mediaSize - 1);
+        if (!mediaSize || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= mediaSize) {
+          response.writeHead(416, { 'content-range': `bytes */${mediaSize}` });
           return response.end();
         }
+        if (repository.openMedia) {
+          const opened = await repository.openMedia(asset, { start, end });
+          response.writeHead(206, {
+            'content-type': asset.mime || 'application/octet-stream', 'content-length': end - start + 1,
+            'content-range': `bytes ${start}-${end}/${opened.size || mediaSize}`, 'cache-control': 'private, max-age=3600', 'accept-ranges': 'bytes',
+          });
+          opened.stream.on('error', (error) => response.destroy(error));
+          return opened.stream.pipe(response);
+        }
+        const bytes = await repository.readMedia(asset);
         const chunk = bytes.subarray(start, end + 1);
-        response.writeHead(206, {
-          'content-type': asset.mime || 'application/octet-stream', 'content-length': chunk.length,
-          'content-range': `bytes ${start}-${end}/${bytes.length}`, 'cache-control': 'private, max-age=3600', 'accept-ranges': 'bytes',
-        });
+        response.writeHead(206, { 'content-type': asset.mime || 'application/octet-stream', 'content-length': chunk.length, 'content-range': `bytes ${start}-${end}/${bytes.length}`, 'cache-control': 'private, max-age=3600', 'accept-ranges': 'bytes' });
         return response.end(chunk);
       }
+      if (repository.openMedia && mediaSize > 0) {
+        const opened = await repository.openMedia(asset, { start: 0, end: mediaSize - 1 });
+        response.writeHead(200, { 'content-type': asset.mime || 'application/octet-stream', 'content-length': opened.size || mediaSize, 'cache-control': 'private, max-age=3600', 'accept-ranges': 'bytes' });
+        opened.stream.on('error', (error) => response.destroy(error));
+        return opened.stream.pipe(response);
+      }
+      const bytes = await repository.readMedia(asset);
       response.writeHead(200, { 'content-type': asset.mime || 'application/octet-stream', 'content-length': bytes.length, 'cache-control': 'private, max-age=3600', 'accept-ranges': 'bytes' });
       return response.end(bytes);
     }
@@ -791,14 +1277,16 @@ export function createApp({ repository, config = defaultConfig }) {
 
   return http.createServer(async (request, response) => {
     Object.entries(headers).forEach(([name, value]) => response.setHeader(name, value));
+    const requestId = randomUUID();
+    response.setHeader('x-request-id', requestId);
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
     try {
       if (url.pathname.startsWith('/api/')) await handleApi(request, response, url);
       else await serveStatic(request, response, url);
     } catch (error) {
-      if (!response.headersSent) apiError(response, error.status || 500, error.message || 'server-error', error.status ? '请求格式无效。' : '服务暂时不可用。');
+      if (!response.headersSent) apiError(response, error.status || 500, error.status ? (error.message || 'invalid-request') : 'server-error', error.status ? '请求格式无效。' : `服务暂时不可用，请稍后重试。参考编号：${requestId}`);
       else response.destroy(error);
-      if (!error.status) console.error(error);
+      if (!error.status) console.error(JSON.stringify({ level: 'error', requestId, method: request.method, path: url.pathname, error: error?.stack || String(error), at: new Date().toISOString() }));
     }
   });
 }

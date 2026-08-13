@@ -20,7 +20,7 @@
 - 反复提价竞价并竞得副本（原片保留）
 - 进入小窝摆放副本
 - 抽屉面板（数据/账本/帮助/隐私/管理）
-- 原始事件校验（session_start/asset_open/like/favorite/comment/bid_raise/publish_demand/publish_asset/tag_add 均在）
+- 原始事件校验（session_start/asset_open/like/favorite/comment/bid_submit/bid_accepted/publish_demand/publish_asset/tag_add 均在）
 - 移动端视口渲染
 - 控制台无 JS 错误
 
@@ -46,7 +46,7 @@ copy_placed_home / copy_moved_home / copy_removed_home / copy_long_term_kept 四
 - 胶片晾衣绳、双面放映墙、混剪桌、交换箱、店铺橱窗、无名区域命名、视频影响环境（P3/P4）未实现。
 - 小窝内部仍复用树冠版插画底图，正式版需海滨小屋资产。
 - `qa/`、`previews/` 下的截图为树冠旧版，未随 v7 重新截取。
-- NPC 仅在隐藏底价之下跟价，保证玩家可竞得；正式竞价位次由服务端记录。
+- 素材报价不再使用 NPC、隐藏底价或竞价位次；每次有效完整报价由服务端直接形成 accepted Bid 和有效 Transaction。
 
 ## 关键逻辑修复记录
 

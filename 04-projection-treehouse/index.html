@@ -6,8 +6,8 @@
     <meta name="description" content="Zhere 开放世界玩法与数据采集原型（V7）：视频、需求、评论、虚拟竞价与用户痕迹共同生长的公共世界" />
     <title>Zhere | 开放公域</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='%238a9d7d' stroke='%2339423a' stroke-width='6'/%3E%3Cpath d='M22 38c12-2 18-10 20-20 3 12-2 24-17 28' fill='none' stroke='%23f7f4ea' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./styles.css?v=15" />
-    <link rel="stylesheet" href="./formal-v4.css?v=15" />
+    <link rel="stylesheet" href="./styles.css?v=19" />
+    <link rel="stylesheet" href="./formal-v4.css?v=22" />
   </head>
   <body>
     <!--
@@ -43,7 +43,10 @@
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M12 4c3 2.6 5 4.6 5 7.4A4.6 4.6 0 0 1 12 16a4.6 4.6 0 0 1-5-4.6C7 8.6 9 6.6 12 4Z"/></svg>
             收藏 <b id="favoritesCount">0</b>
           </button>
-          <button class="hud-button" id="eventButton" aria-label="今日异象">异象</button>
+          <button class="hud-button echo-button" id="echoButton" aria-label="打开回声盒">
+            <span class="echo-button-mark" aria-hidden="true"></span>回声 <b id="echoCount">0</b>
+          </button>
+          <button class="hud-button" id="eventButton" aria-label="查看今日潮讯"><span class="event-button-mark" aria-hidden="true"></span>潮讯</button>
           <button class="hud-button homestead-button" id="homesteadButton" aria-label="前往我的地块">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 12 5l8 7v8H4Z"/><path d="M9 20v-6h6v6"/></svg>
             地块 <kbd>H</kbd>
@@ -58,8 +61,10 @@
         <div class="world-stage" id="worldStage">
           <div class="terrain-layer" id="terrainLayer" aria-hidden="true"></div>
           <div class="aura-layer" id="auraLayer" aria-hidden="true"></div>
+          <div class="weather-layer" id="weatherLayer" aria-hidden="true"><i></i><i></i><i></i></div>
           <div class="deco-layer" id="decoLayer" aria-hidden="true"></div>
           <div class="resource-layer" id="resourceLayer" aria-label="可再生的世界资源"></div>
+          <span class="walk-target" id="walkTarget" aria-hidden="true" hidden><i></i></span>
           <img class="world-art" id="worldArt" src="./assets/treehouse-settlement-map-v2.png" alt="我的小屋内部" draggable="false" hidden />
 
           <section class="homestead-layer" id="homesteadLayer" aria-label="我的林间地块" hidden>
@@ -85,57 +90,64 @@
           <div id="creationLayer" class="creation-layer" aria-label="玩家发布到世界的内容"></div>
 
           <button class="world-object" data-object="cottage" data-label="我的小屋" aria-label="我的小屋">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M20 42 60 12l40 30v30H20Z" fill="#d8cfa8"/><path d="M14 44 60 8l46 36" fill="none"/><path d="M52 50h16v22H52z" fill="#f7f4ea"/><circle cx="64" cy="62" r="2.6" fill="#39423a"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M20 42 60 12l40 30v30H20Z" fill="#d8cfa8"/><path class="accent-fill" d="M14 44 60 8l46 36-8 8-38-30-38 30Z"/><path d="M52 50h16v22H52z" fill="#8b6548"/><path class="detail-fill" d="M27 48h18v15H27zM77 48h16v15H77z"/><path class="detail-line" d="M36 48v15m49-15v15M27 55h18m32 0h16M88 29v-13h8v20"/><path class="detail-line" d="M15 71h92M29 72c4-8 10-8 14 0m37 0c4-8 10-8 14 0"/><circle cx="64" cy="62" r="2.6" fill="#e0ab4f"/></svg>
           </button>
           <button class="world-object" data-object="board" data-label="公告树 · 看纸条" aria-label="公告树">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M52 14h16v64H52z" fill="#9a7f5e"/><path d="M18 20c10-10 40-12 56-2 14 9 12 30-2 36-16 7-48 6-58-6-6-8-4-20 4-28Z" fill="#a9b98e"/><rect x="40" y="24" width="26" height="18" rx="2" fill="#f7f4ea"/><circle cx="53" cy="27" r="3" fill="#b8654f"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M52 14h16v64H52z" fill="#9a7f5e"/><path d="M13 23C23 5 48 4 61 13c13-9 37-4 42 12 5 17-9 31-28 30-15 10-45 8-57-4C8 42 7 32 13 23Z" fill="#82986c"/><path class="detail-line" d="M58 49 37 66m26-22 20 20"/><rect x="32" y="23" width="24" height="19" rx="2" fill="#f7f4ea"/><rect x="62" y="19" width="22" height="17" rx="2" fill="#e8dfc5"/><path class="detail-line" d="M37 30h14m-14 5h9m30-10h12m-12 5h8"/><circle cx="44" cy="25" r="2.5" fill="#b8654f"/><circle cx="73" cy="21" r="2.5" fill="#e0ab4f"/></svg>
           </button>
           <button class="world-object" data-object="workshop" data-label="共创台 · 上传" aria-label="共创台">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M16 48h88v14H16zM28 62v14m64-14v14" fill="#9a7f5e"/><circle cx="44" cy="32" r="17" fill="#8a9d7d"/><circle cx="44" cy="32" r="6" fill="#f7f4ea"/><path d="m62 38 18-13 10 15-22 9Z" fill="#b8654f"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M16 48h88v14H16zM28 62v14m64-14v14" fill="#9a7f5e"/><path class="detail-fill" d="M20 43h80v9H20z"/><circle cx="41" cy="30" r="18" fill="#8a9d7d"/><circle cx="41" cy="30" r="7" fill="#f7f4ea"/><circle class="accent-fill" cx="41" cy="30" r="3"/><path d="m61 39 20-16 12 16-24 11Z" fill="#b8654f"/><path class="detail-line" d="m74 31 8 10m-55 22v13m66-13v13M51 53h17"/></svg>
           </button>
           <button class="world-object" data-object="telescope" data-label="山坡望远镜" aria-label="山坡望远镜">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M30 26 76 44" stroke-width="10"/><rect x="70" y="36" width="30" height="16" rx="6" fill="#8a9d7d"/><path d="M52 40 34 74M58 42l10 34" fill="none"/><path d="M14 12c8-6 18-4 22 4" fill="none"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M24 22 77 43" stroke-width="11"/><rect x="70" y="34" width="34" height="19" rx="7" fill="#8a9d7d"/><path class="accent-fill" d="M19 15h18v17H19z"/><path d="M52 40 33 75M58 42l11 34M55 43v33" fill="none"/><path class="detail-line" d="M10 12c8-7 18-5 23 3M92 15l2-7m8 13 7-3m-14 12 3 7"/><circle class="detail-fill" cx="55" cy="42" r="5"/></svg>
           </button>
           <button class="world-object" data-object="sound" data-label="听风码头" aria-label="听风码头">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M22 20v44m50-44v44M22 26h50" fill="none"/><path d="M36 32v22m12-22v30m12-30v22" stroke-width="5"/><path d="M86 30c10-2 16 4 14 12" fill="none"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M18 17v52m58-52v52M18 25h58" fill="none"/><path d="M32 31v24m14-24v33m15-33v25" stroke-width="5"/><circle class="detail-fill" cx="32" cy="58" r="5"/><path class="accent-fill" d="M41 62h10l-5 9Z"/><circle class="detail-fill" cx="61" cy="59" r="5"/><path class="detail-line" d="M84 27c13-5 22 3 18 15M86 42c8-2 13 2 12 8M14 70h68"/></svg>
           </button>
           <button class="world-object" data-object="seabench" data-label="看海长椅" aria-label="看海长椅">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M20 40h80v12H20zM16 56h88v10H16zM30 66v12m60-12v12" fill="#9a7f5e"/><path d="M20 22c12 8 30 8 42 0m14 6c10 6 20 6 28 0" fill="none"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M20 39h80v12H20zM16 55h88v11H16zM29 66v13m62-13v13" fill="#9a7f5e"/><path class="detail-fill" d="M73 29h15v11H73z"/><path class="detail-line" d="M20 20c12 8 30 8 42 0m14 6c10 6 20 6 28 0M10 75c16-6 30-6 46 0s31 6 54-1M80 28v-7"/><path class="accent-fill" d="M83 16c5 2 7 6 4 10-5 0-8-3-8-7Z"/></svg>
           </button>
           <button class="world-object" data-object="neighbor" data-label="陌生人的长椅" aria-label="邻居空间">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M18 30h84v22H18zM14 54h92v12H14zM28 66v12m64-12v12" fill="#9a7f5e"/><path d="M34 38h52" fill="none"/><circle cx="60" cy="20" r="8" fill="#a9b98e"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M18 36h84v13H18zM14 53h92v12H14zM28 65v13m64-13v13" fill="#9a7f5e"/><path class="detail-line" d="M22 41h76M23 58h74"/><path class="detail-fill" d="M75 25h16v12H75z"/><path class="detail-line" d="M83 25V15m0 0c8 0 11 5 8 10M23 73c8-5 15-5 23 0m38 0c8-5 15-5 23 0"/><circle class="accent-fill" cx="83" cy="15" r="4"/></svg>
           </button>
           <button class="world-object" data-object="anomaly" data-label="回声水洼" aria-label="今日异象">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M16 50c10-22 34-30 58-24 20 5 34 16 38 30-14 16-38 20-60 16S20 62 16 50Z" fill="#aecfc6"/><ellipse cx="60" cy="50" rx="26" ry="10" fill="none"/><ellipse cx="60" cy="50" rx="12" ry="5" fill="#f7f4ea"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M12 53c11-23 37-31 62-25 23 5 35 17 36 29-12 16-38 22-63 17S15 63 12 53Z" fill="#8fbcb3"/><ellipse class="detail-line" cx="61" cy="52" rx="32" ry="13"/><ellipse class="detail-line" cx="61" cy="52" rx="17" ry="7"/><path class="accent-fill" d="m61 17 4 8 8 4-8 4-4 8-4-8-8-4 8-4Z"/><path class="detail-line" d="M86 12v10m-5-5h10M29 28l5 5m-10 0 5-5"/></svg>
           </button>
           <button class="world-object" data-object="clothesline" data-label="胶片晾衣绳" aria-label="胶片晾衣绳">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M12 16v60M108 16v60" fill="none"/><path d="M12 24c30 14 66 14 96 0" fill="none"/><rect x="36" y="36" width="16" height="22" rx="2" fill="#f7f4ea"/><rect x="68" y="40" width="16" height="22" rx="2" fill="#d9e2bd"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M12 14v64m96-64v64M12 24c30 13 66 13 96 0" fill="none"/><path class="accent-fill" d="M32 31h26v30H32z"/><path class="detail-fill" d="M66 34h25v30H66z"/><path class="detail-line" d="M37 38h16v15H37zM71 41h15v15H71zM38 57h4m5 0h4m21 3h4m5 0h4M37 28v8m17-6v6m17-5v7m15-9v8"/><circle cx="37" cy="28" r="2"/><circle cx="54" cy="30" r="2"/><circle cx="71" cy="31" r="2"/><circle cx="86" cy="29" r="2"/></svg>
           </button>
           <button class="world-object" data-object="doublewall" data-label="双面放映墙" aria-label="双面放映墙">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="16" y="12" width="88" height="50" rx="3" fill="#d9d2b8"/><rect x="26" y="22" width="28" height="22" rx="2" fill="#8fb0a6"/><rect x="66" y="22" width="28" height="22" rx="2" fill="#c4a98f"/><path d="M30 66v14M90 66v14" fill="none"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="10" y="12" width="100" height="52" rx="5" fill="#d9d2b8"/><rect x="18" y="21" width="36" height="27" rx="3" fill="#8fbcb3"/><rect x="66" y="21" width="36" height="27" rx="3" fill="#d7b66b"/><path class="detail-line" d="m32 28 11 7-11 7Zm53 0-11 7 11 7ZM56 35h8m-4-4v8M24 64v15m72-15v15M14 69h92"/><circle class="accent-fill" cx="60" cy="56" r="4"/></svg>
           </button>
           <button class="world-object" data-object="mixtable" data-label="混剪桌" aria-label="混剪桌">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M14 44h92v12H14zM26 56v20M94 56v20" fill="#9a7f5e"/><rect x="30" y="18" width="14" height="18" rx="2" fill="#f7f4ea"/><rect x="53" y="14" width="14" height="18" rx="2" fill="#d9e2bd"/><rect x="76" y="18" width="14" height="18" rx="2" fill="#e6c9a8"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M10 43h100v14H10zM24 57v21m72-21v21" fill="#9a7453"/><rect x="20" y="13" width="24" height="24" rx="3" class="detail-fill"/><rect x="48" y="9" width="24" height="28" rx="3" fill="#8fbcb3"/><rect x="76" y="13" width="24" height="24" rx="3" fill="#d7b66b"/><path class="detail-line" d="m28 20 9 5-9 5Zm28-4 9 7-9 7Zm28 4 9 5-9 5ZM20 49h80M34 49v8m26-8v8m26-8v8"/><circle class="accent-fill" cx="34" cy="53" r="3"/><circle cx="60" cy="53" r="3" fill="#f7f2df"/><circle cx="86" cy="53" r="3" fill="#7f956b"/></svg>
           </button>
           <button class="world-object" data-object="swapbox" data-label="交换箱" aria-label="交换箱">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M24 36h72l-6 36H30Z" fill="#cbbf9d"/><path d="M24 36 38 20h44l14 16" fill="none"/><path d="M46 50c8-8 22-8 28 0m0 0 7-4m-7 4 7 5" fill="none"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><path d="M22 35h76l-6 39H28Z" fill="#cbbf9d"/><path class="accent-fill" d="M18 33 36 15h48l18 18-9 7H27Z"/><rect x="46" y="42" width="28" height="19" rx="3" class="detail-fill"/><path class="detail-line" d="M53 49h14m-8-5 8 5-8 6M36 67h48M39 15l5 18m37-18-5 18"/><circle cx="37" cy="49" r="3" fill="#7f956b"/><circle cx="83" cy="49" r="3" fill="#e0ab4f"/></svg>
           </button>
           <button class="world-object" data-object="shopcafe" data-label="咖啡店橱窗" aria-label="咖啡店橱窗">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="22" y="30" width="76" height="42" rx="2" fill="#e2d9bd"/><path d="M18 30h84l-6 14H24Z" fill="#a8b899"/><rect x="40" y="48" width="20" height="16" rx="2" fill="#8f7f5e"/><circle cx="78" cy="54" r="8" fill="#f7f4ea"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="18" y="28" width="84" height="47" rx="3" fill="#e8dfc5"/><path class="accent-fill" d="M14 28h92l-7 16H21Z"/><path class="detail-fill" d="M22 31h12v11H22zm24 0h12v11H46zm24 0h12v11H70zm24 0h8l-3 11H94z"/><rect x="28" y="49" width="30" height="19" rx="3" fill="#8fbcb3"/><path class="detail-line" d="M35 55h15v8H35zM69 62h22M74 51c0-7 11-7 11 0s-11 7-11 0m11-1h6c3 0 3 6 0 6h-5M28 75v5m64-5v5"/></svg>
           </button>
           <button class="world-object" data-object="shoppet" data-label="宠物店橱窗" aria-label="宠物店橱窗">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="22" y="30" width="76" height="42" rx="2" fill="#e2d9bd"/><path d="M18 30h84l-6 14H24Z" fill="#c4a98f"/><rect x="34" y="48" width="18" height="16" rx="2" fill="#8f7f5e"/><circle cx="72" cy="52" r="6" fill="#f7f4ea"/><circle cx="86" cy="52" r="6" fill="#f7f4ea"/><circle cx="79" cy="62" r="7" fill="#f7f4ea"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="18" y="28" width="84" height="47" rx="3" fill="#e8dfc5"/><path fill="#7f956b" d="M14 28h92l-7 16H21Z"/><path class="detail-fill" d="M22 31h12v11H22zm24 0h12v11H46zm24 0h12v11H70zm24 0h8l-3 11H94z"/><rect x="27" y="49" width="29" height="19" rx="3" fill="#8fbcb3"/><path class="detail-line" d="m65 53 5-7 5 7m13 0 5-7 5 7M70 57c0-9 23-9 23 0 0 11-23 11-23 0ZM28 75v5m64-5v5"/><circle class="accent-fill" cx="77" cy="57" r="2"/><circle class="accent-fill" cx="87" cy="57" r="2"/></svg>
           </button>
           <button class="world-object" data-object="frame" data-label="空白画框" aria-label="空白画框">
-            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="30" y="8" width="60" height="48" rx="2" fill="#f7f4ea"/><rect x="40" y="18" width="40" height="28" fill="#dfe5d0"/><path d="M44 56l-8 22M76 56l8 22" fill="none"/></svg>
+            <svg class="landmark-icon" viewBox="0 0 120 84" aria-hidden="true"><rect x="25" y="7" width="70" height="53" rx="4" fill="#9a7453"/><rect x="34" y="16" width="52" height="35" rx="2" class="detail-fill"/><path class="detail-line" d="M43 42 55 29l8 8 8-10 8 15M31 13l7 7m51-7-7 7M31 54l7-7m51 7-7-7M42 60l-9 20m45-20 9 20M34 74h52"/><circle class="accent-fill" cx="72" cy="25" r="4"/></svg>
           </button>
 
-          <button class="cottage-exit" id="cottageExit" hidden>推开木门，回到公域</button>
+          <button class="cottage-exit" id="cottageExit" type="button" aria-label="沿左侧小径返回开放公域" hidden>
+            <span class="exit-path" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="exit-sign" aria-hidden="true"><i></i><b>公域</b></span>
+            <small>沿小径离开</small>
+          </button>
 
           <button class="player" id="player" aria-label="打开身边行动盘" aria-expanded="false">
+            <span class="player-pack"></span>
             <span class="player-head"></span>
             <span class="player-body"></span>
+            <span class="player-arms"></span>
             <span class="player-feet"></span>
+            <span class="player-tool"></span>
           </button>
           <aside class="context-wheel" id="contextWheel" aria-label="身边行动" hidden>
             <div><b id="contextWheelTitle">现在想做什么？</b><button class="context-wheel-close" id="contextWheelClose" type="button" aria-label="关闭身边行动盘">关闭</button></div>
@@ -144,7 +156,6 @@
             <button type="button" data-context-action="publish"><kbd>P</kbd><span><b>发布素材</b><small>从背包或本地上传</small></span></button>
             <button type="button" data-context-action="journal"><kbd>J</kbd><span><b>翻开探索手账</b><small>回看素材、纸条和关系</small></span></button>
           </aside>
-          <div class="nearby" id="nearby" hidden>E</div>
           <div class="context-hint" id="contextHint">WASD 任意方向行走 · 世界没有边界</div>
           <div class="wayfinder" id="wayfinder" aria-live="polite"></div>
         </div>
@@ -162,12 +173,12 @@
       </section>
 
       <nav class="action-dock" aria-label="快捷行动">
-        <button id="actionButton" aria-label="执行附近行动"><span class="dock-key">E</span><b>行动</b></button>
-        <button id="publishButton" aria-label="在当前位置发布视频或需求"><span class="dock-key">P</span><b>发布</b></button>
-        <button id="dockBagButton" aria-label="打开背包"><span class="dock-key">B</span><b>背包</b></button>
-        <button id="journalButton" aria-label="打开探索手账"><span class="dock-key">J</span><b>手账</b></button>
-        <button id="dockHomeButton" aria-label="前往我的地块"><span class="dock-key">H</span><b>回地块</b></button>
-        <button id="restButton" aria-label="休息并进入下一天"><span class="dock-key">R</span><b>过一天</b></button>
+        <button id="actionButton" aria-label="执行附近行动"><span class="dock-key"><svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="8"/><path d="M16 3v5m0 16v5M3 16h5m16 0h5"/><circle class="dock-accent" cx="16" cy="16" r="3"/></svg><small>E</small></span><b>行动</b></button>
+        <button id="publishButton" aria-label="在当前位置发布视频或需求"><span class="dock-key"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 8h18v18H7z"/><path d="M16 12v10m-5-5h10"/><path class="dock-accent" d="M11 5h10"/></svg><small>P</small></span><b>发布</b></button>
+        <button id="dockBagButton" aria-label="打开背包"><span class="dock-key"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M7 12h18l2 15H5Z"/><path d="M11 12V9a5 5 0 0 1 10 0v3"/><path class="dock-accent" d="M11 19h10"/></svg><small>B</small></span><b>背包</b></button>
+        <button id="journalButton" aria-label="打开探索手账"><span class="dock-key"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 7c5-2 8-1 11 2v18c-3-3-6-4-11-2Zm22 0c-5-2-8-1-11 2v18c3-3 6-4 11-2Z"/><path class="dock-accent" d="M9 13h4m-4 5h4m6-5h4m-4 5h4"/></svg><small>J</small></span><b>手账</b></button>
+        <button id="dockHomeButton" aria-label="前往我的地块"><span class="dock-key"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="m4 15 12-10 12 10-3 3-9-7-9 7Z"/><path d="M8 16v11h16V16M13 27v-8h6v8"/><path class="dock-accent" d="M22 8V4h4v8"/></svg><small>H</small></span><b>回地块</b></button>
+        <button id="restButton" aria-label="休息并进入下一天"><span class="dock-key"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 23h22M8 23a8 8 0 0 1 16 0"/><path d="M16 4v5M5 10l4 4m18-4-4 4"/><path class="dock-accent" d="M10 27h12"/></svg><small>R</small></span><b>过一天</b></button>
       </nav>
 
       <section class="dialogue" id="dialogue" aria-live="polite">
@@ -245,23 +256,26 @@
       <button class="sheet-close" id="profileClose" aria-label="关闭角色与账户">关闭</button>
       <div class="profile-head"><span class="large-avatar" id="drawerAvatar">秋</span><div><h2 id="drawerName">路过的风</h2><p id="drawerTitle">礁石小窝的整理者</p></div></div>
       <nav class="drawer-nav">
+        <span class="drawer-group-label">我的世界</span>
         <button data-panel="profile">角色与小窝</button>
         <button data-panel="board">我的需求与草稿</button>
         <button data-panel="journal">探索手账</button>
         <button data-panel="guide">世界图鉴与玩法说明</button>
+        <span class="drawer-group-label">收藏与记录</span>
         <button data-panel="favorites">我的收藏</button>
         <button data-panel="data">数据与成长</button>
         <button data-panel="ledger">灵感币账本</button>
+        <span class="drawer-group-label">账户</span>
         <button data-panel="help">帮助与反馈</button>
         <button data-panel="privacy">数据与隐私</button>
         <button data-panel="admin">公域维护簿</button>
         <button id="logoutButton">退出登录</button>
       </nav>
-      <div class="drawer-note">所有玩家拥有相同基础能力。灵感币与竞价均为虚拟，不产生真实购买。</div>
+      <div class="drawer-note">成长只展开个人地块与探索便利，不改变公共内容权限。灵感币与竞价均为虚拟。</div>
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-    <script src="./service-client.js?v=16"></script>
-    <script src="./prototype.js?v=16"></script>
+  <script src="./service-client.js?v=21"></script>
+  <script src="./prototype.js?v=28"></script>
   </body>
 </html>

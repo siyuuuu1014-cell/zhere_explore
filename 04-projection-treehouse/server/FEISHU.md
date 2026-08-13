@@ -22,9 +22,20 @@ FEISHU_TABLE_PUBLIC_RECORDS=
 FEISHU_TABLE_REPORTS=
 FEISHU_TABLE_EVENTS=
 FEISHU_TABLE_PASSWORD_RESETS=
+FEISHU_TABLE_BIDS=
+FEISHU_TABLE_TRANSACTIONS=
+FEISHU_TABLE_BASE_PRICES=
+FEISHU_TABLE_RESEARCH_SUBJECTS=
+FEISHU_TABLE_RESEARCH_CONSENTS=
+FEISHU_TABLE_RESEARCH_SESSIONS=
 ZHERE_ADMIN_IDENTITIES=admin@example.com
 ZHERE_PUBLIC_WRITE_LIMIT=60
+ZHERE_SESSION_COOKIE_SECURE=auto
+BASE_PRICE_TRANSACTION_COUNT=10
+RESEARCH_CONSENT_VERSION=research-v1
 ```
+
+`ZHERE_SESSION_COOKIE_SECURE=auto` 会在 HTTPS（含反向代理传入 `X-Forwarded-Proto: https`）时添加 `Secure`，在本机 HTTP 调试时不添加。正式公网部署也可以显式设为 `true`。
 
 生产模式缺少任意一项时，服务会拒绝启动，避免意外退回本地存储。
 
@@ -105,8 +116,40 @@ ZHERE_PUBLIC_WRITE_LIMIT=60
 
 - `event_id`
 - `actor_id`
+- `research_subject_id`
 - `raw_event`
 - `created_at`
+- `payload_json`
+
+### research_subjects
+
+- `subject_id`
+- `user_id`
+- `source_system`
+- `status`
+- `payload_json`
+
+`subject_id` 是独立随机生成的研究标识；推荐与定价研究数据应使用它，而不是邮箱、手机号或可读用户名。
+
+### research_consents
+
+- `consent_id`
+- `user_id`
+- `subject_id`
+- `consent_version`
+- `research_allowed`
+- `effective_at`
+- `payload_json`
+
+每次注册选择或设置页修改都会新增一条授权历史，不覆盖旧记录。
+
+### research_sessions
+
+- `session_id`
+- `user_id`
+- `subject_id`
+- `started_at`
+- `ended_at`
 - `payload_json`
 
 ### password_resets
@@ -114,6 +157,48 @@ ZHERE_PUBLIC_WRITE_LIMIT=60
 - `reset_id`
 - `identity`
 - `payload_json`
+
+### bids
+
+- `bid_id`
+- `user_id`
+- `material_id`
+- `bid_time`
+- `bid_price`
+- `bid_status`
+- `idempotency_key`
+- `payload_json`
+
+所有有效报价由系统直接接受。`idempotency_key` 只用于避免网络重试生成重复报价；发布者不能接受、拒绝或修改报价。
+
+### transactions
+
+- `transaction_id`
+- `bid_id`
+- `user_id`
+- `material_id`
+- `transaction_time`
+- `bid_price`
+- `transaction_price`
+- `is_valid`
+- `payload_json`
+
+### base_prices
+
+- `material_id`
+- `base_price`
+- `valid_transaction_count`
+- `formed_at`
+- `payload_json`
+
+`base_price` 只使用按 `transaction_time` 升序排列的最早 `BASE_PRICE_TRANSACTION_COUNT` 笔有效 `transaction_price` 计算；数量不足时为 `null`。
+
+## 研究采集状态
+
+- 设置页读取 `/api/privacy/research-status`，显示“正常采集、等待首条事件、已暂停”状态。
+- 账户数据导出包含匿名研究主体与完整授权历史。
+- 本地开发不要同时启动两个指向同一 `ZHERE_DATA_DIR` 的服务；需要并行实例时，为每个进程配置不同的数据目录。
+- 飞书生产模式需要额外创建 `research_subjects`、`research_consents`、`research_sessions` 三张表，并将对应 Table ID 写入环境变量。
 
 ## 飞书权限
 
@@ -137,8 +222,13 @@ ZHERE_PUBLIC_WRITE_LIMIT=60
 10. 用普通账户举报一条公共内容，再用管理员账户确认 `reports` 出现记录并能隐藏目标内容。
 11. 等待 8 秒，确认 `events` 收到批量事件且重复 `event_id` 不会再次写入。
 
+项目根目录提供 `.env.example` 作为变量清单。不要在仓库中创建包含真实密钥的 `.env`，生产环境优先使用部署平台的 Secret/环境变量管理功能。
+
 ## 失败恢复与并发说明
 
 - 飞书 API 遇到限流、网关错误或临时服务异常时会指数退避重试；访问令牌失效时会刷新令牌后重试。
+- 用户、Session、世界状态、个人素材、报价与事件等点查使用多维表格服务端筛选；公共世界快照仍按分页读取并由接口生成增量 tombstone。
+- 世界状态按 `baseVersion` 校验；旧页面提交不会覆盖已经保存的新版本，客户端收到 `409 world-state-conflict` 后必须选择载入服务端进度或明确强制保留本页进度。
+- 视频读取转发 HTTP Range。飞书下载接口若返回完整文件，服务端会流式跳过无关字节后再响应所需区间，避免一次性分配整段视频 Buffer。
 - 同一 Node.js 进程内，对同一公共素材、需求或记录的写入会按业务键串行化，避免点赞、标签和回应互相覆盖。
 - 如果部署多个 Node.js 实例，仍建议先让请求通过同一实例，或在外层增加分布式锁；飞书多维表本身不提供本项目所需的跨实例事务。

@@ -24,9 +24,9 @@
 |---|---|---|
 | 原地虚拟竞价 | 任意视频旁（G） | 不跳转竞价大厅；轻量面板 |
 | 有限预算 | HUD | 500 灵感币，出价即扣，无现金价值 |
-| 出价/提价/放弃 | 竞价面板 | 提价 5/10/20；放弃记录 bid_withdraw |
+| 独立报价 | 报价面板 | 输入完整报价；确认后记录 bid_submit，并由系统直接接受 |
 | 价格世界化表达 | 竞价植物 | 植物随热度长高，开花即落幕；无数值表单主界面 |
-| 赢得副本 | 竞价结算 | 价格达到隐藏底价且你领先 → bid_win + copy_acquired，原片保留 |
+| 报价成交并获得副本 | 报价回执 | accepted Bid → 有效 Transaction + copy_acquired，原片保留 |
 | NPC | 慢半拍的鹿 | 仅在底价之下跟价，始终标记 NPC |
 | 副本带回小窝 | 小窝（F/点击） | copy_placed_home / copy_moved_home / copy_removed_home；>24h 记录 copy_long_term_kept |
 
@@ -80,7 +80,7 @@
 | 本地 rawEvents | 内存缓冲 + IndexedDB 暂存，5-15 秒批量提交、幂等重试 |
 | CSS 视频占位 | 飞书云空间视频，按可见性懒加载 |
 | 日期种子随机视频 | 服务端推荐：兴趣/新鲜度/社交/低曝光补偿/区域语义/实验组动态选取槽位 |
-| 本地 NPC 跟价 | 服务端竞拍记录，bidder_type=npc |
+| 无 NPC 跟价和发布者定价 | 服务端独立 Bid / Transaction / BasePrice 记录 |
 | 任意账户可进入 | 服务端认证、Session、16+ 校验 |
 
 ## 仍需外部条件

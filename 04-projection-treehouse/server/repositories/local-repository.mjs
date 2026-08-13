@@ -1,8 +1,33 @@
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { calculateBasePrice } from '../pricing.mjs';
 
-const EMPTY = () => ({ users: [], sessions: [], worldStates: {}, assets: [], publicAssets: [], publicDemands: [], publicResponses: [], publicRecords: [], reports: [], events: [], passwordResets: [] });
+const EMPTY = () => ({
+  users: [], sessions: [], researchSubjects: [], researchConsents: [], researchSessions: [],
+  worldStates: {}, assets: [], publicAssets: [], publicDemands: [], publicResponses: [], publicRecords: [],
+  reports: [], events: [], passwordResets: [], bids: [], transactions: [], basePrices: [],
+});
+const TRANSIENT_FILE_ERRORS = new Set(['EACCES', 'EBUSY', 'EMFILE', 'ENFILE', 'EPERM']);
+const FILE_RETRY_DELAYS_MS = [20, 60, 140, 300, 600];
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryTransientFileOperation(operation) {
+  let lastError;
+  for (let attempt = 0; attempt <= FILE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try { return await operation(); }
+    catch (error) {
+      lastError = error;
+      if (!TRANSIENT_FILE_ERRORS.has(error?.code) || attempt === FILE_RETRY_DELAYS_MS.length) throw error;
+      await wait(FILE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastError;
+}
 
 export class LocalRepository {
   constructor(dataDir) {
@@ -14,18 +39,52 @@ export class LocalRepository {
 
   async init() {
     await fs.mkdir(this.mediaDir, { recursive: true });
-    try { await fs.access(this.storeFile); } catch { await this.#write(EMPTY()); }
+    try { await retryTransientFileOperation(() => fs.access(this.storeFile)); }
+    catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      await this.#write(EMPTY());
+    }
+    await this.#cleanupStaleTemps();
   }
 
   async #read() {
-    try { return JSON.parse(await fs.readFile(this.storeFile, 'utf8')); } catch { return EMPTY(); }
+    try {
+      const json = await retryTransientFileOperation(() => fs.readFile(this.storeFile, 'utf8'));
+      return JSON.parse(json);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return EMPTY();
+      throw error;
+    }
   }
 
   async #write(store) {
     const temp = `${this.storeFile}.${randomUUID()}.tmp`;
+    const serialized = JSON.stringify(store, null, 2);
     await fs.mkdir(this.dataDir, { recursive: true });
-    await fs.writeFile(temp, JSON.stringify(store, null, 2), 'utf8');
-    await fs.rename(temp, this.storeFile);
+    try {
+      try {
+        await retryTransientFileOperation(() => fs.writeFile(temp, serialized, { encoding: 'utf8', flag: 'w' }));
+        await retryTransientFileOperation(() => fs.rename(temp, this.storeFile));
+      } catch (error) {
+        if (!TRANSIENT_FILE_ERRORS.has(error?.code)) throw error;
+        await retryTransientFileOperation(() => fs.writeFile(this.storeFile, serialized, 'utf8'));
+      }
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
+  }
+
+  async #cleanupStaleTemps() {
+    const entries = await fs.readdir(this.dataDir, { withFileTypes: true }).catch(() => []);
+    const prefix = `${path.basename(this.storeFile)}.`;
+    const now = Date.now();
+    await Promise.all(entries
+      .filter((entry) => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith('.tmp'))
+      .map(async (entry) => {
+        const target = path.join(this.dataDir, entry.name);
+        const stat = await fs.stat(target).catch(() => null);
+        if (stat && now - stat.mtimeMs > 30000) await fs.rm(target, { force: true }).catch(() => {});
+      }));
   }
 
   async #mutate(change) {
@@ -64,6 +123,58 @@ export class LocalRepository {
     });
   }
 
+  async ensureResearchSubject(userId, { sourceSystem = 'web_game', createdAt = new Date().toISOString() } = {}) {
+    return this.#mutate((store) => {
+      store.researchSubjects ||= [];
+      const existing = store.researchSubjects.find((subject) => subject.user_id === userId);
+      if (existing) return existing;
+      const subject = {
+        subject_id: `rs-${randomUUID()}`, user_id: userId, source_system: sourceSystem,
+        status: 'active', created_at: createdAt, updated_at: createdAt,
+      };
+      store.researchSubjects.push(subject);
+      return subject;
+    });
+  }
+
+  async getResearchSubject(userId) {
+    return ((await this.#read()).researchSubjects || []).find((subject) => subject.user_id === userId) || null;
+  }
+
+  async recordResearchConsent(record) {
+    return this.#mutate((store) => {
+      store.researchConsents ||= [];
+      const existing = store.researchConsents.find((consent) => consent.consent_id === record.consent_id);
+      if (existing) return existing;
+      store.researchConsents.push(record);
+      return record;
+    });
+  }
+
+  async listResearchConsents(userId) {
+    return ((await this.#read()).researchConsents || []).filter((consent) => consent.user_id === userId);
+  }
+
+  async createResearchSession(record) {
+    return this.#mutate((store) => {
+      store.researchSessions ||= [];
+      const existing = store.researchSessions.find((session) => session.session_id === record.session_id);
+      if (existing) return existing;
+      store.researchSessions.push(record);
+      return record;
+    });
+  }
+
+  async endResearchSession(sessionId, endedAt = new Date().toISOString(), endReason = 'logout') {
+    return this.#mutate((store) => {
+      const session = (store.researchSessions || []).find((item) => item.session_id === sessionId);
+      if (!session) return null;
+      session.ended_at ||= endedAt;
+      session.end_reason ||= endReason;
+      return session;
+    });
+  }
+
   async createSession(session) {
     return this.#mutate((store) => { store.sessions.push(session); return session; });
   }
@@ -81,9 +192,33 @@ export class LocalRepository {
     return this.#mutate((store) => { store.sessions = store.sessions.filter((session) => session.userId !== userId); });
   }
 
-  async saveWorldState(userId, state) {
+  async cleanupExpiredSessions(now = new Date().toISOString()) {
+    const cutoff = Date.parse(now);
+    return this.#mutate((store) => {
+      const expired = (store.sessions || []).filter((session) => Date.parse(session.expiresAt) <= cutoff);
+      if (!expired.length) return 0;
+      const expiredIds = new Set(expired.map((session) => session.id));
+      for (const researchSession of store.researchSessions || []) {
+        if (!expiredIds.has(researchSession.session_id) || researchSession.ended_at) continue;
+        const loginSession = expired.find((session) => session.id === researchSession.session_id);
+        researchSession.ended_at = loginSession?.expiresAt || now;
+        researchSession.end_reason = 'session-expired';
+      }
+      store.sessions = (store.sessions || []).filter((session) => !expiredIds.has(session.id));
+      return expired.length;
+    });
+  }
+
+  async saveWorldState(userId, state, expectedVersion = null) {
     return this.#mutate((store) => {
       const previous = store.worldStates[userId];
+      const currentVersion = Number(previous?.version || 0);
+      if (expectedVersion != null && Number(expectedVersion) !== currentVersion) {
+        const error = new Error('world-state-conflict');
+        error.code = 'world-state-conflict';
+        error.current = previous || { userId, version: 0, state: null, updatedAt: null };
+        throw error;
+      }
       const record = { userId, version: (previous?.version || 0) + 1, state, updatedAt: new Date().toISOString() };
       store.worldStates[userId] = record;
       return record;
@@ -118,11 +253,27 @@ export class LocalRepository {
 
   async healthCheck() {
     const store = await this.#read();
-    return { ok: true, storage: 'local', users: store.users.length, checkedAt: new Date().toISOString() };
+    return { ok: true, storage: 'local', users: store.users.length, events: (store.events || []).length, checkedAt: new Date().toISOString() };
+  }
+
+  async getResearchHealth(userId) {
+    const store = await this.#read();
+    const subject = (store.researchSubjects || []).find((item) => item.user_id === userId) || null;
+    const events = (store.events || []).filter((event) => event.actor_id === userId);
+    const lastEvent = events.at(-1) || null;
+    return {
+      subjectReady: Boolean(subject), subjectId: subject?.subject_id || null,
+      eventCount: events.length, lastEventAt: lastEvent?.created_at || null,
+      consentRecordCount: (store.researchConsents || []).filter((consent) => consent.user_id === userId).length,
+    };
   }
 
   async listPublicAssets({ includeDeleted = false } = {}) {
     return ((await this.#read()).publicAssets || []).filter((asset) => includeDeleted || (asset.status === 'published' && asset.moderationStatus !== 'hidden'));
+  }
+
+  async listPublicAssetsByOwner(ownerId, { includeDeleted = false } = {}) {
+    return (await this.listPublicAssets({ includeDeleted })).filter((asset) => asset.ownerId === ownerId);
   }
 
   async getPublicAsset(assetId) {
@@ -232,6 +383,10 @@ export class LocalRepository {
     }));
   }
 
+  async listPublicDemandsByOwner(ownerId, { includeDeleted = false } = {}) {
+    return (await this.listPublicDemands({ includeDeleted })).filter((demand) => demand.ownerId === ownerId);
+  }
+
   async getPublicDemand(demandId) {
     return (await this.listPublicDemands()).find((demand) => demand.id === demandId) || null;
   }
@@ -293,6 +448,10 @@ export class LocalRepository {
     return ((await this.#read()).publicRecords || []).filter((record) => includeDeleted || (record.status !== 'deleted' && record.moderationStatus !== 'hidden'));
   }
 
+  async listPublicRecordsByOwner(ownerId, { includeDeleted = false } = {}) {
+    return (await this.listPublicRecords({ includeDeleted })).filter((record) => record.ownerId === ownerId);
+  }
+
   async deletePublicRecord(recordId, ownerId) {
     return this.#mutate((store) => {
       const record = (store.publicRecords || []).find((item) => item.id === recordId);
@@ -300,6 +459,29 @@ export class LocalRepository {
       if (record.ownerId !== ownerId) return false;
       record.status = 'deleted'; record.updatedAt = new Date().toISOString();
       return true;
+    });
+  }
+
+  async claimPublicSwap({ offerId, user, replacementAssetId, note, newRecordId, now }) {
+    return this.#mutate((store) => {
+      store.publicRecords ||= [];
+      const offer = store.publicRecords.find((item) => item.id === offerId && item.kind === 'swap_offer');
+      if (!offer || offer.status !== 'published') return null;
+      if (offer.ownerId === user.id) return { ownOffer: true };
+      const gainedAssetId = offer.payload?.assetId;
+      if (!gainedAssetId) return null;
+      if (gainedAssetId === replacementAssetId) return { sameAsset: true };
+      offer.status = 'deleted';
+      offer.updatedAt = now;
+      offer.payload = { ...offer.payload, claimedById: user.id, claimedByName: user.nickname, claimedAt: now, replacementAssetId };
+      const replacement = {
+        id: newRecordId, kind: 'swap_offer', ownerId: user.id, ownerName: user.nickname,
+        name: user.nickname, status: 'published', moderationStatus: 'visible',
+        payload: { assetId: replacementAssetId, note, by: user.nickname, npc: false },
+        createdAt: now, updatedAt: now,
+      };
+      store.publicRecords.push(replacement);
+      return { gainedAssetId, claimed: offer, offer: replacement };
     });
   }
 
@@ -342,13 +524,120 @@ export class LocalRepository {
     return fs.readFile(asset.localPath);
   }
 
-  async appendEvents(userId, events) {
+  async openMedia(asset, { start = 0, end = Number(asset.size || 0) - 1 } = {}) {
+    const stat = await fs.stat(asset.localPath);
+    const size = stat.size;
+    const safeStart = Math.max(0, Math.min(Number(start) || 0, Math.max(0, size - 1)));
+    const safeEnd = Math.max(safeStart, Math.min(Number(end), size - 1));
+    return { stream: createReadStream(asset.localPath, { start: safeStart, end: safeEnd }), size, start: safeStart, end: safeEnd };
+  }
+
+  async createAcceptedBidTransaction({ bid, transaction, basePriceTransactionCount }) {
+    return this.#mutate((store) => {
+      store.bids ||= [];
+      store.transactions ||= [];
+      store.basePrices ||= [];
+
+      const existingBid = store.bids.find((item) => item.user_id === bid.user_id && item.idempotency_key === bid.idempotency_key);
+      const existingTransaction = existingBid && store.transactions.find((item) => item.bid_id === existingBid.bid_id);
+      if (!existingBid) {
+        const existingPurchase = store.transactions.find((item) => item.user_id === bid.user_id && item.material_id === bid.material_id && item.is_valid === true);
+        if (existingPurchase) {
+          return {
+            alreadyPurchased: true,
+            bid: store.bids.find((item) => item.bid_id === existingPurchase.bid_id) || null,
+            transaction: existingPurchase,
+            pricing: store.basePrices.find((item) => item.material_id === bid.material_id) || null,
+            duplicate: false,
+          };
+        }
+      }
+
+      const savedBid = existingBid || bid;
+      if (!existingBid) store.bids.push(savedBid);
+      const savedTransaction = existingTransaction || { ...transaction, bid_id: savedBid.bid_id };
+      if (!existingTransaction) store.transactions.push(savedTransaction);
+
+      const materialTransactions = store.transactions.filter((item) => item.material_id === savedBid.material_id);
+      const calculated = calculateBasePrice(materialTransactions, basePriceTransactionCount);
+      const now = new Date().toISOString();
+      const pricing = {
+        material_id: savedBid.material_id,
+        base_price: calculated.base_price,
+        valid_transaction_count: calculated.valid_transaction_count,
+        sample_transaction_ids: calculated.sample_transaction_ids,
+        formed_at: calculated.base_price == null ? null : (store.basePrices.find((item) => item.material_id === savedBid.material_id)?.formed_at || now),
+        updated_at: now,
+      };
+      const pricingIndex = store.basePrices.findIndex((item) => item.material_id === savedBid.material_id);
+      if (pricingIndex >= 0) store.basePrices[pricingIndex] = pricing; else store.basePrices.push(pricing);
+      return { bid: savedBid, transaction: savedTransaction, pricing, materialTransactions, duplicate: Boolean(existingBid && existingTransaction) };
+    });
+  }
+
+  async getMaterialPricing(materialId) {
+    const store = await this.#read();
+    const pricing = (store.basePrices || []).find((item) => item.material_id === materialId);
+    if (pricing) return pricing;
+    const validCount = (store.transactions || []).filter((item) => item.material_id === materialId && item.is_valid === true).length;
+    return { material_id: materialId, base_price: null, valid_transaction_count: validCount, sample_transaction_ids: [], formed_at: null, updated_at: null };
+  }
+
+  async listTransactionsForMaterial(materialId) {
+    return ((await this.#read()).transactions || []).filter((item) => item.material_id === materialId);
+  }
+
+  async listPricingByUser(userId) {
+    const store = await this.#read();
+    const bids = (store.bids || []).filter((item) => item.user_id === userId);
+    const transactions = (store.transactions || []).filter((item) => item.user_id === userId);
+    const materialIds = new Set([...bids, ...transactions].map((item) => item.material_id));
+    const basePrices = (store.basePrices || []).filter((item) => materialIds.has(item.material_id));
+    return { bids, transactions, basePrices };
+  }
+
+  async listAllPricing() {
+    const store = await this.#read();
+    return { bids: store.bids || [], transactions: store.transactions || [], basePrices: store.basePrices || [] };
+  }
+
+  async listValidTransactionsForMaterials(materialIds) {
+    const ids = new Set(materialIds);
+    return ((await this.#read()).transactions || []).filter((transaction) => ids.has(transaction.material_id) && transaction.is_valid === true);
+  }
+
+  async setTransactionValidity(transactionId, isValid, basePriceTransactionCount) {
+    return this.#mutate((store) => {
+      store.transactions ||= [];
+      store.basePrices ||= [];
+      const transaction = store.transactions.find((item) => item.transaction_id === transactionId);
+      if (!transaction) return null;
+      transaction.is_valid = Boolean(isValid);
+      transaction.updated_at = new Date().toISOString();
+      const materialTransactions = store.transactions.filter((item) => item.material_id === transaction.material_id);
+      const calculated = calculateBasePrice(materialTransactions, basePriceTransactionCount);
+      const previous = store.basePrices.find((item) => item.material_id === transaction.material_id);
+      const pricing = {
+        material_id: transaction.material_id,
+        base_price: calculated.base_price,
+        valid_transaction_count: calculated.valid_transaction_count,
+        sample_transaction_ids: calculated.sample_transaction_ids,
+        formed_at: calculated.base_price == null ? null : (previous?.formed_at || new Date().toISOString()),
+        updated_at: new Date().toISOString(),
+      };
+      const index = store.basePrices.findIndex((item) => item.material_id === transaction.material_id);
+      if (index >= 0) store.basePrices[index] = pricing; else store.basePrices.push(pricing);
+      return { transaction, pricing };
+    });
+  }
+
+  async appendEvents(userId, events, researchSubjectId = null) {
     return this.#mutate((store) => {
       const existing = new Set(store.events.map((event) => event.event_id));
       const accepted = [];
       for (const event of events) {
         if (existing.has(event.event_id)) continue;
-        const record = { ...event, actor_id: userId, derived_signals: {} };
+        const record = { ...event, actor_id: userId, research_subject_id: researchSubjectId || null };
         store.events.push(record);
         existing.add(record.event_id);
         accepted.push(record.event_id);
@@ -365,22 +654,38 @@ export class LocalRepository {
     return (await this.#read()).events.filter((event) => event.actor_id === userId);
   }
 
+  async listAllEvents() {
+    return (await this.#read()).events;
+  }
+
   async anonymizeUserData(userId) {
     return this.#mutate((store) => {
+      const anonymousId = `anonymous-${randomUUID()}`;
       store.events = store.events.map((event) => event.actor_id === userId
-        ? { ...event, details: { ...event.details, actor_name: undefined, previous_name: undefined } }
+        ? { ...event, actor_id: anonymousId, details: { ...event.details, actor_name: undefined, previous_name: undefined } }
         : event);
-      store.assets = store.assets.map((asset) => asset.userId === userId ? { ...asset, fileName: '匿名素材' } : asset);
+      store.assets = store.assets.map((asset) => asset.userId === userId ? { ...asset, userId: anonymousId, fileName: '匿名素材' } : asset);
       store.publicAssets = (store.publicAssets || []).map((asset) => ({
         ...asset,
-        ...(asset.ownerId === userId ? { ownerName: '匿名旅人', fileName: '' } : {}),
-        comments: (asset.comments || []).map((comment) => comment.ownerId === userId ? { ...comment, ownerName: '匿名旅人', name: '匿名旅人' } : comment),
+        ...(asset.ownerId === userId ? { ownerId: anonymousId, ownerName: '匿名旅人', fileName: '' } : {}),
+        comments: (asset.comments || []).map((comment) => comment.ownerId === userId ? { ...comment, ownerId: anonymousId, ownerName: '匿名旅人', name: '匿名旅人' } : comment),
       }));
-      store.publicDemands = (store.publicDemands || []).map((demand) => demand.ownerId === userId ? { ...demand, ownerName: '匿名旅人', by: '匿名旅人' } : demand);
-      store.publicResponses = (store.publicResponses || []).map((response) => response.ownerId === userId ? { ...response, ownerName: '匿名旅人', name: '匿名旅人' } : response);
-      store.publicRecords = (store.publicRecords || []).map((record) => record.ownerId === userId ? { ...record, ownerName: '匿名旅人', name: '匿名旅人' } : record);
+      store.publicDemands = (store.publicDemands || []).map((demand) => ({
+        ...demand,
+        ...(demand.ownerId === userId ? { ownerId: anonymousId, ownerName: '匿名旅人', by: '匿名旅人' } : {}),
+        assetLinkRecords: (demand.assetLinkRecords || []).map((link) => link.ownerId === userId ? { ...link, ownerId: anonymousId } : link),
+      }));
+      store.publicResponses = (store.publicResponses || []).map((response) => response.ownerId === userId ? { ...response, ownerId: anonymousId, ownerName: '匿名旅人', name: '匿名旅人' } : response);
+      store.publicRecords = (store.publicRecords || []).map((record) => record.ownerId === userId ? { ...record, ownerId: anonymousId, ownerName: '匿名旅人', name: '匿名旅人' } : record);
       store.reports = (store.reports || []).map((report) => report.reporterId === userId ? { ...report, reporterId: null, reporterName: '匿名旅人' } : report);
-      return true;
+      store.bids = (store.bids || []).map((bid) => bid.user_id === userId ? { ...bid, user_id: anonymousId } : bid);
+      store.transactions = (store.transactions || []).map((transaction) => transaction.user_id === userId ? { ...transaction, user_id: anonymousId } : transaction);
+      store.researchSubjects = (store.researchSubjects || []).map((subject) => subject.user_id === userId
+        ? { ...subject, user_id: anonymousId, status: 'anonymized', updated_at: new Date().toISOString() }
+        : subject);
+      store.researchConsents = (store.researchConsents || []).map((consent) => consent.user_id === userId ? { ...consent, user_id: anonymousId } : consent);
+      store.researchSessions = (store.researchSessions || []).map((session) => session.user_id === userId ? { ...session, user_id: anonymousId } : session);
+      return { anonymousId };
     });
   }
 

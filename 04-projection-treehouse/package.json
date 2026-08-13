@@ -4,9 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch server/server.mjs",
-    "start": "node server/server.mjs",
-    "test": "node --test server/**/*.test.mjs"
+    "dev": "node --env-file-if-exists=.env --watch server/server.mjs",
+    "start": "node --env-file-if-exists=.env server/server.mjs",
+    "test": "node --test server/**/*.test.mjs",
+    "feishu:schema:audit": "node --env-file-if-exists=.env scripts/feishu-schema.mjs",
+    "feishu:schema:migrate": "node --env-file-if-exists=.env scripts/feishu-schema.mjs --apply --yes",
+    "pricing:data:audit": "node --env-file-if-exists=.env scripts/pricing-data-quality.mjs",
+    "pricing:data:repair": "node --env-file-if-exists=.env scripts/pricing-data-quality.mjs --apply --yes",
+    "research:data:health": "node --env-file-if-exists=.env scripts/research-data-health.mjs",
+    "test:live-interactions": "node --env-file-if-exists=.env scripts/live-interaction-smoke.mjs",
+    "test:browser-proxy": "node scripts/browser-test-proxy.mjs"
   },
   "engines": {
     "node": ">=24.0.0"
