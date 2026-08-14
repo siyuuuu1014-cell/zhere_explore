@@ -330,7 +330,7 @@ export class FeishuRepository {
       return next;
     });
   }
-  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes }) {
+  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes, mediaDurationSec = null, mediaWidth = null, mediaHeight = null, mediaBitrateKbps = null }) {
     const form = new FormData();
     form.set('file_name', fileName);
     form.set('parent_type', 'explorer');
@@ -338,12 +338,16 @@ export class FeishuRepository {
     form.set('size', String(bytes.length));
     form.set('file', new Blob([bytes], { type: mime }), fileName);
     const drive = await this.#request('/drive/v1/files/upload_all', { method: 'POST', body: form });
-    const asset = { id: assetId, userId, title, description, fileName, mime, size: bytes.length, storageKey: drive.file_token, createdAt: new Date().toISOString() };
+    const asset = {
+      id: assetId, userId, title, description, fileName, mime, size: bytes.length, storageKey: drive.file_token, createdAt: new Date().toISOString(),
+      media_duration_sec: mediaDurationSec, media_width: mediaWidth, media_height: mediaHeight, media_bitrate_kbps: mediaBitrateKbps,
+    };
     await this.#create('assets', { asset_id: assetId, user_id: userId, file_token: drive.file_token, payload_json: JSON.stringify(asset) });
     return asset;
   }
   async getMedia(assetId) { const record = await this.#find('assets', 'asset_id', assetId); return record ? JSON.parse(this.#plain(record.fields.payload_json)) : null; }
   async listMediaByUser(userId) { return (await this.#recordsMatching('assets', [{ field: 'user_id', value: userId }])).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')); }
+  async listAllMedia() { return (await this.#records('assets')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((asset) => asset.id); }
   async listPublicAssets({ includeDeleted = false } = {}) { return (await this.#records('publicAssets')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((asset) => asset.id).filter((asset) => includeDeleted || (asset.status === 'published' && asset.moderationStatus !== 'hidden')); }
   async listPublicAssetsByOwner(ownerId, { includeDeleted = false } = {}) {
     return (await this.#recordsMatching('publicAssets', [{ field: 'owner_id', value: ownerId }]))
@@ -677,6 +681,26 @@ export class FeishuRepository {
     }
     throw new Error(`Feishu media stream failed: ${lastStatus || 'network-error'}`);
   }
+  // 不可变基础价版本历史：每笔有效成交追加一条快照；基础价首次形成时额外追加 formation 版本。
+  async #appendBasePriceVersionRows(materialId, calculated, previous, transactionId, now) {
+    const versions = (await this.#records('basePriceVersions'))
+      .map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}'))
+      .filter((item) => item.material_id === materialId);
+    let nextVersion = versions.reduce((max, item) => Math.max(max, Number(item.version) || 0), 0) + 1;
+    const formedNow = calculated.base_price != null;
+    const formedAt = formedNow ? (previous?.formed_at || now) : null;
+    await this.#create('basePriceVersions', {
+      material_id: materialId, version: nextVersion, base_price: calculated.base_price ?? '', formed: false, transaction_id: transactionId || '',
+      payload_json: JSON.stringify({ material_id: materialId, version: nextVersion, base_price: calculated.base_price, valid_transaction_count: calculated.valid_transaction_count, sample_transaction_ids: calculated.sample_transaction_ids, formed_at: formedAt, transaction_id: transactionId || null, formed: false, created_at: now }),
+    });
+    if (formedNow && (previous?.base_price ?? null) == null) {
+      await this.#create('basePriceVersions', {
+        material_id: materialId, version: nextVersion + 1, base_price: calculated.base_price ?? '', formed: true, transaction_id: '',
+        payload_json: JSON.stringify({ material_id: materialId, version: nextVersion + 1, base_price: calculated.base_price, valid_transaction_count: calculated.valid_transaction_count, sample_transaction_ids: calculated.sample_transaction_ids, formed_at: now, transaction_id: null, formed: true, created_at: now }),
+      });
+    }
+  }
+
   async createAcceptedBidTransaction({ bid, transaction, basePriceTransactionCount }) {
     return this.#withLock(`pricing:${bid.material_id}`, async () => {
       const [existingBidRecord, existingTransactionRecord, existingPurchaseRecords, materialTransactionRecords, existingPricingRecord] = await Promise.all([
@@ -760,6 +784,9 @@ export class FeishuRepository {
       };
       if (existingPricingRecord) await this.#update('basePrices', existingPricingRecord.record_id, pricingFields);
       else await this.#create('basePrices', pricingFields);
+      if (!matchedTransactionRecord) {
+        await this.#appendBasePriceVersionRows(savedBid.material_id, calculated, previous, savedTransaction.transaction_id, now);
+      }
       return { bid: savedBid, transaction: savedTransaction, pricing, materialTransactions: allMaterialTransactions, duplicate: Boolean(existingBidRecord && matchedTransactionRecord) };
     });
   }
@@ -784,12 +811,19 @@ export class FeishuRepository {
     return { bids, transactions, basePrices };
   }
   async listAllPricing() {
-    const [bidRecords, transactionRecords, basePriceRecords] = await Promise.all([this.#records('bids'), this.#records('transactions'), this.#records('basePrices')]);
+    const [bidRecords, transactionRecords, basePriceRecords, basePriceVersionRecords] = await Promise.all([this.#records('bids'), this.#records('transactions'), this.#records('basePrices'), this.#records('basePriceVersions')]);
     return {
       bids: bidRecords.map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((bid) => bid.bid_id),
       transactions: transactionRecords.map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((transaction) => transaction.transaction_id),
       basePrices: basePriceRecords.map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((pricing) => pricing.material_id),
+      basePriceVersions: basePriceVersionRecords.map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((version) => version.material_id),
     };
+  }
+  async listBasePriceVersions(materialId = null) {
+    const records = materialId
+      ? await this.#recordsMatching('basePriceVersions', [{ field: 'material_id', value: materialId }])
+      : await this.#records('basePriceVersions');
+    return records.map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((version) => version.material_id);
   }
   async listValidTransactionsForMaterials(materialIds) {
     return (await this.#recordsMatchingAny('transactions', 'material_id', materialIds))
@@ -810,15 +844,17 @@ export class FeishuRepository {
       const calculated = calculateBasePrice(allMaterialTransactions, basePriceTransactionCount);
       const existingPricingRecord = await this.#find('basePrices', 'material_id', transaction.material_id);
       const previous = existingPricingRecord ? JSON.parse(this.#plain(existingPricingRecord.fields.payload_json) || '{}') : null;
+      const now = new Date().toISOString();
       const pricing = {
         material_id: transaction.material_id, base_price: calculated.base_price,
         valid_transaction_count: calculated.valid_transaction_count,
         sample_transaction_ids: calculated.sample_transaction_ids,
-        formed_at: calculated.base_price == null ? null : (previous?.formed_at || new Date().toISOString()),
-        updated_at: new Date().toISOString(),
+        formed_at: calculated.base_price == null ? null : (previous?.formed_at || now),
+        updated_at: now,
       };
       const pricingFields = { material_id: pricing.material_id, base_price: pricing.base_price ?? '', valid_transaction_count: pricing.valid_transaction_count, formed_at: pricing.formed_at || '', payload_json: JSON.stringify(pricing) };
       if (existingPricingRecord) await this.#update('basePrices', existingPricingRecord.record_id, pricingFields); else await this.#create('basePrices', pricingFields);
+      await this.#appendBasePriceVersionRows(transaction.material_id, calculated, previous, transaction.transaction_id, now);
       return { transaction, pricing };
     });
   }
@@ -840,6 +876,35 @@ export class FeishuRepository {
   async recentEvents(userId, limit = 200) { return (await this.#recordsMatching('events', [{ field: 'actor_id', value: userId }])).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((event) => event.event_id && event.raw_event).slice(-limit); }
   async allEvents(userId) { return (await this.#recordsMatching('events', [{ field: 'actor_id', value: userId }])).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((event) => event.event_id && event.raw_event); }
   async listAllEvents() { return (await this.#records('events')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((event) => event.event_id && event.raw_event); }
+
+  async appendRecommendationRequest(record) {
+    const existing = await this.#find('recommendationRequests', 'request_id', record.request_id);
+    if (existing) return JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
+    await this.#create('recommendationRequests', { request_id: record.request_id, user_id: record.user_id, subject_id: record.subject_id || '', payload_json: JSON.stringify(record) });
+    return record;
+  }
+  async appendRecommendationCandidates(records) {
+    for (const record of records) {
+      await this.#create('recommendationCandidates', { request_id: record.request_id, asset_id: record.asset_id, payload_json: JSON.stringify(record) });
+    }
+    return records;
+  }
+  async appendRecommendationImpressions(records) {
+    for (const record of records) {
+      await this.#create('recommendationImpressions', { impression_id: record.impression_id, request_id: record.recommendation_request_id || '', asset_id: record.asset_id, payload_json: JSON.stringify(record) });
+    }
+    return records;
+  }
+  async appendBidAttempts(records) {
+    for (const record of records) {
+      await this.#create('bidAttempts', { event_id: record.event_id, user_id: record.user_id, asset_id: record.asset_id, attempt_kind: record.attempt_kind, payload_json: JSON.stringify(record) });
+    }
+    return records;
+  }
+  async listRecommendationRequests() { return (await this.#records('recommendationRequests')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((item) => item.request_id); }
+  async listRecommendationCandidates() { return (await this.#records('recommendationCandidates')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((item) => item.request_id); }
+  async listRecommendationImpressions() { return (await this.#records('recommendationImpressions')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((item) => item.impression_id); }
+  async listBidAttempts() { return (await this.#records('bidAttempts')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((item) => item.event_id); }
   async getResearchHealth(userId) {
     const [subject, eventRecords, consents] = await Promise.all([
       this.getResearchSubject(userId),
@@ -902,7 +967,7 @@ export class FeishuRepository {
       payload.reporterId = null; payload.reporterName = '匿名旅人';
       await this.#update('reports', record.record_id, { reporter_id: '', payload_json: JSON.stringify(payload) });
     }
-    for (const table of ['bids', 'transactions']) {
+    for (const table of ['bids', 'transactions', 'recommendationRequests', 'bidAttempts']) {
       const records = await this.#records(table);
       for (const record of records) {
         const payload = JSON.parse(this.#plain(record.fields.payload_json) || '{}');

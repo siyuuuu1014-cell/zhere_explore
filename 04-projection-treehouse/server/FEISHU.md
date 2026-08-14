@@ -25,9 +25,14 @@ FEISHU_TABLE_PASSWORD_RESETS=
 FEISHU_TABLE_BIDS=
 FEISHU_TABLE_TRANSACTIONS=
 FEISHU_TABLE_BASE_PRICES=
+FEISHU_TABLE_BASE_PRICE_VERSIONS=
+FEISHU_TABLE_BID_ATTEMPTS=
 FEISHU_TABLE_RESEARCH_SUBJECTS=
 FEISHU_TABLE_RESEARCH_CONSENTS=
 FEISHU_TABLE_RESEARCH_SESSIONS=
+FEISHU_TABLE_RESEARCH_RECOMMENDATION_REQUESTS=
+FEISHU_TABLE_RESEARCH_RECOMMENDATION_CANDIDATES=
+FEISHU_TABLE_RESEARCH_RECOMMENDATION_IMPRESSIONS=
 ZHERE_ADMIN_IDENTITIES=admin@example.com
 ZHERE_PUBLIC_WRITE_LIMIT=60
 ZHERE_PUBLIC_WORLD_CACHE_TTL_MS=3000
@@ -198,12 +203,69 @@ RESEARCH_CONSENT_VERSION=research-v1
 
 `base_price` 只使用按 `transaction_time` 升序排列的最早 `BASE_PRICE_TRANSACTION_COUNT` 笔有效 `transaction_price` 计算；数量不足时为 `null`。
 
+### base_price_versions
+
+- `material_id`
+- `version`
+- `base_price`
+- `formed`
+- `transaction_id`
+- `payload_json`
+
+不可变基础价版本历史。每笔有效成交追加一条「当时」的快照（`transaction_id` 指向触发成交，`formed=false`）；当基础价首次从 `null` 变为数值时，额外追加一条 formation 版本（`formed=true`，`transaction_id` 为空）。`version` 对每个素材严格递增。
+
+### bid_attempts
+
+- `event_id`
+- `user_id`
+- `asset_id`
+- `attempt_kind`
+- `payload_json`
+
+由 `bid_attempt`、`bid_abandon`、`bid_validation_failed` 三类事件投影而来，一行一条；`attempt_kind` 保存事件类型，`payload_json` 保存 `reason`、`open_duration_ms` 等字段。
+
+### research_recommendation_requests
+
+- `request_id`
+- `user_id`
+- `subject_id`
+- `payload_json`
+
+一次推荐请求一行；`payload_json` 保存 `created_at`、`zone_slots`、`candidate_count`、`details_json`。
+
+### research_recommendation_candidates
+
+- `request_id`
+- `asset_id`
+- `payload_json`
+
+每个推荐候选一行；`payload_json` 保存 `rank`、`zone_id`、`spawn_source`、`recommendation_score`、`chosen` 等。
+
+### research_recommendation_impressions
+
+- `impression_id`
+- `request_id`
+- `asset_id`
+- `payload_json`
+
+`impression_batch` 中嵌套的曝光被拆成一行一次；`request_id` 即推荐请求 id，`payload_json` 保存完整曝光字段。
+
 ## 研究采集状态
 
 - 设置页读取 `/api/privacy/research-status`，显示“正常采集、等待首条事件、已暂停”状态。
 - 账户数据导出包含匿名研究主体与完整授权历史。
+- 管理员研究导出：`/api/admin/research/events.csv`（事件明细）、`/api/admin/research/recommendations.csv`（推荐三表 join 视图）、`/api/admin/research/snapshot`（带 sha256 前 16 位的可复现快照）、`/api/admin/research/health`（含推荐/报价/告警汇总）。
 - 本地开发不要同时启动两个指向同一 `ZHERE_DATA_DIR` 的服务；需要并行实例时，为每个进程配置不同的数据目录。
-- 飞书生产模式需要额外创建 `research_subjects`、`research_consents`、`research_sessions` 三张表，并将对应 Table ID 写入环境变量。
+- 飞书生产模式需要额外创建 `research_subjects`、`research_consents`、`research_sessions`、`research_recommendation_requests`、`research_recommendation_candidates`、`research_recommendation_impressions`、`bid_attempts`、`base_price_versions` 表，并将对应 Table ID 写入环境变量。
+
+## 端到端验证记录
+
+2026-08-14 已在真实飞书环境跑通全部启动检查步骤（`npm run feishu:e2e`，脚本 `scripts/feishu-e2e-verify.mjs`）：
+
+- 注册/登录、世界状态持久化与 `409 world-state-conflict` 保护、媒体上传与元数据落库、公共素材/需求发布、跨账户点赞/标签/评论/回应/通知、举报与管理员隐藏/恢复、报价成交与重复购买拦截、事件批量落表与 `event_id` 幂等、登出与重新登录，共 11 步全部通过（业务对象测试后自动清理）。
+- 五张新表在真实多维表中按行写入：推荐请求 1 行、候选 3 行、曝光 2 行（`impression_batch` 拆行）、`bid_attempts` 三类各 1 行、成交后 `base_price_versions` 追加版本行；管理员 `recommendations.csv` / `snapshot` / `health` / 定价 CSV 新列均返回预期数据。
+- 运行前需在进程环境追加 QA 管理员身份：`ZHERE_ADMIN_IDENTITIES="admin@example.com,qa-e2e-admin@example.com"`（脚本使用固定身份 `qa-e2e-admin@example.com`，密码见脚本常量；仅用于验证，正式环境请从 `ZHERE_ADMIN_IDENTITIES` 移除）。
+- 飞书写接口单次延迟约 2.4–4.4 秒，`ZHERE_SLOW_REQUEST_THRESHOLD_MS=1500` 会对大多数飞书写请求产生慢请求日志；若希望减少日志量，可将该值调高（如 `8000`），不影响任何数据语义。
 
 ## 飞书权限
 

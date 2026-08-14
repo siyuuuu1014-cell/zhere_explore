@@ -19,3 +19,29 @@ test('event schema creates versioned recommendation labels', () => {
   const conversion = validateTelemetryEvent({ ...base, raw_event: 'bid_accepted', details: { asset_id: 'asset-1', bid_id: 'bid-1', transaction_id: 'transaction-1', transaction_price: 12 } });
   assert.equal(conversion.event.derived_signals.conversion, true);
 });
+
+test('event schema validates recommendation request candidates and bid attempt events', () => {
+  const candidate = { asset_id: 'asset-1', rank: 1, recommendation_score: 1.5, zone_id: 'town' };
+  const validRequest = validateTelemetryEvent({
+    ...base, raw_event: 'recommendation_request',
+    details: { request_id: 'rec-1', candidates: [candidate, { ...candidate, rank: 2, asset_id: 'asset-2' }], zone_slots: 2 },
+  });
+  assert.equal(validRequest.error, null);
+  assert.equal(validRequest.event.derived_signals.is_asset_interaction, false);
+
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'recommendation_request', details: {} }).error, 'invalid-recommendation-request');
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'recommendation_request', details: { request_id: 'rec-1', candidates: [{ asset_id: 'asset-1', rank: 0, recommendation_score: 'bad', zone_id: 'town' }] } }).error, 'invalid-recommendation-candidate');
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'recommendation_request', details: { request_id: 'rec-1', candidates: [candidate], zone_slots: -1 } }).error, 'invalid-zone-slots');
+
+  const validAttempt = validateTelemetryEvent({ ...base, raw_event: 'bid_attempt', details: { asset_id: 'asset-1', bid_id: 'bid-1' } });
+  assert.equal(validAttempt.error, null);
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'bid_attempt', details: {} }).error, 'asset-id-required');
+
+  const validAbandon = validateTelemetryEvent({ ...base, raw_event: 'bid_abandon', details: { asset_id: 'asset-1', open_duration_ms: 1200 } });
+  assert.equal(validAbandon.error, null);
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'bid_abandon', details: { asset_id: 'asset-1', open_duration_ms: -1 } }).error, 'invalid-bid-abandon');
+
+  const validValidationFailed = validateTelemetryEvent({ ...base, raw_event: 'bid_validation_failed', details: { asset_id: 'asset-1', reason: 'invalid-price-format' } });
+  assert.equal(validValidationFailed.error, null);
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'bid_validation_failed', details: { asset_id: 'asset-1', reason: 'x'.repeat(81) } }).error, 'invalid-bid-validation-failed');
+});

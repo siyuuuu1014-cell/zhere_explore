@@ -8,6 +8,8 @@ const EMPTY = () => ({
   users: [], sessions: [], researchSubjects: [], researchConsents: [], researchSessions: [],
   worldStates: {}, assets: [], publicAssets: [], publicDemands: [], publicResponses: [], publicRecords: [],
   reports: [], events: [], passwordResets: [], bids: [], transactions: [], basePrices: [],
+  researchRecommendationRequests: [], researchRecommendationCandidates: [], researchRecommendationImpressions: [],
+  researchBidAttempts: [], basePriceVersions: [],
 });
 const TRANSIENT_FILE_ERRORS = new Set(['EACCES', 'EBUSY', 'EMFILE', 'ENFILE', 'EPERM']);
 const FILE_RETRY_DELAYS_MS = [20, 60, 140, 300, 600];
@@ -27,6 +29,40 @@ async function retryTransientFileOperation(operation) {
     }
   }
   throw lastError;
+}
+
+// 不可变基础价版本历史：每一笔有效成交都追加一条「当时」的快照；当基础价首次
+// 从 null 变为数值时，额外追加一条 formation 版本（formed=true，transaction_id 为空）。
+function appendBasePriceVersionRows(store, { materialId, calculated, previous, transactionId, now }) {
+  store.basePriceVersions ||= [];
+  const materialVersions = store.basePriceVersions.filter((item) => item.material_id === materialId);
+  let nextVersion = materialVersions.reduce((max, item) => Math.max(max, Number(item.version) || 0), 0) + 1;
+  const formedNow = calculated.base_price != null;
+  const formedAt = formedNow ? (previous?.formed_at || now) : null;
+  store.basePriceVersions.push({
+    material_id: materialId,
+    version: nextVersion,
+    base_price: calculated.base_price,
+    valid_transaction_count: calculated.valid_transaction_count,
+    sample_transaction_ids: calculated.sample_transaction_ids,
+    formed_at: formedAt,
+    transaction_id: transactionId || null,
+    formed: false,
+    created_at: now,
+  });
+  if (formedNow && (previous?.base_price ?? null) == null) {
+    store.basePriceVersions.push({
+      material_id: materialId,
+      version: nextVersion + 1,
+      base_price: calculated.base_price,
+      valid_transaction_count: calculated.valid_transaction_count,
+      sample_transaction_ids: calculated.sample_transaction_ids,
+      formed_at: now,
+      transaction_id: null,
+      formed: true,
+      created_at: now,
+    });
+  }
 }
 
 export class LocalRepository {
@@ -229,13 +265,16 @@ export class LocalRepository {
     return (await this.#read()).worldStates[userId] || null;
   }
 
-  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes }) {
+  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes, mediaDurationSec = null, mediaWidth = null, mediaHeight = null, mediaBitrateKbps = null }) {
     const safeId = String(assetId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
     const storageKey = `${userId}-${safeId}`;
     const target = path.join(this.mediaDir, storageKey);
     await fs.writeFile(target, bytes);
     return this.#mutate((store) => {
-      const asset = { id: assetId, userId, title, description, fileName, mime, size: bytes.length, storageKey, createdAt: new Date().toISOString() };
+      const asset = {
+        id: assetId, userId, title, description, fileName, mime, size: bytes.length, storageKey, createdAt: new Date().toISOString(),
+        media_duration_sec: mediaDurationSec, media_width: mediaWidth, media_height: mediaHeight, media_bitrate_kbps: mediaBitrateKbps,
+      };
       const index = store.assets.findIndex((entry) => entry.id === assetId && entry.userId === userId);
       if (index >= 0) store.assets[index] = asset; else store.assets.push(asset);
       return asset;
@@ -249,6 +288,10 @@ export class LocalRepository {
 
   async listMediaByUser(userId) {
     return (await this.#read()).assets.filter((asset) => asset.userId === userId);
+  }
+
+  async listAllMedia() {
+    return (await this.#read()).assets;
   }
 
   async healthCheck() {
@@ -576,16 +619,20 @@ export class LocalRepository {
       const materialTransactions = store.transactions.filter((item) => item.material_id === savedBid.material_id);
       const calculated = calculateBasePrice(materialTransactions, basePriceTransactionCount);
       const now = new Date().toISOString();
+      const previousPricing = store.basePrices.find((item) => item.material_id === savedBid.material_id) || null;
       const pricing = {
         material_id: savedBid.material_id,
         base_price: calculated.base_price,
         valid_transaction_count: calculated.valid_transaction_count,
         sample_transaction_ids: calculated.sample_transaction_ids,
-        formed_at: calculated.base_price == null ? null : (store.basePrices.find((item) => item.material_id === savedBid.material_id)?.formed_at || now),
+        formed_at: calculated.base_price == null ? null : (previousPricing?.formed_at || now),
         updated_at: now,
       };
       const pricingIndex = store.basePrices.findIndex((item) => item.material_id === savedBid.material_id);
       if (pricingIndex >= 0) store.basePrices[pricingIndex] = pricing; else store.basePrices.push(pricing);
+      if (!existingTransaction) {
+        appendBasePriceVersionRows(store, { materialId: savedBid.material_id, calculated, previous: previousPricing, transactionId: savedTransaction.transaction_id, now });
+      }
       return { bid: savedBid, transaction: savedTransaction, pricing, materialTransactions, duplicate: Boolean(existingBid && existingTransaction) };
     });
   }
@@ -613,7 +660,12 @@ export class LocalRepository {
 
   async listAllPricing() {
     const store = await this.#read();
-    return { bids: store.bids || [], transactions: store.transactions || [], basePrices: store.basePrices || [] };
+    return { bids: store.bids || [], transactions: store.transactions || [], basePrices: store.basePrices || [], basePriceVersions: store.basePriceVersions || [] };
+  }
+
+  async listBasePriceVersions(materialId = null) {
+    const versions = (await this.#read()).basePriceVersions || [];
+    return materialId ? versions.filter((item) => item.material_id === materialId) : versions;
   }
 
   async listValidTransactionsForMaterials(materialIds) {
@@ -632,16 +684,18 @@ export class LocalRepository {
       const materialTransactions = store.transactions.filter((item) => item.material_id === transaction.material_id);
       const calculated = calculateBasePrice(materialTransactions, basePriceTransactionCount);
       const previous = store.basePrices.find((item) => item.material_id === transaction.material_id);
+      const now = new Date().toISOString();
       const pricing = {
         material_id: transaction.material_id,
         base_price: calculated.base_price,
         valid_transaction_count: calculated.valid_transaction_count,
         sample_transaction_ids: calculated.sample_transaction_ids,
-        formed_at: calculated.base_price == null ? null : (previous?.formed_at || new Date().toISOString()),
-        updated_at: new Date().toISOString(),
+        formed_at: calculated.base_price == null ? null : (previous?.formed_at || now),
+        updated_at: now,
       };
       const index = store.basePrices.findIndex((item) => item.material_id === transaction.material_id);
       if (index >= 0) store.basePrices[index] = pricing; else store.basePrices.push(pricing);
+      appendBasePriceVersionRows(store, { materialId: transaction.material_id, calculated, previous, transactionId: transaction.transaction_id, now });
       return { transaction, pricing };
     });
   }
@@ -673,6 +727,67 @@ export class LocalRepository {
     return (await this.#read()).events;
   }
 
+  async appendRecommendationRequest(record) {
+    return this.#mutate((store) => {
+      store.researchRecommendationRequests ||= [];
+      const existing = store.researchRecommendationRequests.find((item) => item.request_id === record.request_id);
+      if (existing) return existing;
+      store.researchRecommendationRequests.push(record);
+      return record;
+    });
+  }
+
+  async appendRecommendationCandidates(records) {
+    return this.#mutate((store) => {
+      store.researchRecommendationCandidates ||= [];
+      const existing = new Set(store.researchRecommendationCandidates.map((item) => `${item.request_id}\u0000${item.rank}`));
+      const added = [];
+      for (const record of records) {
+        const key = `${record.request_id}\u0000${record.rank}`;
+        if (existing.has(key)) continue;
+        store.researchRecommendationCandidates.push(record);
+        existing.add(key);
+        added.push(record);
+      }
+      return added;
+    });
+  }
+
+  async appendRecommendationImpressions(records) {
+    return this.#mutate((store) => {
+      store.researchRecommendationImpressions ||= [];
+      const existing = new Set(store.researchRecommendationImpressions.map((item) => item.impression_id));
+      const added = [];
+      for (const record of records) {
+        if (existing.has(record.impression_id)) continue;
+        store.researchRecommendationImpressions.push(record);
+        existing.add(record.impression_id);
+        added.push(record);
+      }
+      return added;
+    });
+  }
+
+  async appendBidAttempts(records) {
+    return this.#mutate((store) => {
+      store.researchBidAttempts ||= [];
+      const existing = new Set(store.researchBidAttempts.map((item) => item.event_id));
+      const added = [];
+      for (const record of records) {
+        if (existing.has(record.event_id)) continue;
+        store.researchBidAttempts.push(record);
+        existing.add(record.event_id);
+        added.push(record);
+      }
+      return added;
+    });
+  }
+
+  async listRecommendationRequests() { return (await this.#read()).researchRecommendationRequests || []; }
+  async listRecommendationCandidates() { return (await this.#read()).researchRecommendationCandidates || []; }
+  async listRecommendationImpressions() { return (await this.#read()).researchRecommendationImpressions || []; }
+  async listBidAttempts() { return (await this.#read()).researchBidAttempts || []; }
+
   async anonymizeUserData(userId) {
     return this.#mutate((store) => {
       const anonymousId = `anonymous-${randomUUID()}`;
@@ -695,6 +810,8 @@ export class LocalRepository {
       store.reports = (store.reports || []).map((report) => report.reporterId === userId ? { ...report, reporterId: null, reporterName: '匿名旅人' } : report);
       store.bids = (store.bids || []).map((bid) => bid.user_id === userId ? { ...bid, user_id: anonymousId } : bid);
       store.transactions = (store.transactions || []).map((transaction) => transaction.user_id === userId ? { ...transaction, user_id: anonymousId } : transaction);
+      store.researchRecommendationRequests = (store.researchRecommendationRequests || []).map((request) => request.user_id === userId ? { ...request, user_id: anonymousId } : request);
+      store.researchBidAttempts = (store.researchBidAttempts || []).map((attempt) => attempt.user_id === userId ? { ...attempt, user_id: anonymousId } : attempt);
       store.researchSubjects = (store.researchSubjects || []).map((subject) => subject.user_id === userId
         ? { ...subject, user_id: anonymousId, status: 'anonymized', updated_at: new Date().toISOString() }
         : subject);

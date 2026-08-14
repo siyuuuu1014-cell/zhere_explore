@@ -91,12 +91,16 @@
   }
 
   const AVATAR_SWATCHES = [
-    { glyph: '风', color: '#6f9d94' },
-    { glyph: '木', color: '#6f8060' },
-    { glyph: '潮', color: '#b8654f' },
-    { glyph: '岩', color: '#9a7f5e' },
-    { glyph: '雾', color: '#57684c' },
-    { glyph: '贝', color: '#8a9d7d' },
+    { glyph: '风', color: '#6f9d94', label: '追风邮差' },
+    { glyph: '木', color: '#6f8060', label: '林间木匠' },
+    { glyph: '潮', color: '#b8654f', label: '潮线记录者' },
+    { glyph: '岩', color: '#9a7f5e', label: '礁石看守' },
+    { glyph: '雾', color: '#57684c', label: '晨雾旅人' },
+    { glyph: '贝', color: '#8a9d7d', label: '贝壳收藏家' },
+    { glyph: '灯', color: '#c4914f', label: '慢街点灯人' },
+    { glyph: '芽', color: '#7f956b', label: '新芽园丁' },
+    { glyph: '云', color: '#718d8a', label: '山云观察员' },
+    { glyph: '猫', color: '#a87058', label: '窗台访客' },
   ];
 
   const ZONE_DEFS = [

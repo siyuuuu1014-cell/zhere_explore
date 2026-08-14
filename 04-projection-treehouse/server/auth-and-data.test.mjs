@@ -546,6 +546,13 @@ test('public interactions, ownership management, delta sync, and moderation are 
     body: JSON.stringify({ id: 'relation-public-test', kind: 'asset_relation', payload: { aId: 'u-test-video', bId: 'v-built-in', type: 'contrast', note: '一明一暗' } }),
   });
   assert.equal(relation.status, 201);
+  const looseTag = await fetch(`${baseUrl}/api/public/records`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie },
+    body: JSON.stringify({ id: 'loose-tag-public-test', kind: 'loose_tag', payload: { tag: '雨停以后', wx: 318, wy: -204, zone: '镇中心' } }),
+  });
+  assert.equal(looseTag.status, 201);
+  const sharedLooseTag = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(sharedLooseTag.records.some((record) => record.id === 'loose-tag-public-test' && record.payload.tag === '雨停以后' && record.owner === 'other'), true);
   const link = await fetch(`${baseUrl}/api/public/demands/n-public-test/links`, {
     method: 'PUT', headers: { 'content-type': 'application/json', cookie: secondCookie }, body: JSON.stringify({ assetId: 'u-test-video', active: true }),
   });
@@ -633,6 +640,15 @@ test('each account can buy a material once while ten different buyers form the b
     assert.equal(body.insight.cohort == null, index < 4);
     results.push(body);
   }
+
+  // 不可变基础价版本：10 笔成交应追加 10 条快照 + 1 条 formation，版本严格递增。
+  const basePriceVersions = await repository.listBasePriceVersions('v-pricing-test');
+  assert.equal(basePriceVersions.length >= 10, true);
+  const ascendingVersions = [...basePriceVersions].sort((a, b) => Number(a.version) - Number(b.version));
+  assert.equal(ascendingVersions.every((item, index) => index === 0 || Number(item.version) > Number(ascendingVersions[index - 1].version)), true);
+  assert.equal(ascendingVersions.some((item) => item.formed === true), true);
+  assert.equal(ascendingVersions.at(-1).base_price, 50);
+  assert.equal(ascendingVersions.find((item) => item.formed === true).transaction_id, null);
 
   const duplicate = await fetch(`${baseUrl}/api/pricing/materials/v-pricing-test/bids`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie },
@@ -724,6 +740,8 @@ test('each account can buy a material once while ten different buyers form the b
   const csvText = await exportResponse.text();
   assert.match(csvText, /material_id/);
   assert.match(csvText, /v-pricing-test/);
+  assert.match(csvText, /base_price_version/);
+  assert.match(csvText, /base_price_version_formed_at/);
 });
 
 test('legacy fallback bid request identifiers containing a decimal point remain accepted', async () => {

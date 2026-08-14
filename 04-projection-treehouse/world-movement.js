@@ -148,6 +148,7 @@ function cancelPointerMove(reason = 'cancelled', savePosition = false) {
 
 function startPointerMove(mode, x, y, options = {}) {
   if (!Number.isFinite(x) || !Number.isFinite(y) || mode !== state.worldMode) return false;
+  startFrameLoop();
   cancelPointerMove('pointer_retarget');
   state.keys.clear();
   if (mode === 'overworld') resetMovementSample();
@@ -165,6 +166,7 @@ function startPointerMove(mode, x, y, options = {}) {
     destination,
     waypoints: mode === 'overworld' ? path.slice(1) : [],
     source: options.source || 'ground',
+    label: options.label || '',
     onArrival: typeof options.onArrival === 'function' ? options.onArrival : null,
     stopDistance: Math.max(0, Number(options.stopDistance) || 0),
     startedAt: Date.now(),
@@ -182,6 +184,29 @@ function startPointerMove(mode, x, y, options = {}) {
     waypoint_count: path.length,
   });
   return true;
+}
+
+function approachWorldInteraction(node, options = {}) {
+  if (!node) return false;
+  if (state.worldMode === 'cottage') exitCottage();
+  const baseWx = Number(options.wx ?? node.dataset.wx);
+  const baseWy = Number(options.wy ?? node.dataset.wy);
+  if (!Number.isFinite(baseWx) || !Number.isFinite(baseWy)) return false;
+  const targetX = baseWx + Number(options.offsetX || 0);
+  const targetY = baseWy + Number(options.offsetY || 0);
+  const arrivalDistance = Math.max(64, Number(options.arrivalDistance) || 116);
+  const onArrival = typeof options.onArrival === 'function' ? options.onArrival : null;
+  if (Math.hypot(state.wx - targetX, state.wy - targetY) <= arrivalDistance) {
+    stopMovement(true);
+    requestAnimationFrame(() => onArrival?.());
+    return true;
+  }
+  return startPointerMove('overworld', targetX, targetY, {
+    source: options.source || 'world-interaction',
+    label: options.label || node.dataset.label || node.getAttribute('aria-label') || '',
+    stopDistance: Math.max(4, Number(options.stopDistance) || 8),
+    onArrival,
+  });
 }
 
 function advancePointerWaypoint(target) {
@@ -221,6 +246,23 @@ function finishPointerMove(target) {
   });
   if (onArrival) requestAnimationFrame(onArrival);
   else updateNearby();
+}
+
+let frameLoopRunning = false;
+let frameHandle = null;
+
+function frameLoopActive() {
+  return state.keys.size > 0 || Boolean(pointerMoveTarget)
+    || !sheet.hidden || !profileDrawer.hidden || !entry.classList.contains('is-gone')
+    || Boolean(state.gathering);
+}
+
+function startFrameLoop() {
+  if (frameLoopRunning) return;
+  frameLoopRunning = true;
+  performanceWindowStartedAt = performance.now();
+  performanceLastFrameAt = performanceWindowStartedAt;
+  frameHandle = requestAnimationFrame(frame);
 }
 
 function frame(now) {
@@ -298,12 +340,29 @@ function frame(now) {
   } else {
     player.classList.remove('is-moving');
   }
-  if (state.worldMode !== 'cottage' && sheet.hidden) {
-    updateCat();
-    updateGulls();
+  if (frameLoopActive()) {
+    frameHandle = requestAnimationFrame(frame);
+  } else {
+    frameLoopRunning = false;
+    frameHandle = null;
+    worldStage.dataset.runtimeFps = 'idle';
   }
-  requestAnimationFrame(frame);
 }
+
+window.addEventListener('keydown', (event) => {
+  const key = event.key.toLowerCase();
+  if (MOVEMENT_KEYS.has(key)) startFrameLoop();
+  if (['e', 'f', 'g'].includes(key)) {
+    startFrameLoop();
+    updateNearby();
+  }
+});
+
+setInterval(() => {
+  if (frameLoopRunning || state.worldMode === 'cottage') return;
+  if (!entry.classList.contains('is-gone') || !sheet.hidden || !profileDrawer.hidden) return;
+  updateNearby();
+}, 1000);
 
 function stopMovement(savePosition = false) {
   const keyboardWasMoving = state.keys.size > 0;

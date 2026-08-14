@@ -46,8 +46,9 @@ function resetEntryPendingButtons() {
 function delayedAuthNotice(button, output) {
   return setTimeout(() => {
     if (!button?.classList.contains('is-pending')) return;
-    if (output) output.textContent = '飞书数据正在响应，可能需要几秒；超过 30 秒会自动恢复。';
-  }, 7000);
+    if (output) output.textContent = '身份已经送达服务端，正在取回你的世界进度；公共内容会在进入后继续后台加载。';
+    else button.textContent = '正在建立角色进度…';
+  }, 3200);
 }
 
 function unreadNotifications() {
@@ -79,11 +80,54 @@ async function refreshNotifications({ announce = false } = {}) {
   return notificationSyncPromise;
 }
 
-function openNotificationTarget(item) {
-  if (item.targetType === 'asset') return showVideo(findVideoById(item.targetId));
-  if (item.targetType === 'demand') return showNoteDetail(allWorldNotes().find((note) => note.id === item.targetId));
+async function openNotificationTarget(item) {
+  if (!item) return showToast('这条回声暂时找不到对应内容');
+  await syncPublicWorld({ render: true });
+  if (item.targetType === 'asset') {
+    const video = findVideoById(item.targetId);
+    if (video) return showVideo(video);
+  }
+  if (item.targetType === 'demand') {
+    const note = allWorldNotes().find((candidate) => candidate.id === item.targetId);
+    if (note) return showNoteDetail(note);
+  }
   if (item.targetType === 'record') return showSwapBox();
   showToast('这条回声对应的内容已经离开公域');
+}
+
+function echoKindLabel(item) {
+  return {
+    asset_comment: '素材回应',
+    demand_response: '需求回应',
+    demand_link: '素材关联',
+    asset_bid: '模拟报价',
+    swap_claim: '交换结果',
+  }[item?.kind] || '世界回声';
+}
+
+function showEchoDetail(item) {
+  if (!item) return showToast('这条回声暂时无法读取');
+  const targetLabel = item.targetType === 'asset' ? '查看对应素材'
+    : item.targetType === 'demand' ? '查看对应需求'
+      : item.targetType === 'record' ? '打开交换箱' : '';
+  logEvent('echo_detail_open', { notification_id: item.id, notification_kind: item.kind, target_type: item.targetType });
+  openSheet(`
+    <div class="sheet-inner echo-detail-sheet">
+      <button class="text-button echo-back" id="echoDetailBack" type="button">返回回声盒</button>
+      <p class="echo-detail-kind">${escapeHtml(echoKindLabel(item))}</p>
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(item.title || '一条新的回声')}</h2>
+      <div class="echo-detail-message"><span class="echo-seed" aria-hidden="true"></span><p>${escapeHtml(item.summary || '这条回声没有留下更多文字。')}</p></div>
+      <time class="echo-detail-time" datetime="${escapeHtml(item.createdAt || '')}">${escapeHtml(new Date(item.createdAt).toLocaleString('zh-CN'))}</time>
+      <div class="media-actions">
+        ${targetLabel ? `<button class="primary-button" id="echoOpenTarget" type="button">${targetLabel}</button>` : ''}
+        <button class="paper-button" id="echoDetailClose" type="button">收好这条回声</button>
+      </div>
+    </div>
+  `, () => {
+    $('#echoDetailBack').addEventListener('click', showEchoBox);
+    $('#echoDetailClose').addEventListener('click', closeSheet);
+    $('#echoOpenTarget')?.addEventListener('click', () => openNotificationTarget(item));
+  });
 }
 
 function showEchoBox() {
@@ -94,11 +138,11 @@ function showEchoBox() {
     <div class="sheet-inner echo-sheet">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">回声盒</h2>
       <p class="sheet-subtitle">你离开时，公共世界仍在生长。这里收好需求回应、素材留言、模拟报价与交换结果；它们不会变成必须完成的任务。</p>
-      <div class="echo-list">${state.notifications.length ? state.notifications.map((item) => `<button class="echo-row" type="button" data-echo-id="${escapeHtml(item.id)}"><span class="echo-seed" aria-hidden="true"></span><span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.summary)}</small><em>${escapeHtml(new Date(item.createdAt).toLocaleString('zh-CN'))}</em></span></button>`).join('') : '<div class="empty-state"><b>盒子里还没有回声</b><p>发布一张需求、公开视频或把副本放进交换箱；其他旅人的回应会出现在这里。</p></div>'}</div>
+      <div class="echo-list">${state.notifications.length ? state.notifications.map((item) => `<button class="echo-row" type="button" data-echo-id="${escapeHtml(item.id)}"><span class="echo-seed" aria-hidden="true"></span><span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.summary)}</small><em>${escapeHtml(new Date(item.createdAt).toLocaleString('zh-CN'))} · 查看详情</em></span><span class="echo-row-arrow" aria-hidden="true"></span></button>`).join('') : '<div class="empty-state"><b>盒子里还没有回声</b><p>发布一张需求、公开视频或把副本放进交换箱；其他旅人的回应会出现在这里。</p></div>'}</div>
       <div class="media-actions"><button class="paper-button" id="echoRefresh" type="button">刷新回声</button><button class="text-button" id="echoClose" type="button">回到世界</button></div>
     </div>
   `, () => {
-    $$('[data-echo-id]', sheet).forEach((button) => button.addEventListener('click', () => openNotificationTarget(state.notifications.find((item) => item.id === button.dataset.echoId))));
+    $$('[data-echo-id]', sheet).forEach((button) => button.addEventListener('click', () => showEchoDetail(state.notifications.find((item) => item.id === button.dataset.echoId))));
     $('#echoRefresh').addEventListener('click', async () => { await refreshNotifications(); showEchoBox(); });
     $('#echoClose').addEventListener('click', closeSheet);
   });
@@ -170,6 +214,7 @@ function say(text, who = '木秋', options = []) {
   dialogueActions.replaceChildren();
   options.forEach((option) => addDialogueAction(option.label, option.handler));
   dialogue.classList.remove('is-collapsed');
+  delete dialogue.dataset.pinnedOpen;
   $('#dialogueToggle').textContent = '收起';
   $('#dialogueToggle').setAttribute('aria-expanded', 'true');
 }
@@ -179,6 +224,7 @@ function openSheet(markup, setup) {
   closeContextWheel();
   if (sheet.hidden) sheetReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   sheetContent.innerHTML = markup;
+  delete sheet.dataset.dirty;
   sheet.hidden = false;
   sheet.scrollTop = 0;
   scrim.hidden = false;
@@ -187,7 +233,77 @@ function openSheet(markup, setup) {
   game.inert = true;
   state.commentReplyTo = null;
   setup?.();
+  if (typeof updateHudState === 'function') updateHudState();
   requestAnimationFrame(() => $('.sheet-title', sheet)?.focus?.());
+}
+
+function focusableControls(container) {
+  return [...container.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter((node) => !node.hidden && node.getClientRects().length > 0);
+}
+
+function trapFocusWithin(event, container) {
+  if (event.key !== 'Tab' || container.hidden) return;
+  const controls = focusableControls(container);
+  if (!controls.length) return;
+  const first = controls[0];
+  const last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+sheet.addEventListener('keydown', (event) => trapFocusWithin(event, sheet));
+
+sheetContent.addEventListener('input', (event) => {
+  const field = event.target instanceof Element ? event.target.closest('input, textarea, select') : null;
+  if (!field || !field.closest('form') || field.matches('[type="hidden"], [type="button"], [type="submit"]')) return;
+  sheet.dataset.dirty = 'true';
+});
+
+function requestCloseSheet() {
+  if (sheet.dataset.dirty !== 'true') {
+    closeSheet();
+    return;
+  }
+  let guard = $('.dirty-sheet-guard', sheet);
+  if (!guard) {
+    guard = document.createElement('section');
+    guard.className = 'dirty-sheet-guard';
+    guard.setAttribute('role', 'alertdialog');
+    guard.setAttribute('aria-modal', 'true');
+    guard.setAttribute('aria-labelledby', 'dirtySheetTitle');
+    guard.innerHTML = `
+      <div class="dirty-sheet-paper">
+        <p class="purchase-success-kicker">输入保护</p>
+        <h2 id="dirtySheetTitle">这页还有没有保存的内容</h2>
+        <p>继续编辑会保留当前输入；放弃后才会关闭这张纸。</p>
+        <div class="media-actions">
+          <button class="primary-button" data-dirty-continue type="button">继续编辑</button>
+          <button class="paper-button" data-dirty-discard type="button">放弃输入并关闭</button>
+        </div>
+      </div>`;
+    sheetContent.inert = true;
+    $('#sheetClose').disabled = true;
+    guard.addEventListener('keydown', (event) => trapFocusWithin(event, guard));
+    sheet.append(guard);
+    $('[data-dirty-continue]', guard).addEventListener('click', () => {
+      guard.remove();
+      sheetContent.inert = false;
+      $('#sheetClose').disabled = false;
+      $('.sheet-title', sheet)?.focus?.();
+    });
+    $('[data-dirty-discard]', guard).addEventListener('click', () => {
+      delete sheet.dataset.dirty;
+      guard.remove();
+      closeSheet();
+    });
+  }
+  $('[data-dirty-continue]', guard)?.focus();
 }
 
 function closeSheet() {
@@ -200,6 +316,10 @@ function closeSheet() {
     source: activeMedia.dataset.source || null,
   });
   sheet.hidden = true;
+  delete sheet.dataset.dirty;
+  $('.dirty-sheet-guard', sheet)?.remove();
+  sheetContent.inert = false;
+  $('#sheetClose').disabled = false;
   scrim.hidden = true;
   document.body.classList.remove('sheet-open');
   sheetContent.replaceChildren();
@@ -210,7 +330,94 @@ function closeSheet() {
     URL.revokeObjectURL(state.activeObjectUrl);
     state.activeObjectUrl = null;
   }
+  if (typeof updateHudState === 'function') updateHudState();
   const returnTarget = sheetReturnFocus;
   sheetReturnFocus = null;
   requestAnimationFrame(() => returnTarget?.isConnected && returnTarget.focus?.());
+}
+
+// ---- Form draft persistence (localStorage) ----
+const FORM_DRAFT_STORE_KEY = 'zhere-form-drafts';
+
+function formDraftKey(id) {
+  return String(id);
+}
+
+function readFormDraftStore() {
+  try {
+    const raw = localStorage.getItem(FORM_DRAFT_STORE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) { return {}; }
+}
+
+function saveFormDraft(key, value) {
+  const store = readFormDraftStore();
+  store[formDraftKey(key)] = String(value ?? '').slice(0, 2000);
+  try { localStorage.setItem(FORM_DRAFT_STORE_KEY, JSON.stringify(store)); } catch (error) { /* QuotaExceeded 等写入失败时静默，不打断输入 */ }
+}
+
+function loadFormDraft(key) {
+  const value = readFormDraftStore()[formDraftKey(key)];
+  return typeof value === 'string' ? value : '';
+}
+
+function clearFormDraft(key) {
+  const store = readFormDraftStore();
+  const draftKey = formDraftKey(key);
+  if (!(draftKey in store)) return;
+  delete store[draftKey];
+  try { localStorage.setItem(FORM_DRAFT_STORE_KEY, JSON.stringify(store)); } catch (error) { /* ignore */ }
+}
+
+function isDraftableField(field) {
+  if (!(field instanceof Element)) return false;
+  if (field.tagName === 'TEXTAREA') return true;
+  if (field.tagName !== 'INPUT') return false;
+  const type = (field.type || 'text').toLowerCase();
+  return !['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'file', 'image', 'password', 'range', 'color'].includes(type);
+}
+
+function collectFormDraft(form) {
+  const values = {};
+  [...form.elements].forEach((field, index) => {
+    if (!isDraftableField(field)) return;
+    const name = field.name || field.id || `field-${index}`;
+    values[name] = field.value;
+  });
+  return JSON.stringify(values);
+}
+
+function restoreFormDraft(form, serialized) {
+  let values;
+  try { values = JSON.parse(serialized); } catch (error) { return false; }
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return false;
+  let restored = false;
+  [...form.elements].forEach((field, index) => {
+    if (!isDraftableField(field)) return;
+    const name = field.name || field.id || `field-${index}`;
+    if (Object.prototype.hasOwnProperty.call(values, name)) {
+      field.value = values[name];
+      restored = true;
+    }
+  });
+  return restored;
+}
+
+function attachFormDraft(form, key, { hint = '已恢复上次未发送的内容（本地保存）' } = {}) {
+  if (!form) return;
+  const draftKey = formDraftKey(key);
+  const saved = loadFormDraft(draftKey);
+  if (saved && restoreFormDraft(form, saved)) {
+    const note = document.createElement('p');
+    note.className = 'form-draft-hint';
+    note.textContent = hint;
+    form.before(note);
+  }
+  let timer = null;
+  form.addEventListener('input', (event) => {
+    if (!isDraftableField(event.target)) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => saveFormDraft(draftKey, collectFormDraft(form)), 400);
+  });
 }

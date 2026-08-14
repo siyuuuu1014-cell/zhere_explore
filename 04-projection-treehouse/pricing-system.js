@@ -76,12 +76,30 @@ function showPurchaseSuccess(video, result, { alreadyOwned = false } = {}) {
   });
 }
 
+// 报价面板的关闭观察：每次打开最多产生一次 bid_abandon；成功提交或跳转「已购入」都不产生。
+// Esc、遮罩和右上角关闭按钮都走 requestCloseSheet → closeSheet（把 sheet.hidden 置为 true），
+// 这里用 MutationObserver 监听 hidden 变化来兜底记录放弃；bidClose 按钮则显式记录后再 showVideo。
+let activeBidPanel = null;
+
+function closeActiveBidPanel(reason) {
+  if (!activeBidPanel || activeBidPanel.closed) return;
+  activeBidPanel.closed = true;
+  if (activeBidPanel.observer) {
+    activeBidPanel.observer.disconnect();
+    activeBidPanel.observer = null;
+  }
+  if (reason === 'abandon') {
+    logEvent('bid_abandon', { asset_id: activeBidPanel.video.id, open_duration_ms: Date.now() - activeBidPanel.openedAt });
+  }
+}
+
 function openBidPanel(video) {
   const publicAsset = state.publicAssets.find((asset) => asset.id === video.id);
   if (publicAsset?.owner === 'me') return showToast('发布者不能为自己发布的素材报价');
   const existingPurchase = purchaseForMaterial(video.id);
   if (existingPurchase) return showOwnedPurchase(video, existingPurchase);
   logEvent('bid_enter', { asset_id: video.id });
+  const openedAt = Date.now();
   openSheet(`
     <div class="sheet-inner bid-sheet">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">给《${escapeHtml(video.title)}》一个你自己的价格</h2>
@@ -105,6 +123,13 @@ function openBidPanel(video) {
     const idempotencyKey = typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : `bid-${Date.now()}-${Math.floor(Math.random() * Number.MAX_SAFE_INTEGER).toString(36)}`;
+    // 面板成功打开后记录 bid_attempt；并挂一次性 close 观察记录 bid_abandon（最多一次）。
+    activeBidPanel = { video, openedAt, closed: false, observer: null };
+    const closeObserver = new MutationObserver(() => {
+      if (sheet.hidden) closeActiveBidPanel('abandon');
+    });
+    closeObserver.observe(sheet, { attributes: true, attributeFilter: ['hidden'] });
+    activeBidPanel.observer = closeObserver;
     $('#bidForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const input = $('#bidPrice');
@@ -113,6 +138,8 @@ function openBidPanel(video) {
       const raw = input.value.trim();
       const price = Number(raw);
       if (!/^\d+(?:\.\d{1,2})?$/.test(raw) || !Number.isFinite(price) || price <= 0) {
+        // 校验失败埋点：reason 使用固定常量，避免把用户输入写入研究数据。
+        logEvent('bid_validation_failed', { asset_id: video.id, reason: 'invalid-price-format' });
         errorNode.textContent = '请输入大于 0、最多保留两位小数的完整报价。';
         input.focus();
         return;
@@ -122,6 +149,7 @@ function openBidPanel(video) {
       submit.textContent = '正在记录报价…';
       try {
         const result = await window.ZhereService.pricing.submitBid(video.id, price, idempotencyKey);
+        closeActiveBidPanel('submitted');
         const transactionId = result.transaction.transaction_id;
         state.bids[video.id] = {
           bidId: result.bid.bid_id,
@@ -154,6 +182,7 @@ function openBidPanel(video) {
         say('报价已经直接成交，副本进了你的口袋。公共原素材仍然留在原地。', '木秋');
       } catch (error) {
         if (error.code === 'material-already-acquired') {
+          closeActiveBidPanel('owned');
           try {
             const purchases = await window.ZhereService.pricing.purchases();
             applyPricingPurchases(purchases.purchases);
@@ -169,6 +198,11 @@ function openBidPanel(video) {
         submit.textContent = '重试保存这次报价';
       }
     });
-    $('#bidClose').addEventListener('click', () => showVideo(video));
+    $('#bidClose').addEventListener('click', () => {
+      closeActiveBidPanel('abandon');
+      showVideo(video);
+    });
   });
+  // openSheet 同步执行完 setup 后，面板已成功打开，记录 bid_attempt。
+  logEvent('bid_attempt', { asset_id: video.id });
 }

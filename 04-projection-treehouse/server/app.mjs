@@ -90,6 +90,88 @@ function cleanCoordinate(value) {
   return Number.isFinite(number) ? Math.max(-1000000, Math.min(1000000, number)) : 0;
 }
 
+// 客户端上传的可选媒体元数据字段：非有限、越界或空值一律置 null，避免污染事实表。
+function sanitizeOptionalNumber(value, { min = 0, max, integer = false } = {}) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) return null;
+  return integer ? Math.round(number) : number;
+}
+
+// 规范化 JSON：递归按键排序，让同一份数据集在不同进程间得到可复现的 sha256。
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// 把已接受的事件流投影到研究事实表。投影失败只告警，不影响事件本体已持久化的结果。
+async function projectResearchEvents(repository, events, userId, subjectId) {
+  for (const event of events) {
+    const details = event.details && typeof event.details === 'object' ? event.details : {};
+    try {
+      if (event.raw_event === 'recommendation_request') {
+        await repository.appendRecommendationRequest({
+          request_id: details.request_id,
+          user_id: userId,
+          subject_id: subjectId,
+          created_at: event.created_at,
+          zone_slots: Number.isFinite(Number(details.zone_slots)) ? Number(details.zone_slots) : null,
+          candidate_count: Array.isArray(details.candidates) ? details.candidates.length : 0,
+          details_json: JSON.stringify(details),
+        });
+        if (Array.isArray(details.candidates)) {
+          await repository.appendRecommendationCandidates(details.candidates.map((candidate, index) => ({
+            request_id: details.request_id,
+            rank: Number(candidate.rank) || index + 1,
+            asset_id: candidate.asset_id,
+            zone_id: candidate.zone_id || null,
+            spawn_source: candidate.spawn_source || null,
+            recommendation_score: Number.isFinite(Number(candidate.recommendation_score)) ? Number(candidate.recommendation_score) : null,
+            chosen: Boolean(candidate.chosen),
+            subject_id: subjectId,
+            created_at: event.created_at,
+          })));
+        }
+      } else if (event.raw_event === 'impression_batch') {
+        if (Array.isArray(details.impressions)) {
+          await repository.appendRecommendationImpressions(details.impressions.map((impression) => ({
+            impression_id: impression.impression_id,
+            impression_batch_id: impression.impression_batch_id || details.impression_batch_id || null,
+            recommendation_request_id: impression.recommendation_request_id || details.recommendation_request_id || null,
+            asset_id: impression.asset_id,
+            zone_id: impression.zone_id || null,
+            spawn_source: impression.spawn_source || null,
+            rank: Number(impression.rank) || null,
+            recommendation_score: Number.isFinite(Number(impression.recommendation_score)) ? Number(impression.recommendation_score) : null,
+            visibility_duration_ms: Number.isFinite(Number(impression.visibility_duration_ms)) ? Number(impression.visibility_duration_ms) : null,
+            distance_to_player: Number.isFinite(Number(impression.distance_to_player)) ? Number(impression.distance_to_player) : null,
+            experiment_id: impression.experiment_id || event.experiment_id || null,
+            experiment_group: impression.experiment_group || event.experiment_group || null,
+            subject_id: subjectId,
+            created_at: event.created_at,
+          })));
+        }
+      } else if (event.raw_event === 'bid_attempt' || event.raw_event === 'bid_abandon' || event.raw_event === 'bid_validation_failed') {
+        await repository.appendBidAttempts([{
+          event_id: event.event_id,
+          user_id: userId,
+          subject_id: subjectId,
+          asset_id: details.asset_id,
+          attempt_kind: event.raw_event,
+          reason: details.reason || null,
+          open_duration_ms: Number.isFinite(Number(details.open_duration_ms)) ? Number(details.open_duration_ms) : null,
+          created_at: event.created_at,
+        }]);
+      }
+    } catch (error) {
+      console.warn(`research projection failed for ${event.raw_event} ${event.event_id}: ${error.message}`);
+    }
+  }
+}
+
 async function readVideoMultipart(request, config) {
   const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
   const multipartBytes = await readBytes(request, config.maxVideoBytes + 1024 * 1024);
@@ -115,6 +197,11 @@ async function readVideoMultipart(request, config) {
       fileName: cleanText(file.name, 180),
       mime: file.type,
       bytes: Buffer.from(await file.arrayBuffer()),
+      // 可选媒体元数据：客户端用临时 video 元素提取；非法或缺失时置 null。
+      mediaDurationSec: sanitizeOptionalNumber(form.get('media_duration_sec'), { max: 86400 }),
+      mediaWidth: sanitizeOptionalNumber(form.get('media_width'), { max: 16384, integer: true }),
+      mediaHeight: sanitizeOptionalNumber(form.get('media_height'), { max: 16384, integer: true }),
+      mediaBitrateKbps: sanitizeOptionalNumber(form.get('media_bitrate_kbps'), { max: 1e9, integer: true }),
     },
   };
 }
@@ -482,7 +569,8 @@ export function createApp({ repository, config = defaultConfig }) {
         user.updatedAt = new Date().toISOString();
         await repository.updateUser(user);
       }
-      return json(response, existingUser ? 200 : 201, { ok: true, resumed: Boolean(existingUser), user: exposeUser(user), ...await sessionBootstrap(user) });
+      const bootstrap = existingUser ? await sessionBootstrap(user) : { state: null, version: 0 };
+      return json(response, existingUser ? 200 : 201, { ok: true, resumed: Boolean(existingUser), user: exposeUser(user), ...bootstrap });
     }
 
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
@@ -525,7 +613,9 @@ export function createApp({ repository, config = defaultConfig }) {
         recordConsent(user, false, 'guest-registration', { subject, skipLookup: true }),
         issueSession(request, response, user, { subject }),
       ]);
-      return json(response, 201, { ok: true, user: exposeUser(user), ...await sessionBootstrap(user) });
+      // A newly-created guest cannot have a world snapshot yet. Avoid an
+      // unnecessary remote-table lookup on the most latency-sensitive path.
+      return json(response, 201, { ok: true, user: exposeUser(user), state: null, version: 0 });
     }
 
     if (url.pathname === '/api/auth/session' && request.method === 'GET') {
@@ -826,7 +916,12 @@ export function createApp({ repository, config = defaultConfig }) {
       const pricing = insight.eligible && insight.cohort
         ? await repository.getMaterialPricing(materialId)
         : { material_id: materialId, base_price: null, valid_transaction_count: insight.eligible ? insight.sample_count : null, sample_transaction_ids: [] };
-      return json(response, 200, { ok: true, pricing, insight, base_price_transaction_count: config.basePriceTransactionCount });
+      // 最近的不可变基础价版本历史（倒序，最多 50 条）。
+      const basePriceHistory = (await repository.listBasePriceVersions(materialId))
+        .sort((a, b) => Number(a.version) - Number(b.version))
+        .slice(-50)
+        .reverse();
+      return json(response, 200, { ok: true, pricing, insight, base_price_transaction_count: config.basePriceTransactionCount, base_price_history: basePriceHistory });
     }
 
     if (url.pathname === '/api/admin/pricing/export.csv' && request.method === 'GET') {
@@ -836,19 +931,29 @@ export function createApp({ repository, config = defaultConfig }) {
       const transactionsByBid = new Map(pricing.transactions.map((transaction) => [transaction.bid_id, transaction]));
       const basePricesByMaterial = new Map(pricing.basePrices.map((item) => [item.material_id, item]));
       const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+      // 每笔成交对应其最新的不可变基础价版本行（formation 行 transaction_id 为空，不参与匹配）。
+      const versionByTransaction = new Map();
+      for (const version of pricing.basePriceVersions || []) {
+        if (!version.transaction_id) continue;
+        const existing = versionByTransaction.get(version.transaction_id);
+        if (!existing || Number(version.version) > Number(existing.version)) versionByTransaction.set(version.transaction_id, version);
+      }
       const rows = [[
         'bid_id', 'transaction_id', 'material_id', 'user_id', 'timestamp', 'bid_price', 'counter_price', 'transaction_price', 'bid_status', 'is_valid',
         'base_price', 'base_price_valid_transaction_count', 'base_price_formed_at', 'base_price_sample_transaction_ids',
+        'base_price_version', 'base_price_version_formed_at',
         'quality_score', 'heat_score', 'scarcity_score', 'training_value_score',
       ]];
       for (const bid of pricing.bids.sort((a, b) => String(a.bid_time).localeCompare(String(b.bid_time)))) {
         const transaction = transactionsByBid.get(bid.bid_id);
         const basePrice = basePricesByMaterial.get(bid.material_id);
         const asset = assetsById.get(bid.material_id) || {};
+        const transactionVersion = transaction ? versionByTransaction.get(transaction.transaction_id) : null;
         rows.push([
           bid.bid_id, transaction?.transaction_id ?? '', bid.material_id, bid.user_id, bid.bid_time, bid.bid_price, bid.counter_price ?? '',
           transaction?.transaction_price ?? '', bid.bid_status, transaction?.is_valid ?? '', basePrice?.base_price ?? '',
           basePrice?.valid_transaction_count ?? '', basePrice?.formed_at ?? '', (basePrice?.sample_transaction_ids || []).join('|'),
+          transactionVersion?.version ?? '', transactionVersion?.formed_at ?? '',
           asset.quality_score ?? '', asset.heat_score ?? '', asset.scarcity_score ?? '', asset.training_value_score ?? '',
         ]);
       }
@@ -885,10 +990,92 @@ export function createApp({ repository, config = defaultConfig }) {
       return csv(response, `zhere-research-events-${new Date().toISOString().slice(0, 10)}.csv`, rows);
     }
 
+    if (url.pathname === '/api/admin/research/recommendations.csv' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!isAdmin(user)) return apiError(response, 403, 'admin-required', '需要管理员权限。');
+      const [requests, candidates, recommendationImpressions] = await Promise.all([
+        repository.listRecommendationRequests(),
+        repository.listRecommendationCandidates(),
+        repository.listRecommendationImpressions(),
+      ]);
+      const candidatesByRequest = Map.groupBy(candidates, (item) => item.request_id);
+      const impressionsByRequest = Map.groupBy(recommendationImpressions, (item) => item.recommendation_request_id || '');
+      const rows = [[
+        'request_id', 'subject_id', 'request_created_at', 'zone_slots', 'candidate_count',
+        'rank', 'asset_id', 'zone_id', 'spawn_source', 'recommendation_score', 'chosen',
+        'impression_id', 'impression_batch_id', 'visibility_duration_ms', 'distance_to_player', 'experiment_id', 'experiment_group',
+      ]];
+      for (const request of requests.sort((a, b) => String(a.request_id).localeCompare(String(b.request_id)))) {
+        const requestCandidates = (candidatesByRequest.get(request.request_id) || []).sort((a, b) => Number(a.rank) - Number(b.rank));
+        const impressionsByAsset = new Map((impressionsByRequest.get(request.request_id) || []).map((item) => [item.asset_id, item]));
+        for (const candidate of requestCandidates) {
+          const impression = impressionsByAsset.get(candidate.asset_id) || {};
+          rows.push([
+            request.request_id, request.subject_id || '', request.created_at || '', request.zone_slots ?? '', request.candidate_count ?? '',
+            candidate.rank ?? '', candidate.asset_id || '', candidate.zone_id || '', candidate.spawn_source || '', candidate.recommendation_score ?? '',
+            candidate.chosen ?? '', impression.impression_id || '', impression.impression_batch_id || '', impression.visibility_duration_ms ?? '',
+            impression.distance_to_player ?? '', impression.experiment_id || '', impression.experiment_group || '',
+          ]);
+        }
+      }
+      return csv(response, `zhere-recommendations-${new Date().toISOString().slice(0, 10)}.csv`, rows);
+    }
+
+    if (url.pathname === '/api/admin/research/snapshot' && request.method === 'GET') {
+      const user = await requireUser(request, response); if (!user) return;
+      if (!isAdmin(user)) return apiError(response, 403, 'admin-required', '需要管理员权限。');
+      const [events, pricing, requests, candidates, recommendationImpressions, bidAttempts] = await Promise.all([
+        repository.listAllEvents(),
+        repository.listAllPricing(),
+        repository.listRecommendationRequests(),
+        repository.listRecommendationCandidates(),
+        repository.listRecommendationImpressions(),
+        repository.listBidAttempts(),
+      ]);
+      const recent = (items, field) => items.slice().sort((a, b) => String(a[field]).localeCompare(String(b[field]))).slice(-5000);
+      const recommendation = {
+        requests: recent(requests, 'created_at'),
+        candidates: recent(candidates, 'created_at'),
+        impressions: recent(recommendationImpressions, 'created_at'),
+      };
+      const pricingSnapshot = {
+        bids: recent(pricing.bids || [], 'bid_time'),
+        transactions: recent(pricing.transactions || [], 'transaction_time'),
+        base_price_versions: recent(pricing.basePriceVersions || [], 'created_at'),
+      };
+      const bidAttemptsSnapshot = recent(bidAttempts, 'created_at');
+      const counts = {
+        events: events.length,
+        recommendation_requests: requests.length,
+        recommendation_candidates: candidates.length,
+        recommendation_impressions: recommendationImpressions.length,
+        bids: pricing.bids?.length || 0,
+        transactions: pricing.transactions?.length || 0,
+        base_price_versions: pricing.basePriceVersions?.length || 0,
+        bid_attempts: bidAttempts.length,
+      };
+      const hash = createHash('sha256')
+        .update(canonicalJson({ recommendation, pricing: pricingSnapshot, bid_attempts: bidAttemptsSnapshot }))
+        .digest('hex')
+        .slice(0, 16);
+      return json(response, 200, {
+        ok: true, generated_at: new Date().toISOString(), research_schema: 'v1', hash, counts,
+        recommendation, pricing: pricingSnapshot, bid_attempts: bidAttemptsSnapshot,
+      });
+    }
+
     if (url.pathname === '/api/admin/research/health' && request.method === 'GET') {
       const user = await requireUser(request, response); if (!user) return;
       if (!isAdmin(user)) return apiError(response, 403, 'admin-required', '需要管理员权限。');
-      const [events, pricing] = await Promise.all([repository.listAllEvents(), repository.listAllPricing()]);
+      const [events, pricing, requests, candidates, recommendationImpressions, bidAttempts, media] = await Promise.all([
+        repository.listAllEvents(),
+        repository.listAllPricing(),
+        repository.listRecommendationRequests(),
+        repository.listRecommendationCandidates(),
+        repository.listRecommendationImpressions(),
+        repository.listBidAttempts(),
+        repository.listAllMedia(),
+      ]);
       const duplicatePurchases = [];
       const validGroups = Map.groupBy((pricing.transactions || []).filter((item) => item.is_valid === true), (item) => `${item.user_id}\u0000${item.material_id}`);
       for (const group of validGroups.values()) if (group.length > 1) duplicatePurchases.push({
@@ -902,6 +1089,15 @@ export function createApp({ repository, config = defaultConfig }) {
       const orphanAttributions = attributedEvents.filter((event) => !impressionIds.has(event.details.impression_id));
       const unknownEvents = events.filter((event) => !EVENT_TYPES.has(event.raw_event));
       const lastEventAt = events.map((event) => event.created_at).filter(Boolean).sort().at(-1) || null;
+      const latestEventAgeHours = lastEventAt ? Number(((Date.now() - Date.parse(lastEventAt)) / 3600000).toFixed(2)) : null;
+      const eventsLast24h = events.filter((event) => event.created_at && Date.now() - Date.parse(event.created_at) <= 24 * 3600000).length;
+      const requestIds = new Set(requests.map((item) => item.request_id));
+      const impressionsByRequestId = Map.groupBy(recommendationImpressions, (item) => item.recommendation_request_id || '');
+      const requestsWithoutImpressions = requests.filter((item) => !(impressionsByRequestId.get(item.request_id)?.length)).map((item) => item.request_id);
+      const impressionsWithoutRequest = recommendationImpressions.filter((item) => !requestIds.has(item.recommendation_request_id)).length;
+      const bidAttemptCount = bidAttempts.filter((item) => item.attempt_kind === 'bid_attempt').length;
+      const bidAbandonCount = bidAttempts.filter((item) => item.attempt_kind === 'bid_abandon').length;
+      const bidValidationFailedCount = bidAttempts.filter((item) => item.attempt_kind === 'bid_validation_failed').length;
       return json(response, 200, {
         ok: true, checked_at: new Date().toISOString(),
         summary: {
@@ -910,12 +1106,26 @@ export function createApp({ repository, config = defaultConfig }) {
           bid_count: pricing.bids?.length || 0, transaction_count: pricing.transactions?.length || 0,
           valid_transaction_count: (pricing.transactions || []).filter((item) => item.is_valid === true).length,
           duplicate_valid_purchase_group_count: duplicatePurchases.length, last_event_at: lastEventAt,
+          recommendation_request_count: requests.length,
+          recommendation_candidate_count: candidates.length,
+          recommendation_impression_count: recommendationImpressions.length,
+          impression_row_count: recommendationImpressions.length,
+          bid_attempt_count: bidAttemptCount,
+          bid_abandon_count: bidAbandonCount,
+          bid_validation_failed_count: bidValidationFailedCount,
+          events_last_24h: eventsLast24h,
+          latest_event_age_h: latestEventAgeHours,
+          media_without_metadata_count: media.filter((item) => Number(item.size) > 0 && item.media_duration_sec == null).length,
         },
         event_type_counts: eventTypeCounts,
         issues: {
           duplicate_valid_purchases: duplicatePurchases.slice(0, 100),
           orphan_attribution_event_ids: orphanAttributions.slice(0, 100).map((event) => event.event_id),
           unknown_event_types: [...new Set(unknownEvents.map((event) => event.raw_event))],
+          recommendation_requests_without_impressions: requestsWithoutImpressions.slice(0, 100),
+          impressions_without_request: impressionsWithoutRequest,
+          stale_events_alert: latestEventAgeHours != null && latestEventAgeHours > 24,
+          impression_coverage_alert: recommendationImpressions.length < requests.length ? requestsWithoutImpressions.length : 0,
         },
       });
     }
@@ -963,7 +1173,12 @@ export function createApp({ repository, config = defaultConfig }) {
       return json(response, existingPublic ? 200 : 201, {
         ok: true, duplicate: false, reusedMedia: Boolean(existingMedia),
         asset: publicAssetView(record, user.id),
-        media: { id: media.id, fileName: media.fileName, mime: media.mime, size: media.size, mediaUrl: `/api/media/${encodeURIComponent(media.id)}` },
+        media: {
+          id: media.id, fileName: media.fileName, mime: media.mime, size: media.size,
+          mediaUrl: `/api/media/${encodeURIComponent(media.id)}`,
+          media_duration_sec: media.media_duration_sec ?? null, media_width: media.media_width ?? null,
+          media_height: media.media_height ?? null, media_bitrate_kbps: media.media_bitrate_kbps ?? null,
+        },
       });
     }
 
@@ -1232,7 +1447,7 @@ export function createApp({ repository, config = defaultConfig }) {
       const user = await requireUser(request, response); if (!user) return;
       if (!allowPublicWrite(user.id, 'public-record', 50)) return apiError(response, 429, 'rate-limited', '公共互动过于频繁，请稍后再试。');
       const body = await readJson(request, 64 * 1024);
-      const allowedKinds = new Set(['asset_relation', 'bench_message', 'bottle_reply', 'follow']);
+      const allowedKinds = new Set(['asset_relation', 'bench_message', 'bottle_reply', 'follow', 'loose_tag']);
       const kind = cleanText(body.kind, 40);
       if (!allowedKinds.has(kind)) return apiError(response, 400, 'invalid-record-kind', '公共互动类型无效。');
       const id = cleanText(body.id, 80) || `${kind}-${randomUUID()}`;
@@ -1244,6 +1459,13 @@ export function createApp({ repository, config = defaultConfig }) {
       }
       if (kind === 'bench_message' || kind === 'bottle_reply') payload.text = cleanText(payload.text, 180);
       if ((kind === 'bench_message' || kind === 'bottle_reply') && !payload.text) return apiError(response, 400, 'empty-record', '请填写内容。');
+      if (kind === 'loose_tag') {
+        payload.tag = cleanText(payload.tag, 24);
+        payload.wx = cleanCoordinate(payload.wx);
+        payload.wy = cleanCoordinate(payload.wy);
+        payload.zone = cleanText(payload.zone, 40);
+        if (payload.tag.length < 2) return apiError(response, 400, 'invalid-loose-tag', '标签至少需要 2 个字。');
+      }
       const record = await repository.savePublicRecord({
         id, kind, ownerId: user.id, ownerName: user.nickname || '匿名旅人', name: user.nickname || '匿名旅人',
         payload, status: 'published', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -1345,6 +1567,13 @@ export function createApp({ repository, config = defaultConfig }) {
       const allowedEvents = user.research ? events : events.filter((event) => ESSENTIAL_EVENTS.has(event.raw_event));
       const subject = await ensureResearchIdentity(user);
       const accepted = await repository.appendEvents(user.id, allowedEvents, subject.subject_id);
+      // 投影到研究事实表：只处理本次真正新落库的事件，避免重放重复写入；失败只告警。
+      const acceptedSet = new Set(accepted);
+      const newlyAccepted = allowedEvents.filter((event) => acceptedSet.has(event.event_id));
+      if (newlyAccepted.length) {
+        try { await projectResearchEvents(repository, newlyAccepted, user.id, subject.subject_id); }
+        catch (error) { console.warn(`research post-processing failed: ${error.message}`); }
+      }
       return json(response, 200, { ok: true, accepted, acknowledged: events.map((event) => event.event_id), rejected: rejectedIds.length, rejected_ids: rejectedIds, rejection_reasons: rejectionReasons });
     }
 

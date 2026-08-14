@@ -6,8 +6,8 @@
     <meta name="description" content="Zhere 开放世界玩法与数据采集原型（V7）：视频、需求、评论、虚拟竞价与用户痕迹共同生长的公共世界" />
     <title>Zhere | 开放公域</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='%238a9d7d' stroke='%2339423a' stroke-width='6'/%3E%3Cpath d='M22 38c12-2 18-10 20-20 3 12-2 24-17 28' fill='none' stroke='%23f7f4ea' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./styles.css?v=21" />
-    <link rel="stylesheet" href="./formal-v4.css?v=26" />
+    <link rel="stylesheet" href="./styles.css?v=22" />
+    <link rel="stylesheet" href="./formal-v4.css?v=37" />
   </head>
   <body>
     <!--
@@ -162,6 +162,7 @@
             <button type="button" data-context-action="observe"><kbd>E</kbd><span><b>观察附近</b><small id="contextObserveHint">看看身边有什么</small></span></button>
             <button type="button" data-context-action="note"><kbd>N</kbd><span><b>留一张需求</b><small>纸条会落在脚边</small></span></button>
             <button type="button" data-context-action="publish"><kbd>P</kbd><span><b>发布素材</b><small>从背包或本地上传</small></span></button>
+            <button type="button" data-context-action="tag"><kbd>T</kbd><span><b>插一枚标签</b><small>其他旅人可以捡走并贴到视频旁</small></span></button>
             <button type="button" data-context-action="journal"><kbd>J</kbd><span><b>翻开探索手账</b><small>回看素材、纸条和关系</small></span></button>
           </aside>
           <div class="context-hint" id="contextHint">WASD 任意方向行走 · 世界没有边界</div>
@@ -236,9 +237,9 @@
             <label class="register-field">密码<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="至少 8 位" aria-describedby="passwordError" required /><small class="field-error" id="passwordError" aria-live="polite"></small></label>
             <label class="register-field register-field-wide">确认密码<input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="再次输入相同密码" aria-describedby="confirmPasswordError" required /><small class="field-error" id="confirmPasswordError" aria-live="polite"></small></label>
           </div>
-          <label class="check-label"><input type="checkbox" name="age" required /> 我已满 16 周岁</label>
+          <label class="check-label"><input type="checkbox" name="age" required /><span>我已满 16 周岁</span></label>
           <div class="check-label"><input id="termsConsent" type="checkbox" name="terms" required /> <span><label for="termsConsent">我已阅读并同意</label><button class="legal-link" type="button" data-legal="terms">使用条款</button>与<button class="legal-link" type="button" data-legal="privacy">隐私说明</button></span></div>
-          <label class="check-label"><input type="checkbox" name="research" checked /> 我愿意参与推荐与模型研究，可随时退出且保留账户</label>
+          <label class="check-label"><input type="checkbox" name="research" checked /><span>我愿意参与推荐与模型研究，可随时退出且保留账户</span></label>
           <p class="form-error" id="registerError" role="alert"></p>
           <button class="primary-button" type="submit">创建并进入</button>
         </form>
@@ -265,7 +266,7 @@
       <div id="sheetContent"></div>
     </section>
 
-    <aside class="profile-drawer" id="profileDrawer" aria-label="角色与账户" hidden>
+    <aside class="profile-drawer" id="profileDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerName" hidden>
       <button class="sheet-close" id="profileClose" aria-label="关闭角色与账户">关闭</button>
       <div class="profile-head"><span class="large-avatar" id="drawerAvatar">秋</span><div><h2 id="drawerName">路过的风</h2><p id="drawerTitle">礁石小窝的整理者</p></div></div>
       <nav class="drawer-nav">
@@ -289,14 +290,16 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <script src="./service-client.js?v=23"></script>
-  <script src="./world-foundation.js?v=1"></script>
-  <script src="./ui-shell.js?v=1"></script>
-  <script src="./telemetry-system.js?v=1"></script>
+  <script src="./world-foundation.js?v=2"></script>
+    <script src="./ui-shell.js?v=5"></script>
+  <script src="./telemetry-system.js?v=2"></script>
   <script src="./public-content.js?v=1"></script>
-  <script src="./pricing-system.js?v=1"></script>
-  <script src="./world-renderer.js?v=3"></script>
-  <script src="./world-movement.js?v=1"></script>
-  <script src="./homestead-system.js?v=1"></script>
-  <script src="./prototype.js?v=46"></script>
+  <script src="./pricing-system.js?v=2"></script>
+    <script src="./world-guide.js?v=1"></script>
+    <script src="./world-renderer.js?v=10"></script>
+    <script src="./world-movement.js?v=4"></script>
+  <script src="./homestead-system.js?v=2"></script>
+    <script src="./prototype.js?v=56"></script>
+  <script src="./entry-system.js?v=1"></script>
   </body>
 </html>

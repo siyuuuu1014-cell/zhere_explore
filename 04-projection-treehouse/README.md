@@ -100,16 +100,24 @@ node server/server.mjs
 - 本地 Repository 的视频播放使用文件流；飞书 Repository 会向云空间转发 Range，并在上游忽略 Range 时于服务端流式截取，不把整段视频一次性装入 Node 内存
 - 高频事件先进入浏览器内存和 IndexedDB 队列，每 8 秒或满 20 条批量提交；关键事件立即提交
 - 服务端按 `event_id` 去重，原始事件与 `derived_signals` 分离
+- 研究数据链路：`recommendation_request` 的候选与 `impression_batch` 的每条曝光被服务端投影为逐行事实表（推荐请求/候选/曝光三表），`bid_attempt` / `bid_abandon` / `bid_validation_failed` 单独投影，成交时追加不可变 `base_price_versions` 快照；管理员可用 `/api/admin/research/recommendations.csv`、`/snapshot` 与健康告警字段（含事件增长与曝光覆盖）核对链路
+- 上传视频在浏览器端提取时长、宽高与码率并随 multipart 提交；提取失败自动降级为无元数据上传，不阻塞发布
+- 静止节能：无按键、无寻路目标且无面板打开时暂停主 requestAnimationFrame 循环，输入或交互立即重启；猫、海鸥、小动物与回声风轮等环境动画改为独立 100ms 低频循环并带 transform 过渡
+- `prototype.js` 已进一步拆出 `world-guide.js`（图鉴数据与面板）和 `entry-system.js`（入口、认证表单、法律弹层与注册校验）；`world-foundation.js` 有 Node 契约测试覆盖
+- 地图可交互对象统一为「点击 → 寻路走近 → 到达交互半径后执行动作」；视频、需求、地标、资源、漂流瓶、无名处、标签植物、旅人标签与贴纸均复用 `approachWorldInteraction`（E 键观察路径保持不变；灯、猫、小动物、回声风轮等纯娱乐对象仍为直接互动）
+- HUD 按 `data-hud-state`（`idle|moving|near|tasking`）三态化：任务面板打开时降噪、移动时折叠对话并压缩资源提示、靠近对象时强化上下文提示；移动端额外压缩固定 HUD 垂直占用，切换带 `.18s` 过渡并尊重 `prefers-reduced-motion`
+- 表单草稿通过 `localStorage` 的 `zhere-form-drafts`（JSON 对象，单值上限 2000 字符）自动保存与恢复；素材回应、纸条、举报、角色 bio 与公共素材编辑均接入，成功提交后清除草稿，入口页（登录/注册/找回）带脏数据离开时弹确认层
 - 开发环境使用本地文件 Repository；生产环境配置飞书多维表格与云空间 Repository，并在启动及 `/api/health` 时验证全部表格和文件夹权限
 - 自动化测试：`node --test server/**/*.test.mjs`
 
 ## 文档
 
 - `v7-experience-coverage.md` — 历史功能与数据事件对照表
-- `server/FEISHU.md` — 飞书 Repository、表字段和生产环境配置
+- `server/FEISHU.md` — 飞书 Repository、表字段、生产环境配置与端到端验证记录
 - `qa/audit-2026-08-10/audit.md` — 正式界面 4 功能完整性与体验审查
 - `playability-report.md` — 可玩性测试报告
 - `DESIGN.md` — 设计说明（部分内容已被 v7 取代）
 - `direction.md` — 早期视觉与交互方向
 - `generation-prompts.md` — AI 图像生成记录
-- `qa/`、`previews/` — 截图（树冠版，已过期）
+- `qa/` — 按日期归档的功能审查、P0/P1/P2 验收与修复截图（`qa/mobile-harness.html` 为移动端 QA 外壳）
+- `scripts/feishu-e2e-verify.mjs` — 飞书生产环境端到端验证脚本（`npm run feishu:e2e`）

@@ -10,6 +10,11 @@ const EXPECTED = {
   basePrices: { base_price: 2, valid_transaction_count: 2, formed_at: 5 },
   researchConsents: { research_allowed: 7, effective_at: 5 },
   researchSessions: { started_at: 5, ended_at: 5 },
+  basePriceVersions: { material_id: 1, version: 1, base_price: 1, formed: 1, transaction_id: 1, payload_json: 1 },
+  bidAttempts: { event_id: 1, user_id: 1, asset_id: 1, attempt_kind: 1, payload_json: 1 },
+  recommendationRequests: { request_id: 1, user_id: 1, subject_id: 1, payload_json: 1 },
+  recommendationCandidates: { request_id: 1, asset_id: 1, payload_json: 1 },
+  recommendationImpressions: { impression_id: 1, request_id: 1, asset_id: 1, payload_json: 1 },
 };
 const apply = process.argv.includes('--apply');
 const confirmed = process.argv.includes('--yes');

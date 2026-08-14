@@ -41,6 +41,30 @@ function countEvent(name) {
   return state.rawEvents.filter((event) => event.raw_event === name).length;
 }
 
+// 每个会话/日期种子只发一次 recommendation_request：request_id 与当日 seed 绑定。
+// 该函数在运行时才会被调用（prototype.js 在本文件之后加载），因此这里只能引用运行时
+// 已经存在的全局（worldVideos / scoreVideo / zoneAt / daySeed / TELEMETRY_SESSION_ID）。
+let recommendationRequestId = null;
+let recommendationRequestSent = false;
+
+function ensureRecommendationRequest() {
+  if (recommendationRequestSent) return recommendationRequestId;
+  recommendationRequestSent = true;
+  recommendationRequestId = `rec-${daySeed}-${String(TELEMETRY_SESSION_ID || 'session').slice(0, 8)}`;
+  const candidateVideos = Array.isArray(worldVideos) ? worldVideos.slice(0, 200) : [];
+  const candidates = candidateVideos.map((video, index) => ({
+    asset_id: video.id,
+    rank: index + 1,
+    // scoreVideo 定义在 prototype.js（后加载）；不可用时用 1.0 占位。
+    recommendation_score: Number((typeof scoreVideo === 'function' ? scoreVideo(video) : 1.0).toFixed(2)),
+    zone_id: video.zone || (typeof zoneAt === 'function' && Number.isFinite(video.wx) ? zoneAt(video.wx, video.wy).id : 'town'),
+    spawn_source: video.spawn_source || '我的发布',
+    chosen: true,
+  }));
+  logEvent('recommendation_request', { request_id: recommendationRequestId, candidates, zone_slots: candidates.length });
+  return recommendationRequestId;
+}
+
 function trackVisibility(video, visible, distance) {
   const now = performance.now();
   if (visible) {
@@ -67,6 +91,7 @@ function trackVisibility(video, visible, distance) {
 function flushImpressions() {
   const ids = Object.keys(state.impressionAccum);
   if (!ids.length) return;
+  const requestId = ensureRecommendationRequest();
   const now = performance.now();
   const batchId = crypto.randomUUID ? crypto.randomUUID() : `impression-${Date.now()}-${Math.random()}`;
   const ranked = ids
@@ -83,6 +108,7 @@ function flushImpressions() {
     return {
       impression_id: impressionId,
       impression_batch_id: batchId,
+      recommendation_request_id: requestId,
       asset_id: entry.id,
       zone_id: entry.zone,
       spawn_source: entry.spawn_source,
@@ -95,7 +121,7 @@ function flushImpressions() {
       experiment_group: 'mixed-biome',
     };
   });
-  logEvent('impression_batch', { impression_batch_id: batchId, impressions, count: impressions.length });
+  logEvent('impression_batch', { impression_batch_id: batchId, recommendation_request_id: requestId, impressions, count: impressions.length });
   state.impressionAccum = {};
   persist();
 }

@@ -250,23 +250,70 @@
     return null;
   }
 
+  // 上传前用临时 video 元素提取时长/宽高，并估算码率。元数据可选：超时或解析失败都以 null 继续，
+  // 绝不阻塞上传。帧率在浏览器端不可靠提取，这里固定传 null，生产由服务端转码链路补充。
+  function readVideoMetadata(video, file) {
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? Number(video.duration.toFixed(2)) : null;
+    const width = Number.isFinite(video.videoWidth) && video.videoWidth > 0 ? video.videoWidth : null;
+    const height = Number.isFinite(video.videoHeight) && video.videoHeight > 0 ? video.videoHeight : null;
+    const bitrate = duration != null && Number.isFinite(file?.size) ? Math.round(file.size * 8 / duration / 1000) : null;
+    return { media_duration_sec: duration, media_width: width, media_height: height, media_bitrate_kbps: bitrate };
+  }
+
+  async function extractVideoMetadata(file) {
+    const fallback = { media_duration_sec: null, media_width: null, media_height: null, media_bitrate_kbps: null };
+    try {
+      if (!file || typeof URL.createObjectURL !== 'function' || typeof document.createElement !== 'function') return fallback;
+      return await new Promise((resolve) => {
+        const objectUrl = URL.createObjectURL(file);
+        let settled = false;
+        const finish = (metadata) => {
+          if (settled) return;
+          settled = true;
+          try { URL.revokeObjectURL(objectUrl); } catch {}
+          resolve(metadata || fallback);
+        };
+        const video = document.createElement('video');
+        video.preload = 'metadata';
+        video.muted = true;
+        const timeout = setTimeout(() => finish(readVideoMetadata(video, file)), 5000);
+        video.onloadedmetadata = () => { clearTimeout(timeout); finish(readVideoMetadata(video, file)); };
+        video.onerror = () => { clearTimeout(timeout); finish(fallback); };
+        video.src = objectUrl;
+      });
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function appendMediaMetadata(form, metadata) {
+    form.set('media_duration_sec', String(metadata.media_duration_sec ?? ''));
+    form.set('media_width', String(metadata.media_width ?? ''));
+    form.set('media_height', String(metadata.media_height ?? ''));
+    form.set('media_bitrate_kbps', String(metadata.media_bitrate_kbps ?? ''));
+  }
+
   async function uploadMedia({ assetId, title, description, file }) {
     const form = new FormData();
+    const metadata = await extractVideoMetadata(file);
     form.set('assetId', assetId);
     form.set('title', title);
     form.set('description', description || '');
+    appendMediaMetadata(form, metadata);
     form.set('file', file, file.name);
     return request('/media', { method: 'POST', body: form });
   }
 
   async function uploadAndPublishAsset({ assetId, title, description, file, wx, wy, zone }) {
     const form = new FormData();
+    const metadata = await extractVideoMetadata(file);
     form.set('assetId', assetId);
     form.set('title', title);
     form.set('description', description || '');
     form.set('wx', String(wx));
     form.set('wy', String(wy));
     form.set('zone', zone || '');
+    appendMediaMetadata(form, metadata);
     form.set('file', file, file.name);
     // A stable asset id makes a timeout-safe retry idempotent on the server.
     return request('/public/assets/upload', { method: 'POST', body: form, timeoutMs: 60_000, retries: 1 });

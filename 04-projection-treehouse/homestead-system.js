@@ -186,6 +186,10 @@ function renderHomestead() {
     if (decor === 'projector') structures.push(`<button class="home-decor decor-projector" style="--decor-index:${index}" data-video-deck aria-label="露天放映台，整理视频副本"></button>`);
     else structures.push(`<span class="home-decor decor-${decor}" style="--decor-index:${index}" aria-label="${escapeHtml(CRAFT_RECIPES[decor]?.name || '地块装饰')}"></span>`);
   });
+  state.homeStickers.forEach((stickerId, index) => {
+    const sticker = WORLD_STICKERS.find((item) => item.id === stickerId);
+    if (sticker) structures.push(`<span class="home-sticker sticker-${sticker.kind}" style="--sticker-index:${index}" aria-label="小屋贴纸：${escapeHtml(sticker.label)}"><i></i></span>`);
+  });
   homeBuildings.innerHTML = structures.join('');
   $$('[data-home-panel]', homeBuildings).forEach((node) => node.addEventListener('click', (event) => { event.stopPropagation(); showHomesteadPanel(); }));
   const waterButton = $('[data-water-all]', homeBuildings);

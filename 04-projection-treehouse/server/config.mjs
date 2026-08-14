@@ -49,6 +49,11 @@ export const config = {
       researchSubjects: process.env.FEISHU_TABLE_RESEARCH_SUBJECTS || '',
       researchConsents: process.env.FEISHU_TABLE_RESEARCH_CONSENTS || '',
       researchSessions: process.env.FEISHU_TABLE_RESEARCH_SESSIONS || '',
+      recommendationRequests: process.env.FEISHU_TABLE_RESEARCH_RECOMMENDATION_REQUESTS || '',
+      recommendationCandidates: process.env.FEISHU_TABLE_RESEARCH_RECOMMENDATION_CANDIDATES || '',
+      recommendationImpressions: process.env.FEISHU_TABLE_RESEARCH_RECOMMENDATION_IMPRESSIONS || '',
+      bidAttempts: process.env.FEISHU_TABLE_BID_ATTEMPTS || '',
+      basePriceVersions: process.env.FEISHU_TABLE_BASE_PRICE_VERSIONS || '',
     },
   },
 };

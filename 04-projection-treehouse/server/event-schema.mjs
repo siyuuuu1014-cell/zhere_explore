@@ -1,6 +1,6 @@
 export const EVENT_TYPES = new Set(`
 approach asset_open asset_relation_delete asset_relation_save avoid bench_reply bench_sit
-bid_accepted bid_enter bid_submit bottle_exposure bottle_keep bottle_open bottle_reply bottle_return
+bid_abandon bid_accepted bid_attempt bid_enter bid_submit bid_validation_failed bottle_exposure bottle_keep bottle_open bottle_reply bottle_return
 business_scene_place business_scene_remove combine comment comment_delete comment_reply comment_reply_start comment_update
 content_report copy_acquired copy_long_term_kept copy_moved_home copy_placed_home copy_removed_home
 custom_tag_create data_export deletion_request demand_asset_link demand_close demand_delete demand_draft_save demand_reopen demand_response demand_update
@@ -9,13 +9,13 @@ guide_travel homestead_building_completed homestead_building_started homestead_c
 homestead_plot_cleared homestead_plot_tilled homestead_plot_watered homestead_seed_planted homestead_well_used
 impression_batch like line_change login logout mix_change mix_save move_click move_click_arrived move_click_blocked move_sample
 onboarding_completed pause play play_complete play_error play_only_cat play_only_lamp play_progress profile_update publish_asset publish_demand
-random_exposure rare_discovery_found register research_consent_change seek session_end session_pause session_resume session_start
-sound_listen space_customize space_enter space_exit tag_add tag_pluck tag_remove telescope_follow telescope_open unfavorite unfollow unlike
+random_exposure rare_discovery_found recommendation_request register research_consent_change seek session_end session_pause session_resume session_start
+sound_listen space_customize space_enter space_exit sticker_collect sticker_place tag_add tag_pluck tag_remove loose_tag_collect loose_tag_publish telescope_follow telescope_open unfavorite unfollow unlike
 upload_to_bag wall_pair_view wall_swap watch_time world_event_response world_resource_gathered zone_discover
 `.trim().split(/\s+/));
 
 const ASSET_EVENTS = new Set(`
-approach asset_open avoid bid_accepted bid_enter bid_submit business_scene_place business_scene_remove copy_acquired
+approach asset_open avoid bid_accepted bid_abandon bid_attempt bid_enter bid_submit bid_validation_failed business_scene_place business_scene_remove copy_acquired
 copy_long_term_kept copy_moved_home copy_placed_home copy_removed_home environment_match environment_unmatch favorite favorite_revisit
 like pause play play_complete play_error play_progress seek tag_add tag_remove unfavorite unlike watch_time
 `.trim().split(/\s+/));
@@ -48,6 +48,17 @@ export function validateEventDetails(rawEvent, details) {
   if (rawEvent === 'seek' && (!nonNegative(details.from_time) || !nonNegative(details.to_time))) return 'invalid-seek';
   if (rawEvent === 'bid_submit' && (!validId(details.bid_id) || !finite(details.bid_price) || Number(details.bid_price) <= 0)) return 'invalid-bid-submit';
   if (rawEvent === 'bid_accepted' && (!validId(details.bid_id) || !validId(details.transaction_id) || !finite(details.transaction_price))) return 'invalid-bid-accepted';
+  if (rawEvent === 'recommendation_request') {
+    if (!validId(details.request_id) || !Array.isArray(details.candidates) || details.candidates.length > 200) return 'invalid-recommendation-request';
+    for (const candidate of details.candidates) {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return 'invalid-recommendation-candidate';
+      if (!validId(candidate.asset_id, 80) || !nonNegative(candidate.rank) || !finite(candidate.recommendation_score) || !validId(candidate.zone_id, 40)) return 'invalid-recommendation-candidate';
+    }
+    if (details.zone_slots != null && !nonNegative(details.zone_slots)) return 'invalid-zone-slots';
+  }
+  if (rawEvent === 'bid_attempt' && details.bid_id != null && !validId(details.bid_id, 80)) return 'invalid-bid-attempt';
+  if (rawEvent === 'bid_abandon' && !nonNegative(details.open_duration_ms)) return 'invalid-bid-abandon';
+  if (rawEvent === 'bid_validation_failed' && (typeof details.reason !== 'string' || details.reason.length > 80)) return 'invalid-bid-validation-failed';
   return null;
 }
 

@@ -6,11 +6,18 @@ function worldToScreen(wx, wy) {
 }
 
 function placeWorldNode(node, wx, wy) {
-  const point = worldToScreen(wx, wy);
-  const visible = point.x > -260 && point.x < worldShell.clientWidth + 260 && point.y > -200 && point.y < worldShell.clientHeight + 200;
+  const layoutDx = Number(node.dataset.layoutDx || 0);
+  const layoutDy = Number(node.dataset.layoutDy || 0);
+  const point = worldToScreen(wx + layoutDx, wy + layoutDy);
+  const visible = point.x > -WORLD_NODE_OVERSCAN_X
+    && point.x < worldShell.clientWidth + WORLD_NODE_OVERSCAN_X
+    && point.y > -WORLD_NODE_OVERSCAN_Y
+    && point.y < worldShell.clientHeight + WORLD_NODE_OVERSCAN_Y;
   if (!visible) {
-    node.style.visibility = 'hidden';
-    node.dataset.visible = '';
+    if (node.dataset.visible !== '') {
+      node.style.visibility = 'hidden';
+      node.dataset.visible = '';
+    }
     return { point, visible };
   }
   let size = worldNodeSizeCache.get(node);
@@ -19,20 +26,37 @@ function placeWorldNode(node, wx, wy) {
     size = { width: rect.width || node.offsetWidth || 0, height: rect.height || node.offsetHeight || 0 };
     worldNodeSizeCache.set(node, size);
   }
-  node.style.transform = `translate3d(${(point.x - size.width / 2).toFixed(2)}px, ${(point.y - size.height / 2).toFixed(2)}px, 0)`;
-  node.style.visibility = 'visible';
-  node.dataset.visible = '1';
+  const transform = `translate3d(${(point.x - size.width / 2).toFixed(2)}px, ${(point.y - size.height / 2).toFixed(2)}px, 0)`;
+  if (node.dataset.worldTransform !== transform) {
+    node.style.transform = transform;
+    node.dataset.worldTransform = transform;
+  }
+  if (node.dataset.visible !== '1') {
+    node.style.visibility = 'visible';
+    node.dataset.visible = '1';
+  }
   return { point, visible };
 }
 
 function renderTerrainBands(fragment) {
-  const bands = [
-    { cls: 'is-hill', x: -6000, y: -6000, w: 12000, h: 4700 },
-    { cls: 'is-forest', x: -6000, y: -1300, w: 4200, h: 1600 },
-    { cls: 'is-street', x: 1400, y: -1300, w: 4600, h: 1600 },
-    { cls: 'is-shore', x: -6000, y: 300, w: 12000, h: 600 },
-    { cls: 'is-sea', x: -6000, y: 900, w: 12000, h: 5100 },
-  ];
+  const padX = worldShell.clientWidth / 2 + TERRAIN_OVERSCAN_X;
+  const padY = worldShell.clientHeight / 2 + TERRAIN_OVERSCAN_Y;
+  const minX = state.wx - padX;
+  const maxX = state.wx + padX;
+  const minY = state.wy - padY;
+  const maxY = state.wy + padY;
+  const bands = [];
+  const addBand = (cls, x1, y1, x2, y2) => {
+    if (x2 <= x1 || y2 <= y1) return;
+    bands.push({ cls, x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
+  };
+  addBand('is-hill', minX, minY, maxX, Math.min(maxY, -1300));
+  const inlandTop = Math.max(minY, -1300);
+  const inlandBottom = Math.min(maxY, 300);
+  addBand('is-forest', minX, inlandTop, Math.min(maxX, -1800), inlandBottom);
+  addBand('is-street', Math.max(minX, 1400), inlandTop, maxX, inlandBottom);
+  addBand('is-shore', minX, Math.max(minY, 300), maxX, Math.min(maxY, 900));
+  addBand('is-sea', minX, Math.max(minY, 900), maxX, maxY);
   bands.forEach((band) => {
     const a = worldToScreen(band.x, band.y);
     const b = worldToScreen(band.x + band.w, band.y + band.h);
@@ -122,23 +146,12 @@ function renderWorldConnections(fragment) {
   });
 }
 
-function renderTerrain() {
-  if (state.worldMode === 'cottage') {
-    if (terrainLayer.childElementCount) terrainLayer.replaceChildren();
-    terrainLayer.style.transform = '';
-    terrainRenderOrigin = null;
-    return;
-  }
+function rebuildTerrain() {
+  terrainRenderPending = false;
+  terrainRenderHandle = null;
+  if (state.worldMode === 'cottage') return;
   const viewportWidth = worldShell.clientWidth;
   const viewportHeight = worldShell.clientHeight;
-  if (terrainRenderOrigin
-    && terrainRenderOrigin.width === viewportWidth
-    && terrainRenderOrigin.height === viewportHeight
-    && Math.abs(state.wx - terrainRenderOrigin.wx) < TERRAIN_OVERSCAN_X * .58
-    && Math.abs(state.wy - terrainRenderOrigin.wy) < TERRAIN_OVERSCAN_Y * .58) {
-    terrainLayer.style.transform = `translate3d(${(terrainRenderOrigin.wx - state.wx).toFixed(2)}px, ${(terrainRenderOrigin.wy - state.wy).toFixed(2)}px, 0)`;
-    return;
-  }
   const fragment = document.createDocumentFragment();
   renderTerrainBands(fragment);
   renderWorldConnections(fragment);
@@ -177,6 +190,41 @@ function renderTerrain() {
   terrainLayer.style.transform = 'translate3d(0, 0, 0)';
   terrainLayer.dataset.renderVersion = String(++terrainRenderVersion);
   terrainRenderOrigin = { wx: state.wx, wy: state.wy, width: viewportWidth, height: viewportHeight };
+}
+
+function cancelTerrainRebuild() {
+  if (terrainRenderHandle == null) return;
+  cancelAnimationFrame(terrainRenderHandle);
+  terrainRenderHandle = null;
+  terrainRenderPending = false;
+}
+
+function scheduleTerrainRebuild() {
+  if (terrainRenderPending) return;
+  terrainRenderPending = true;
+  terrainRenderHandle = requestAnimationFrame(() => rebuildTerrain());
+}
+
+function renderTerrain() {
+  if (state.worldMode === 'cottage') {
+    cancelTerrainRebuild();
+    if (terrainLayer.childElementCount) terrainLayer.replaceChildren();
+    terrainLayer.style.transform = '';
+    terrainRenderOrigin = null;
+    return;
+  }
+  const viewportWidth = worldShell.clientWidth;
+  const viewportHeight = worldShell.clientHeight;
+  if (!terrainRenderOrigin) {
+    rebuildTerrain();
+    return;
+  }
+  const sameViewport = terrainRenderOrigin.width === viewportWidth && terrainRenderOrigin.height === viewportHeight;
+  const withinBuffer = sameViewport
+    && Math.abs(state.wx - terrainRenderOrigin.wx) < TERRAIN_OVERSCAN_X * .42
+    && Math.abs(state.wy - terrainRenderOrigin.wy) < TERRAIN_OVERSCAN_Y * .42;
+  terrainLayer.style.transform = `translate3d(${(terrainRenderOrigin.wx - state.wx).toFixed(2)}px, ${(terrainRenderOrigin.wy - state.wy).toFixed(2)}px, 0)`;
+  if (!withinBuffer) scheduleTerrainRebuild();
 }
 
 function resourceTypeFor(zoneId, roll) {
@@ -222,14 +270,18 @@ function generateNearbyGatherables() {
   return resources;
 }
 
-function renderGatherables() {
+function gatherRenderKeyForPosition() {
+  return `${Math.floor(state.wx / 260)}:${Math.floor(state.wy / 200)}:${state.homestead.day}`;
+}
+
+function renderGatherables({ positionNodes = true } = {}) {
   if (state.worldMode === 'cottage') {
     state.activeGatherables = [];
     state.gatherRenderKey = '';
     resourceLayer.replaceChildren();
     return;
   }
-  const renderKey = `${Math.floor(state.wx / 520)}:${Math.floor(state.wy / 400)}:${state.homestead.day}`;
+  const renderKey = gatherRenderKeyForPosition();
   if (state.gatherRenderKey !== renderKey) {
     state.gatherRenderKey = renderKey;
     state.activeGatherables = generateNearbyGatherables();
@@ -251,7 +303,9 @@ function renderGatherables() {
       fragment.append(button);
     });
     resourceLayer.replaceChildren(fragment);
+    worldFrameRegistry = null;
   }
+  if (!positionNodes) return;
   $$('.gatherable', resourceLayer).forEach((node) => {
     const item = state.activeGatherables.find((candidate) => candidate.id === node.dataset.resourceId);
     if (item) placeWorldNode(node, item.wx, item.wy);
@@ -307,9 +361,17 @@ function renderScreens() {
     button.append(likeBadge);
     button.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (state.worldMode === 'cottage') exitCottage();
-      stopMovement(true);
-      showVideo(video);
+      approachWorldInteraction(button, {
+        wx: video.wx,
+        wy: video.wy,
+        offsetY: 68,
+        source: `video:${video.id}`,
+        label: video.title,
+        onArrival: () => {
+          state.nearest = { type: 'video', id: video.id, video, distance: 0 };
+          showVideo(video);
+        },
+      });
     });
     screenLayer.append(button);
   });
@@ -338,21 +400,36 @@ function renderCreations() {
   allUserWorldNotes().forEach((note) => {
     const button = document.createElement('button');
     const responseCount = responsesForNote(note).length;
-    button.className = `player-creation is-note is-${note.type === 'commerce' ? 'commerce' : 'personal'}${responseCount ? ' has-responses' : ''}${note.status === 'closed' ? ' is-closed' : ''}`;
+    const isCommerce = note.type === 'commerce';
+    button.className = `player-creation is-note is-${isCommerce ? 'commerce' : 'personal'}${responseCount ? ' has-responses' : ''}${note.status === 'closed' ? ' is-closed' : ''}`;
+    const art = document.createElement('span');
+    art.className = 'demand-art';
+    art.setAttribute('aria-hidden', 'true');
+    art.innerHTML = '<i class="demand-thread"></i><i class="demand-paper"></i><i class="demand-glyph"></i><i class="demand-post"></i>';
+    button.append(art);
     const label = document.createElement('span');
+    label.className = 'creation-label';
     label.textContent = `${note.title}${note.status === 'closed' ? ' · 已关闭' : ''}`;
     button.append(label);
     const meta = document.createElement('small');
     meta.className = 'creation-meta';
-    meta.textContent = `${note.type === 'commerce' ? '商' : '愿'}${responseCount ? ` · ${responseCount} 回应` : ''}`;
+    meta.textContent = `${isCommerce ? '商业需求' : '个人需求'}${responseCount ? ` · ${responseCount} 回应` : ''}`;
     button.append(meta);
     button.dataset.creationId = note.id;
-    button.setAttribute('aria-label', `需求纸条：${note.title}`);
+    button.setAttribute('aria-label', `${isCommerce ? '商业' : '个人'}需求：${note.title}${responseCount ? `，已有 ${responseCount} 条回应` : ''}`);
     button.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (state.worldMode === 'cottage') exitCottage();
-      stopMovement(true);
-      showNoteDetail(note);
+      approachWorldInteraction(button, {
+        wx: note.wx,
+        wy: note.wy,
+        offsetY: 72,
+        source: `demand:${note.id}`,
+        label: note.title,
+        onArrival: () => {
+          state.nearest = { type: 'note', id: note.id, note, distance: 0 };
+          showNoteDetail(note);
+        },
+      });
     });
     creationLayer.append(button);
   });
@@ -364,15 +441,85 @@ function renderTagPlants() {
     if (!node) {
       node = document.createElement('button');
       node.className = 'tag-plant';
+      node.type = 'button';
       node.dataset.tagPlant = index;
       node.dataset.tag = plant.tag;
+      node.setAttribute('aria-label', `采下标签：${plant.tag}`);
       node.addEventListener('click', (event) => {
         event.stopPropagation();
-        pluckTagPlant(index);
+        approachWorldInteraction(node, {
+          wx: plant.wx,
+          wy: plant.wy,
+          offsetY: 58,
+          arrivalDistance: 72,
+          stopDistance: 6,
+          source: `tag-plant:${plant.tag}`,
+          label: `标签植物：${plant.tag}`,
+          onArrival: () => pluckTagPlant(index),
+        });
       });
       decoLayer.append(node);
     }
     placeWorldNode(node, plant.wx, plant.wy);
+  });
+  const liveLooseTagIds = new Set();
+  publicLooseTags().forEach((tag) => {
+    liveLooseTagIds.add(tag.id);
+    let node = $(`[data-loose-tag="${CSS.escape(tag.id)}"]`, decoLayer);
+    if (!node) {
+      node = document.createElement('button');
+      node.type = 'button';
+      node.className = 'loose-tag-marker';
+      node.dataset.looseTag = tag.id;
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const current = publicLooseTags().find((item) => item.id === node.dataset.looseTag);
+        if (!current) return;
+        approachWorldInteraction(node, {
+          wx: current.wx,
+          wy: current.wy,
+          arrivalDistance: 72,
+          stopDistance: 6,
+          source: `loose-tag:${current.id}`,
+          label: `旅人标签：${current.tag}`,
+          onArrival: () => collectLooseTag(publicLooseTags().find((item) => item.id === node.dataset.looseTag)),
+        });
+      });
+      decoLayer.append(node);
+    }
+    node.dataset.tag = tag.tag;
+    node.setAttribute('aria-label', `捡一枚标签副本：${tag.tag}`);
+    node.innerHTML = `<span aria-hidden="true"><i></i></span><small>${escapeHtml(tag.tag)}</small>`;
+    placeWorldNode(node, tag.wx, tag.wy);
+  });
+  $$('[data-loose-tag]', decoLayer).forEach((node) => { if (!liveLooseTagIds.has(node.dataset.looseTag)) node.remove(); });
+
+  WORLD_STICKERS.forEach((sticker) => {
+    const existing = $(`[data-world-sticker="${sticker.id}"]`, decoLayer);
+    if (state.stickers.includes(sticker.id)) return existing?.remove();
+    let node = existing;
+    if (!node) {
+      node = document.createElement('button');
+      node.type = 'button';
+      node.className = `world-sticker sticker-${sticker.kind}`;
+      node.dataset.worldSticker = sticker.id;
+      node.innerHTML = '<span aria-hidden="true"><i></i></span>';
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        approachWorldInteraction(node, {
+          wx: sticker.wx,
+          wy: sticker.wy,
+          arrivalDistance: 72,
+          stopDistance: 6,
+          source: `sticker:${sticker.id}`,
+          label: `贴纸：${sticker.label}`,
+          onArrival: () => collectWorldSticker(sticker),
+        });
+      });
+      decoLayer.append(node);
+    }
+    node.setAttribute('aria-label', `收集贴纸：${sticker.label}`);
+    placeWorldNode(node, sticker.wx, sticker.wy);
   });
 }
 
@@ -403,12 +550,23 @@ function renderDecos() {
   if (state.bottleState?.open === false) {
     let bottle = $('.bottle', decoLayer);
     if (!bottle) {
-      bottle = document.createElement('span');
+      bottle = document.createElement('button');
+      bottle.type = 'button';
       bottle.className = 'deco bottle';
       bottle.title = '漂流瓶';
+      bottle.setAttribute('aria-label', '捞起漂流瓶');
       bottle.addEventListener('click', (event) => {
         event.stopPropagation();
-        openBottle();
+        approachWorldInteraction(bottle, {
+          wx: state.bottleState.wx,
+          wy: state.bottleState.wy,
+          offsetY: 58,
+          arrivalDistance: 72,
+          stopDistance: 6,
+          source: 'bottle',
+          label: '漂流瓶',
+          onArrival: () => openBottle(),
+        });
       });
       decoLayer.append(bottle);
     }
@@ -417,11 +575,13 @@ function renderDecos() {
 }
 
 function lampMarkup(id, wx, wy) {
-  const lamp = document.createElement('span');
+  const lamp = document.createElement('button');
+  lamp.type = 'button';
   lamp.className = 'deco lamp is-clickable';
   lamp.dataset.lamp = id;
   lamp.innerHTML = '<span class="lamp-head"></span><span class="lamp-post"></span>';
   lamp.title = '可以开关的灯';
+  lamp.setAttribute('aria-label', '开关路灯');
   lamp.addEventListener('click', (event) => {
     event.stopPropagation();
     lamp.classList.toggle('is-on');
@@ -432,9 +592,73 @@ function lampMarkup(id, wx, wy) {
   placeWorldNode(lamp, wx, wy);
 }
 
+const AMBIENT_CRITTERS = [
+  { id: 'squirrel', kind: 'squirrel', label: '搬松果的小松鼠', from: [-1260, -460], to: [-520, -330], period: 11500, phase: .2 },
+  { id: 'duck', kind: 'duck', label: '沿潮线散步的小鸭', from: [-520, 650], to: [340, 760], period: 14800, phase: 1.7 },
+  { id: 'hedgehog', kind: 'hedgehog', label: '夜里巡路的小刺猬', from: [520, -980], to: [1280, -820], period: 17200, phase: 3.1 },
+];
+
+const ambientLifeNodes = {
+  critters: new Map(),
+  devices: [],
+  gulls: [],
+  cat: null,
+  catLastUpdateAt: 0,
+};
+
+function ambientCritterMarkup(spec) {
+  return `<span class="critter-shape" aria-hidden="true"><i></i><i></i><i></i></span><small>${spec.label}</small>`;
+}
+
+function renderAmbientLife() {
+  AMBIENT_CRITTERS.forEach((spec) => {
+    if ($(`[data-critter="${spec.id}"]`, decoLayer)) return;
+    const critter = document.createElement('button');
+    critter.type = 'button';
+    critter.className = `deco is-clickable ambient-critter critter-${spec.kind}`;
+    critter.dataset.critter = spec.id;
+    critter.style.transition = 'transform 110ms linear';
+    critter.setAttribute('aria-label', `${spec.label}，点击打招呼`);
+    critter.innerHTML = ambientCritterMarkup(spec);
+    critter.addEventListener('click', (event) => {
+      event.stopPropagation();
+      critter.classList.remove('is-greeted');
+      requestAnimationFrame(() => critter.classList.add('is-greeted'));
+      logEvent('ambient_critter_greet', { critter_id: spec.id, zone_id: currentZoneName() });
+      const messages = {
+        squirrel: '松鼠把松果抱紧了一点，停下来朝你看。',
+        duck: '小鸭绕着你走了半圈，留下一串轻轻的脚印。',
+        hedgehog: '小刺猬抬起鼻尖，确认你不是一块会动的石头。',
+      };
+      showToast(messages[spec.id]);
+    });
+    decoLayer.append(critter);
+    ambientLifeNodes.critters.set(spec.id, critter);
+  });
+  if (!$('#echoSpinner')) {
+    const spinner = document.createElement('button');
+    spinner.type = 'button';
+    spinner.id = 'echoSpinner';
+    spinner.className = 'deco is-clickable ambient-device echo-spinner is-playing';
+    spinner.dataset.wx = '1120';
+    spinner.dataset.wy = '-1120';
+    spinner.setAttribute('aria-label', '回声风轮，点击可以让它停下或转动');
+    spinner.innerHTML = '<span class="spinner-wheel" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span class="spinner-post" aria-hidden="true"></span><small>回声风轮</small>';
+    spinner.addEventListener('click', (event) => {
+      event.stopPropagation();
+      spinner.classList.toggle('is-playing');
+      logEvent('ambient_device_toggle', { device_id: 'echo-spinner', active: spinner.classList.contains('is-playing') });
+      showToast(spinner.classList.contains('is-playing') ? '风轮重新接住了山坡上的风。' : '风轮慢慢停下，四周安静了一点。');
+    });
+    decoLayer.append(spinner);
+    ambientLifeNodes.devices.push(spinner);
+  }
+}
+
 function renderStaticDecos() {
   if (decoLayer.dataset.built) return;
   decoLayer.dataset.built = '1';
+  startAmbientLifeLoop();
   lampMarkup('lamp-1', -220, -320);
   lampMarkup('lamp-2', 640, -620);
   lampMarkup('lamp-3', 1900, -320);
@@ -443,41 +667,87 @@ function renderStaticDecos() {
     gull.className = `deco seagull gull-${index}`;
     gull.style.left = '0';
     gull.style.top = '0';
+    gull.style.transition = 'transform 110ms linear';
     gull.dataset.gull = String(index);
     decoLayer.append(gull);
+    ambientLifeNodes.gulls.push(gull);
   });
-  const cat = document.createElement('span');
+  const cat = document.createElement('button');
+  cat.type = 'button';
   cat.className = 'deco cat';
   cat.id = 'worldCat';
+  cat.style.transition = 'transform 110ms linear';
   cat.title = '镇上的猫';
+  cat.setAttribute('aria-label', '摸摸镇上的猫');
   cat.addEventListener('click', (event) => {
     event.stopPropagation();
     logEvent('play_only_cat');
     showToast('猫叫了一小声，然后继续散步');
   });
   decoLayer.append(cat);
+  ambientLifeNodes.cat = cat;
+  renderAmbientLife();
 }
 
-function updateCat() {
-  const cat = $('#worldCat');
+function updateCat(now = performance.now()) {
+  const cat = ambientLifeNodes.cat;
   if (!cat) return;
-  const now = performance.now();
   if (!updateCat.target || now > updateCat.until) {
     updateCat.target = { wx: 140 + Math.random() * 720, wy: -420 + Math.random() * 480 };
     updateCat.until = now + 5000 + Math.random() * 4000;
   }
   updateCat.pos = updateCat.pos || { wx: 300, wy: -100 };
-  updateCat.pos.wx += (updateCat.target.wx - updateCat.pos.wx) * 0.004;
-  updateCat.pos.wy += (updateCat.target.wy - updateCat.pos.wy) * 0.004;
+  const elapsed = ambientLifeNodes.catLastUpdateAt ? Math.min(50, now - ambientLifeNodes.catLastUpdateAt) : 16.67;
+  ambientLifeNodes.catLastUpdateAt = now;
+  const blend = 1 - Math.exp(-elapsed / 2200);
+  updateCat.pos.wx += (updateCat.target.wx - updateCat.pos.wx) * blend;
+  updateCat.pos.wy += (updateCat.target.wy - updateCat.pos.wy) * blend;
   placeWorldNode(cat, updateCat.pos.wx, updateCat.pos.wy);
 }
 
-function updateGulls() {
-  $$('.seagull', decoLayer).forEach((gull, index) => {
+function updateGulls(now = performance.now()) {
+  ambientLifeNodes.gulls.forEach((gull, index) => {
     const base = index === 0 ? { wx: -300, wy: 1120 } : { wx: 900, wy: 1250 };
-    const drift = Math.sin(performance.now() / 4000 + index * 2) * 60;
+    const drift = Math.sin(now / 4000 + index * 2) * 60;
     placeWorldNode(gull, base.wx + drift, base.wy + index * 40);
   });
+}
+
+function updateAmbientCritters(now = performance.now()) {
+  AMBIENT_CRITTERS.forEach((spec) => {
+    const node = ambientLifeNodes.critters.get(spec.id);
+    if (!node) return;
+    const angle = (now / spec.period) * Math.PI * 2 + spec.phase;
+    const progress = (Math.sin(angle) + 1) / 2;
+    const wx = spec.from[0] + (spec.to[0] - spec.from[0]) * progress;
+    const wy = spec.from[1] + (spec.to[1] - spec.from[1]) * progress + Math.sin(angle * 2) * 8;
+    const facingLeft = Math.cos(angle) < 0;
+    if ((node.dataset.facingLeft === '1') !== facingLeft) {
+      node.dataset.facingLeft = facingLeft ? '1' : '0';
+      node.classList.toggle('is-facing-left', facingLeft);
+    }
+    placeWorldNode(node, wx, wy);
+  });
+  ambientLifeNodes.devices.forEach((node) => placeWorldNode(node, Number(node.dataset.wx), Number(node.dataset.wy)));
+}
+
+function updateAmbientLife(now = performance.now(), force = false) {
+  if (!force && now - lastAmbientUpdateAt < AMBIENT_UPDATE_INTERVAL_MS) return;
+  lastAmbientUpdateAt = now;
+  updateCat(now);
+  updateGulls(now);
+  updateAmbientCritters(now);
+}
+
+const ambientLifeLoop = { started: false, handle: null };
+
+function startAmbientLifeLoop() {
+  if (ambientLifeLoop.started) return;
+  ambientLifeLoop.started = true;
+  ambientLifeLoop.handle = setInterval(() => {
+    if (state.worldMode === 'cottage' || !entry.classList.contains('is-gone') || !sheet.hidden) return;
+    updateAmbientLife();
+  }, 100);
 }
 
 function renderPlaced() {
@@ -513,7 +783,16 @@ function renderNameless() {
       node.dataset.nameless = region.id;
       node.addEventListener('click', (event) => {
         event.stopPropagation();
-        showNameless(region);
+        approachWorldInteraction(node, {
+          wx: region.x,
+          wy: region.y,
+          offsetY: 58,
+          arrivalDistance: 72,
+          stopDistance: 6,
+          source: `nameless:${region.id}`,
+          label: state.namedZones[region.id] || '无名处',
+          onArrival: () => showNameless(region),
+        });
       });
       decoLayer.append(node);
     }
@@ -601,6 +880,83 @@ function renderWorld() {
   refreshWorldFrameRegistry();
 }
 
+const WORLD_LAYOUT_OFFSETS = [
+  [0, 0], [0, -86], [92, -32], [-92, -32], [98, 58], [-98, 58], [0, 94], [132, -78], [-132, -78],
+];
+
+function worldLayoutOverlapScore(rect, placed) {
+  return placed.reduce((score, other) => {
+    const overlapX = Math.max(0, Math.min(rect.right, other.right) - Math.max(rect.left, other.left));
+    const overlapY = Math.max(0, Math.min(rect.bottom, other.bottom) - Math.max(rect.top, other.top));
+    return score + overlapX * overlapY;
+  }, 0);
+}
+
+function updateWorldDeclutterLayout(registry) {
+  const reserved = [
+    ...WORLD_SCENERY.map((item) => ({ wx: item.wx, wy: item.wy, width: 176, height: 118 })),
+    ...WORLD_REGION_MARKERS.map((item) => ({ wx: item.wx, wy: item.wy, width: 200, height: 92 })),
+  ];
+  const candidates = [
+    ...registry.worldObjects.map((node) => {
+      const item = objectTargets[node.dataset.object];
+      return item && { node, wx: item.wx, wy: item.wy, width: 198, height: 150, fixed: true };
+    }),
+    ...registry.creations.map((node) => {
+      const item = registry.notesById.get(node.dataset.creationId);
+      return item && { node, wx: item.wx, wy: item.wy, width: 176, height: 136 };
+    }),
+    ...registry.mediaScreens.map((node) => {
+      const item = registry.videosById.get(node.dataset.videoId) || registry.uploadsById.get(node.dataset.pendingUploadId);
+      return item && { node, wx: item.wx, wy: item.wy, width: 178, height: 142 };
+    }),
+    ...registry.gatherables.map((node) => {
+      const item = registry.gatherablesById.get(node.dataset.resourceId);
+      return item && { node, wx: item.wx, wy: item.wy, width: 82, height: 88 };
+    }),
+  ].filter(Boolean);
+  const placed = reserved.map((item) => ({
+    left: item.wx - item.width / 2 - 14,
+    right: item.wx + item.width / 2 + 14,
+    top: item.wy - item.height / 2 - 12,
+    bottom: item.wy + item.height / 2 + 12,
+  }));
+  candidates.forEach((item) => {
+    const offsets = item.fixed ? [[0, 0]] : WORLD_LAYOUT_OFFSETS;
+    let selected = offsets[0];
+    let selectedScore = Number.POSITIVE_INFINITY;
+    offsets.some(([dx, dy]) => {
+      const rect = {
+        left: item.wx + dx - item.width / 2 - 12,
+        right: item.wx + dx + item.width / 2 + 12,
+        top: item.wy + dy - item.height / 2 - 10,
+        bottom: item.wy + dy + item.height / 2 + 10,
+      };
+      const score = worldLayoutOverlapScore(rect, placed);
+      if (score < selectedScore) {
+        selected = [dx, dy];
+        selectedScore = score;
+      }
+      if (score > 0) return false;
+      placed.push(rect);
+      return true;
+    });
+    if (selectedScore > 0) {
+      const [dx, dy] = selected;
+      placed.push({
+        left: item.wx + dx - item.width / 2 - 12,
+        right: item.wx + dx + item.width / 2 + 12,
+        top: item.wy + dy - item.height / 2 - 10,
+        bottom: item.wy + dy + item.height / 2 + 10,
+      });
+    }
+    item.node.dataset.layoutDx = String(selected[0]);
+    item.node.dataset.layoutDy = String(selected[1]);
+    item.node.classList.toggle('is-decluttered', selected[0] !== 0 || selected[1] !== 0);
+    placeWorldNode(item.node, item.wx, item.wy);
+  });
+}
+
 function refreshWorldFrameRegistry() {
   const videos = worldVideosVisible();
   worldFrameRegistry = {
@@ -613,13 +969,18 @@ function refreshWorldFrameRegistry() {
     mediaScreens: $$('.media-screen'),
     creations: $$('.player-creation'),
     gatherables: $$('.gatherable', resourceLayer),
-    tagPlants: TAG_PLANTS.map((plant, index) => ({ plant, node: $(`[data-tag-plant="${index}"]`, decoLayer) })).filter((entry) => entry.node),
+    tagPlants: [
+      ...TAG_PLANTS.map((plant, index) => ({ plant, node: $(`[data-tag-plant="${index}"]`, decoLayer) })),
+      ...publicLooseTags().map((plant) => ({ plant, node: $(`[data-loose-tag="${CSS.escape(plant.id)}"]`, decoLayer) })),
+      ...WORLD_STICKERS.filter((plant) => !state.stickers.includes(plant.id)).map((plant) => ({ plant, node: $(`[data-world-sticker="${plant.id}"]`, decoLayer) })),
+    ].filter((entry) => entry.node),
     bidPlants: $$('.bid-plant', decoLayer),
     lamps: $$('.deco.lamp', decoLayer),
     nameless: NAMELESS_REGIONS.map((region) => ({ region, node: $(`[data-nameless="${region.id}"]`, decoLayer) })).filter((entry) => entry.node),
     auras: $$('.aura', auraLayer),
     bottle: $('.bottle', decoLayer),
   };
+  updateWorldDeclutterLayout(worldFrameRegistry);
   return worldFrameRegistry;
 }
 
@@ -632,6 +993,7 @@ function updateWorldMovementFrame(now = performance.now()) {
     return;
   }
   renderTerrain();
+  if (state.gatherRenderKey !== gatherRenderKeyForPosition()) renderGatherables({ positionNodes: false });
   const registry = worldFrameRegistry || refreshWorldFrameRegistry();
   registry.worldObjects.forEach((node) => {
     const target = objectTargets[node.dataset.object];
