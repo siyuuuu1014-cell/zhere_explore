@@ -108,6 +108,7 @@ function ensureRecommendationRequest() {
 }
 
 function trackVisibility(video, visible, distance) {
+  if (!telemetryWorldEntered || telemetrySessionEnded) return;
   const now = performance.now();
   if (visible) {
     const acc = state.impressionAccum[video.id] || {

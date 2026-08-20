@@ -15,6 +15,26 @@ function worldToScreen(wx, wy) {
   };
 }
 
+const WORLD_FOCUSABLE_SELECTOR = 'a[href], button, input, select, textarea, [tabindex]';
+
+function setWorldNodeInteractivity(node, interactive) {
+  if (!node.matches(WORLD_FOCUSABLE_SELECTOR) && !node.querySelector(WORLD_FOCUSABLE_SELECTOR)) return;
+  if (!interactive) {
+    if (node.dataset.worldFocusManaged !== '1') {
+      node.dataset.worldFocusManaged = '1';
+      node.dataset.worldHadAriaHidden = node.hasAttribute('aria-hidden') ? '1' : '0';
+    }
+    node.inert = true;
+    node.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  if (node.dataset.worldFocusManaged !== '1') return;
+  node.inert = false;
+  if (node.dataset.worldHadAriaHidden !== '1') node.removeAttribute('aria-hidden');
+  delete node.dataset.worldFocusManaged;
+  delete node.dataset.worldHadAriaHidden;
+}
+
 function placeWorldNode(node, wx, wy) {
   const layoutDx = Number(node.dataset.layoutDx || 0);
   const layoutDy = Number(node.dataset.layoutDy || 0);
@@ -25,6 +45,7 @@ function placeWorldNode(node, wx, wy) {
     && point.y > -WORLD_NODE_OVERSCAN_Y
     && point.y < viewport.height + WORLD_NODE_OVERSCAN_Y;
   if (!visible) {
+    setWorldNodeInteractivity(node, false);
     if (node.dataset.visible !== '') {
       node.style.visibility = 'hidden';
       node.dataset.visible = '';
@@ -46,10 +67,16 @@ function placeWorldNode(node, wx, wy) {
     node.style.visibility = 'visible';
     node.dataset.visible = '1';
   }
+  const intersectsViewport = point.x + size.width / 2 > 0
+    && point.x - size.width / 2 < viewport.width
+    && point.y + size.height / 2 > 0
+    && point.y - size.height / 2 < viewport.height;
+  setWorldNodeInteractivity(node, intersectsViewport);
   return { point, visible };
 }
 
 function hideWorldNode(node) {
+  setWorldNodeInteractivity(node, false);
   if (node.dataset.visible !== '') {
     node.style.visibility = 'hidden';
     node.dataset.visible = '';
@@ -714,7 +741,6 @@ function renderAmbientLife() {
     critter.type = 'button';
     critter.className = `deco is-clickable ambient-critter critter-${spec.kind}`;
     critter.dataset.critter = spec.id;
-    critter.style.transition = 'transform 110ms linear';
     critter.setAttribute('aria-label', `${spec.label}，点击打招呼`);
     critter.innerHTML = ambientCritterMarkup(spec);
     critter.addEventListener('click', (event) => {
@@ -829,7 +855,7 @@ function updateAmbientCritters(now = performance.now()) {
 function updateAmbientLife(now = performance.now(), force = false) {
   if (!force && now - lastAmbientUpdateAt < AMBIENT_UPDATE_INTERVAL_MS) return;
   lastAmbientUpdateAt = now;
-  refreshWorldViewportMetrics();
+  if (!worldViewportMetrics.width) refreshWorldViewportMetrics();
   updateCat(now);
   updateGulls(now);
   updateAmbientCritters(now);
@@ -840,10 +866,16 @@ const ambientLifeLoop = { started: false, handle: null };
 function startAmbientLifeLoop() {
   if (ambientLifeLoop.started) return;
   ambientLifeLoop.started = true;
-  ambientLifeLoop.handle = setInterval(() => {
-    if (state.worldMode === 'cottage' || !entry.classList.contains('is-gone') || !sheet.hidden) return;
-    updateAmbientLife();
-  }, 100);
+  const frame = (now) => {
+    if (!document.hidden
+      && !frameLoopRunning
+      && state.worldMode !== 'cottage'
+      && entry.classList.contains('is-gone')
+      && sheet.hidden
+      && profileDrawer.hidden) updateAmbientLife(now);
+    ambientLifeLoop.handle = requestAnimationFrame(frame);
+  };
+  ambientLifeLoop.handle = requestAnimationFrame(frame);
 }
 
 function renderPlaced() {
@@ -1147,6 +1179,7 @@ function updateWorldMovementFrame(now = performance.now()) {
     if (video) placeWorldNode(node, video.wx, video.wy + 10);
   });
   registry.contextNodes.forEach((node) => placeContextWorldNode(node));
+  updateAmbientLife(now, true);
   updateWalkTargetMarker();
   if (now - lastWorldContextUpdateAt >= WORLD_CONTEXT_INTERVAL_MS) {
     lastWorldContextUpdateAt = now;

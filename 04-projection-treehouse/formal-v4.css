@@ -342,7 +342,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   box-shadow: 0 5px 8px rgba(53,65,54,.12);
   font-size: 11px;
 }
-.world-object:hover .landmark-icon, .world-object.is-near .landmark-icon { transform: translateY(-7px); filter: drop-shadow(0 12px 8px rgba(53,65,54,.22)); }
+.world-stage:not([data-hud-state="moving"]) .world-object:hover .landmark-icon,
+.world-object.is-near .landmark-icon { transform: translateY(-7px); filter: drop-shadow(0 12px 8px rgba(53,65,54,.22)); }
 .world-object.is-near::before { border-color: var(--accent); background: rgba(159,75,56,.16); animation: formalNear 1.6s ease-out infinite; }
 .world-object.is-near::after { background: var(--accent); color: var(--paper); }
 .world-object[data-object="cottage"]::before { width: 174px; }
@@ -457,7 +458,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 }
 .media-screen .like-badge { right: -1px; top: 15px; border-radius: 7px 12px 7px 10px; background: var(--paper); }
 .media-screen .like-badge.is-liked { background: var(--coral, #c96d52); color: white; }
-.media-screen:hover .media-artifact, .media-screen.is-near .media-artifact { transform: translateY(-8px); filter: drop-shadow(0 12px 8px rgba(53,65,54,.22)); }
+.world-stage:not([data-hud-state="moving"]) .media-screen:hover .media-artifact,
+.media-screen.is-near .media-artifact { transform: translateY(-8px); filter: drop-shadow(0 12px 8px rgba(53,65,54,.22)); }
 .media-screen.is-near::after { background: var(--accent); color: var(--paper); }
 .pending-media { cursor: progress; }
 .pending-media .media-artifact { opacity: .72; filter: saturate(.55); }
@@ -523,7 +525,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   filter: drop-shadow(0 7px 5px rgba(53,65,54,.18));
   transition: transform .22s cubic-bezier(.2,.8,.2,1);
 }
-.player-creation:hover .demand-art, .player-creation:focus-visible .demand-art, .player-creation.is-near .demand-art { transform: translate(-50%, -6px) rotate(-2deg); }
+.world-stage:not([data-hud-state="moving"]) .player-creation:hover .demand-art,
+.player-creation:focus-visible .demand-art,
+.player-creation.is-near .demand-art { transform: translate(-50%, -6px) rotate(-2deg); }
 .demand-thread {
   position: absolute;
   left: 7px;
@@ -623,10 +627,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   contain: layout paint style;
   will-change: transform;
 }
-.world-stage:not([data-hud-state="moving"]) .ambient-critter,
-.world-stage:not([data-hud-state="moving"]) .ambient-device,
-.world-stage:not([data-hud-state="moving"]) .cat,
-.world-stage:not([data-hud-state="moving"]) .seagull { transition: transform 110ms linear; }
+.ambient-critter, .ambient-device, .cat, .seagull { transition: none; }
+.seagull.gull-1, .seagull.gull-2 { animation: none; }
 .ambient-critter::before, .ambient-critter::after { content: none !important; }
 .ambient-critter .critter-shape { position: absolute; left: 12px; top: 14px; width: 44px; height: 28px; transition: scale .18s ease; will-change: transform; }
 .ambient-critter small, .ambient-device small {
@@ -648,7 +650,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   transition: opacity .16s ease, transform .16s ease;
   pointer-events: none;
 }
-.ambient-critter:hover small, .ambient-critter:focus-visible small, .ambient-device:hover small, .ambient-device:focus-visible small { opacity: 1; transform: translateX(-50%) translateY(0); }
+.world-stage:not([data-hud-state="moving"]) .ambient-critter:hover small,
+.ambient-critter:focus-visible small,
+.world-stage:not([data-hud-state="moving"]) .ambient-device:hover small,
+.ambient-device:focus-visible small { opacity: 1; transform: translateX(-50%) translateY(0); }
 .ambient-critter:focus-visible, .ambient-device:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 50%; }
 .ambient-critter.is-facing-left .critter-shape { scale: -1 1; }
 .ambient-critter.is-greeted .critter-shape { animation: critter-greet .7s cubic-bezier(.2,.8,.2,1); }
@@ -688,7 +693,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .world-sticker.sticker-lamp > span::after { border-radius: 5px 5px 13px 13px; background: var(--amber); }
 .world-sticker.sticker-cloud > span::after { border-radius: 50%; background: var(--paper); box-shadow: 9px 2px 0 -3px var(--paper), -8px 4px 0 -4px var(--paper); }
 .world-sticker.sticker-cat > span::after { border-radius: 50% 50% 42% 42%; background: var(--accent); }
-.world-sticker:hover > span, .world-sticker:focus-visible > span, .loose-tag-marker:hover > span, .loose-tag-marker:focus-visible > span { transform: translateY(-4px) rotate(2deg); }
+.world-stage:not([data-hud-state="moving"]) .world-sticker:hover > span,
+.world-sticker:focus-visible > span,
+.world-stage:not([data-hud-state="moving"]) .loose-tag-marker:hover > span,
+.loose-tag-marker:focus-visible > span { transform: translateY(-4px) rotate(2deg); }
 .echo-spinner { width: 82px; height: 104px; }
 .spinner-post { position: absolute; left: 39px; top: 40px; width: 6px; height: 62px; border-radius: 4px; background: var(--wood); }
 .spinner-wheel { position: absolute; z-index: 2; left: 20px; top: 10px; width: 44px; height: 44px; border: 3px solid var(--ink); border-radius: 50%; background: #f1e4b3; transform-origin: center; }
@@ -710,7 +718,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   background: var(--paper);
   color: var(--ink);
 }
-.gatherable:hover .gather-shape, .gatherable:focus-visible .gather-shape { transform: translateY(-6px) rotate(-3deg); }
+.world-stage:not([data-hud-state="moving"]) .gatherable:hover .gather-shape,
+.gatherable:focus-visible .gather-shape { transform: translateY(-6px) rotate(-3deg); }
+.world-stage[data-hud-state="moving"] .gatherable:hover .gather-shape { animation: none; transform: none; }
 .player.is-gathering { animation: formalGatherBend .72s cubic-bezier(.2,.8,.2,1); }
 .gatherable.is-harvesting .gather-shape { animation: formalGatherPull .55s cubic-bezier(.2,.8,.2,1); }
 .gatherable.is-depleted .gather-shape { transform: translateY(12px) scale(.55); opacity: .28; filter: grayscale(.7); }

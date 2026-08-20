@@ -496,6 +496,28 @@ export function createApp({ repository, config = defaultConfig }) {
     }
   }
 
+  async function initializeDefaultPublicWorldRecords() {
+    if (typeof repository.listPublicRecords !== 'function' || typeof repository.savePublicRecord !== 'function') return;
+    const records = await repository.listPublicRecords({ includeDeleted: true });
+    if (records.some((record) => record.kind === 'swap_offer' && record.status === 'published')) return;
+    const now = new Date().toISOString();
+    await repository.savePublicRecord({
+      id: 'swap-npc-welcome', kind: 'swap_offer', ownerId: 'npc-muqiu', ownerName: '木秋（NPC）', name: '木秋（NPC）',
+      status: 'published', moderationStatus: 'visible',
+      payload: { assetId: 'v-old-radio', note: '换一个你觉得适合雨夜的东西。', by: '木秋（NPC）', npc: true },
+      createdAt: now, updatedAt: now,
+    });
+    invalidatePublicWorldCache();
+  }
+
+  const publicWorldInitialization = initializeDefaultPublicWorldRecords().then(
+    () => null,
+    (error) => {
+      console.warn('Default public-world initialization failed:', error.message);
+      return error;
+    },
+  );
+
   function exposeUser(user) {
     const result = publicUser(user);
     return result ? { ...result, admin: config.adminIdentities?.includes(String(user.identity || '').toLowerCase()) || false } : null;
@@ -751,19 +773,21 @@ export function createApp({ repository, config = defaultConfig }) {
       }
       const body = await readJson(request, 64 * 1024);
       const identity = normalizeIdentity(body.identity);
+      const password = String(body.password || '');
       if (!validateIdentity(identity)) return apiError(response, 400, 'invalid-identity', '请输入有效邮箱或中国大陆 11 位手机号。');
-      if (String(body.password || '').length < 8) return apiError(response, 400, 'weak-password', '密码至少需要 8 位。');
+      if (password.length < 8) return apiError(response, 400, 'weak-password', '密码至少需要 8 位。');
+      if (password.length > 128) return apiError(response, 400, 'password-too-long', '密码不能超过 128 位。');
       if (body.password !== body.confirmPassword) return apiError(response, 400, 'password-mismatch', '两次密码不一致。');
       if (!body.ageConfirmed || !body.agreeTerms) return apiError(response, 400, 'consent-required', '请确认年龄并同意条款。');
       const existingUser = await repository.findUserByIdentity(identity);
-      if (existingUser && (existingUser.registrationStatus !== 'pending' || !verifyPassword(String(body.password || ''), existingUser.passwordHash))) {
+      if (existingUser && (existingUser.registrationStatus !== 'pending' || !verifyPassword(password, existingUser.passwordHash))) {
         return apiError(response, 409, 'identity-exists', '该邮箱或手机号已经注册。');
       }
       const user = existingUser || {
         id: randomUUID(), identity, username: String(body.username || '').trim().slice(0, 32) || internalUsername(identity),
         nickname: String(body.nickname || '').trim().slice(0, 32), spaceName: String(body.spaceName || '').trim().slice(0, 40),
         avatar: 0, avatarImage: '', bio: '',
-        research: true, passwordHash: hashPassword(String(body.password)), guest: false,
+        research: true, passwordHash: hashPassword(password), guest: false,
         failedLoginCount: 0, frozenUntil: null, registrationStatus: 'pending',
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
@@ -800,10 +824,12 @@ export function createApp({ repository, config = defaultConfig }) {
       }
       const body = await readJson(request, 32 * 1024);
       const identity = normalizeIdentity(body.identity);
+      const password = String(body.password || '');
+      if (password.length > 128) return apiError(response, 400, 'password-too-long', '密码不能超过 128 位。');
       const user = await repository.findUserByIdentity(identity);
       if (!user || user.guest) return apiError(response, 401, 'invalid-credentials', '账户或密码不正确。');
       if (user.frozenUntil && Date.parse(user.frozenUntil) > Date.now()) return apiError(response, 423, 'account-frozen', '登录失败次数过多，请稍后再试。');
-      if (!verifyPassword(String(body.password || ''), user.passwordHash)) {
+      if (!verifyPassword(password, user.passwordHash)) {
         user.failedLoginCount = Number(user.failedLoginCount || 0) + 1;
         if (user.failedLoginCount >= 5) user.frozenUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
         user.updatedAt = new Date().toISOString();
@@ -1018,23 +1044,12 @@ export function createApp({ repository, config = defaultConfig }) {
 
     if (url.pathname === '/api/public/world' && request.method === 'GET') {
       const user = await requireUser(request, response); if (!user) return;
+      const initializationError = await publicWorldInitialization;
+      if (initializationError) throw initializationError;
       const snapshot = await readPublicWorldSnapshot();
-      let allAssets = snapshot.assets;
-      let allDemands = snapshot.demands;
-      let allRecords = snapshot.records;
-      if (!allRecords.some((record) => record.kind === 'swap_offer' && record.status === 'published')) {
-        const now = new Date().toISOString();
-        const created = await repository.savePublicRecord({
-          id: 'swap-npc-welcome', kind: 'swap_offer', ownerId: 'npc-muqiu', ownerName: '木秋（NPC）', name: '木秋（NPC）',
-          status: 'published', moderationStatus: 'visible',
-          payload: { assetId: 'v-old-radio', note: '换一个你觉得适合雨夜的东西。', by: '木秋（NPC）', npc: true },
-          createdAt: now, updatedAt: now,
-        });
-        if (created) {
-          allRecords = [...allRecords, created];
-          invalidatePublicWorldCache();
-        }
-      }
+      const allAssets = snapshot.assets;
+      const allDemands = snapshot.demands;
+      const allRecords = snapshot.records;
       const snapshotAt = new Date().toISOString();
       const since = Number.isNaN(Date.parse(url.searchParams.get('since') || '')) ? null : Date.parse(url.searchParams.get('since'));
       const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);

@@ -348,6 +348,7 @@ function frame(now) {
     }
   } else {
     player.classList.remove('is-moving');
+    updateHudState();
   }
   if (frameLoopActive()) {
     frameHandle = requestAnimationFrame(frame);

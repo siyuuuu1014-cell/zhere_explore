@@ -136,6 +136,26 @@ test('register rejects malformed public profile fields', async () => {
   }
 });
 
+test('authentication rejects passwords above the server limit before hashing', async () => {
+  const password = 'x'.repeat(129);
+  const registration = await fetch(`${baseUrl}/api/auth/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      identity: 'oversized-password@example.com', username: 'oversized', nickname: '长密码', spaceName: '测试小屋',
+      password, confirmPassword: password, ageConfirmed: true, agreeTerms: true, research: true,
+    }),
+  });
+  assert.equal(registration.status, 400);
+  assert.equal((await registration.json()).error.code, 'password-too-long');
+
+  const login = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ identity: 'player@example.com', password }),
+  });
+  assert.equal(login.status, 400);
+  assert.equal((await login.json()).error.code, 'password-too-long');
+});
+
 test('register accepts an exact mainland phone number and creates the internal username', async () => {
   const invalidPhone = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
