@@ -7,6 +7,17 @@ function spendEnergy(amount) {
   return true;
 }
 
+function recordWalletTransaction(amount, { type = 'gameplay', sourceId = '', label = '灵感币变化' } = {}) {
+  const result = applyWalletChange(state.wallet, state.economy, amount, {
+    id: crypto.randomUUID ? crypto.randomUUID() : `wallet-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    type, sourceId, label, createdAt: new Date().toISOString(),
+  });
+  if (!result) return null;
+  state.wallet = result.wallet;
+  state.economy = result.economy;
+  return result.transaction;
+}
+
 function flyGatherReward(node, item) {
   if (!node) return;
   const origin = node.getBoundingClientRect();
@@ -168,29 +179,42 @@ function renderHomestead() {
   plotGrid.replaceChildren(fragment);
 
   const built = state.homestead.buildings;
+  const placements = state.homestead.buildingPlacements || {};
   const construction = state.homestead.construction || {};
   const structures = [];
-  if (built.workbench) structures.push('<button class="home-structure structure-workbench" data-home-panel aria-label="露天工作台"><span></span><b>工作台</b></button>');
-  if (built.well) structures.push('<button class="home-structure structure-well" data-water-all aria-label="石砌水井，为所有作物浇水"><span></span><b>水井</b></button>');
-  if (built.greenhouse) structures.push('<button class="home-structure structure-greenhouse" data-home-panel aria-label="玻璃温室"><span></span><b>温室</b></button>');
-  if (built.archive) structures.push('<button class="home-structure structure-archive" data-discovery-atlas aria-label="叶片标本屋，打开区域珍藏"><span></span><b>标本屋</b></button>');
-  if (built.composter) structures.push('<button class="home-structure structure-composter" data-home-panel aria-label="林地堆肥坊"><span></span><b>堆肥坊</b></button>');
+  const placementAttributes = (id, fallback = null) => {
+    const placement = placements[id] || fallback;
+    if (!placement || !Number.isFinite(Number(placement.x)) || !Number.isFinite(Number(placement.y))) return '';
+    return ` data-building-x="${Number(placement.x)}" data-building-y="${Number(placement.y)}"`;
+  };
+  if (built.workbench) structures.push(`<button class="home-structure structure-workbench" data-home-panel data-building-id="workbench"${placementAttributes('workbench')} aria-label="露天工作台，打开建设与制作簿"><span><i class="workbench-tool tool-hammer"></i><i class="workbench-tool tool-plan"></i></span><b>露天工作台</b></button>`);
+  if (built.well) structures.push(`<button class="home-structure structure-well" data-building-id="well"${placementAttributes('well')} data-water-all aria-label="石砌水井，为所有作物浇水"><span></span><b>水井</b></button>`);
+  if (built.greenhouse) structures.push(`<button class="home-structure structure-greenhouse" data-building-id="greenhouse"${placementAttributes('greenhouse')} data-home-panel aria-label="玻璃温室"><span></span><b>温室</b></button>`);
+  if (built.archive) structures.push(`<button class="home-structure structure-archive" data-building-id="archive"${placementAttributes('archive')} data-discovery-atlas aria-label="叶片标本屋，打开区域珍藏"><span></span><b>标本屋</b></button>`);
+  if (built.composter) structures.push(`<button class="home-structure structure-composter" data-building-id="composter"${placementAttributes('composter')} data-home-panel aria-label="林地堆肥坊"><span></span><b>堆肥坊</b></button>`);
   Object.keys(construction).forEach((id) => {
     const meta = BUILDING_META[id];
     if (meta && !built[id]) {
-      structures.push(`<span class="home-structure structure-${id} is-scaffolding" aria-label="${meta.name}正在搭建"><span></span><b>搭建中</b></span>`);
+      structures.push(`<span class="home-structure structure-${id} is-scaffolding"${placementAttributes(id, construction[id].placement)} aria-label="${meta.name}正在搭建"><span></span><b>搭建中</b></span>`);
       setTimeout(() => completeConstruction(id), Math.max(60, 1500 - (Date.now() - (construction[id].startedAt || Date.now()))));
     }
   });
   state.homestead.decor.forEach((decor, index) => {
-    if (decor === 'projector') structures.push(`<button class="home-decor decor-projector" style="--decor-index:${index}" data-video-deck aria-label="露天放映台，整理视频副本"></button>`);
-    else structures.push(`<span class="home-decor decor-${decor}" style="--decor-index:${index}" aria-label="${escapeHtml(CRAFT_RECIPES[decor]?.name || '地块装饰')}"></span>`);
+    if (decor === 'projector') structures.push(`<button class="home-decor decor-projector" data-decor-index="${index}" data-video-deck aria-label="露天放映台，整理视频副本"></button>`);
+    else structures.push(`<span class="home-decor decor-${decor}" data-decor-index="${index}" aria-label="${escapeHtml(CRAFT_RECIPES[decor]?.name || '地块装饰')}"></span>`);
   });
   state.homeStickers.forEach((stickerId, index) => {
     const sticker = WORLD_STICKERS.find((item) => item.id === stickerId);
-    if (sticker) structures.push(`<span class="home-sticker sticker-${sticker.kind}" style="--sticker-index:${index}" aria-label="小屋贴纸：${escapeHtml(sticker.label)}"><i></i></span>`);
+    if (sticker) structures.push(`<span class="home-sticker sticker-${sticker.kind}" data-sticker-index="${index}" aria-label="小屋贴纸：${escapeHtml(sticker.label)}"><i></i></span>`);
   });
   homeBuildings.innerHTML = structures.join('');
+  $$('[data-building-x][data-building-y]', homeBuildings).forEach((node) => {
+    node.classList.add('is-player-placed');
+    node.style.setProperty('--building-x', node.dataset.buildingX);
+    node.style.setProperty('--building-y', node.dataset.buildingY);
+  });
+  $$('[data-decor-index]', homeBuildings).forEach((node) => node.style.setProperty('--decor-index', node.dataset.decorIndex));
+  $$('[data-sticker-index]', homeBuildings).forEach((node) => node.style.setProperty('--sticker-index', node.dataset.stickerIndex));
   $$('[data-home-panel]', homeBuildings).forEach((node) => node.addEventListener('click', (event) => { event.stopPropagation(); showHomesteadPanel(); }));
   const waterButton = $('[data-water-all]', homeBuildings);
   if (waterButton) waterButton.addEventListener('click', (event) => { event.stopPropagation(); waterAllPlots(); });
@@ -199,6 +223,7 @@ function renderHomestead() {
   $('[data-discovery-atlas]', homeBuildings)?.addEventListener('click', (event) => { event.stopPropagation(); showJournal('discoveries'); });
   $('#homeCabin').classList.toggle('is-upgraded', !!built.cabin);
   updateLifeHud();
+  schedulePublicSpaceSnapshot();
 }
 
 function sowCrop(index, cropId) {
@@ -266,9 +291,9 @@ function interactPlot(index) {
     plot.cropId = '';
     plot.watered = false;
     state.homestead.resources.produce += produce;
-    state.wallet += produce * 3;
+    recordWalletTransaction(produce * 3, { type: 'harvest_reward', sourceId: harvestedCropId, label: `收获${crop.name}` });
     showToast(`收获 ${produce} 份${crop.name}，公域互助箱回赠 ${produce * 3} 灵感币`);
-    logEvent('homestead_crop_harvested', { plot_index: index, crop_id: harvestedCropId, produce, virtual_reward: produce * 3 });
+    logEvent('homestead_crop_harvested', { plot_index: index, crop_id: harvestedCropId, produce, virtual_reward: produce * 3, day: state.homestead.day });
   } else if (!plot.watered) {
     if (!spendEnergy(3)) return;
     plot.watered = true;
@@ -303,6 +328,8 @@ function advanceDay() {
     plot.watered = false;
   });
   state.homestead.day += 1;
+  state.eventChoice = state.worldEventChoices[state.homestead.day] || 'none';
+  worldStage.classList.toggle('event-muted', state.eventChoice === 'replace' || state.eventChoice === 'mix');
   state.homestead.season = seasonForDay(state.homestead.day);
   state.homestead.weather = weatherForDay(state.homestead.day);
   state.homestead.energy = energyCap();
@@ -321,16 +348,17 @@ function advanceDay() {
   showToast('睡了一个好觉，体力恢复了');
 }
 
-function hasResources(cost) {
-  return Object.entries(cost).every(([key, amount]) => (state.homestead.resources[key] || 0) >= amount);
+function hasResources(cost, coinCost = 0) {
+  return state.wallet >= coinCost && Object.entries(cost).every(([key, amount]) => (state.homestead.resources[key] || 0) >= amount);
 }
 
-function spendResources(cost) {
+function spendResources(cost, coinCost = 0, sourceId = '', label = '') {
   Object.entries(cost).forEach(([key, amount]) => { state.homestead.resources[key] -= amount; });
+  if (coinCost > 0) recordWalletTransaction(-coinCost, { type: 'homestead_spend', sourceId, label });
 }
 
-function costText(cost) {
-  return Object.entries(cost).map(([key, amount]) => `${resourceLabel(key)} ${amount}`).join(' · ');
+function costText(cost, coinCost = 0) {
+  return [...Object.entries(cost).map(([key, amount]) => `${resourceLabel(key)} ${amount}`), ...(coinCost ? [`灵感币 ${coinCost}`] : [])].join(' · ');
 }
 
 function completeConstruction(id) {
@@ -338,11 +366,16 @@ function completeConstruction(id) {
   if (!project) return;
   delete state.homestead.construction[id];
   state.homestead.buildings[id] = 1;
+  state.homestead.buildingPlacements = state.homestead.buildingPlacements || {};
+  if (project.placement) state.homestead.buildingPlacements[id] = project.placement;
   state.homestead.energy = Math.min(energyCap(), state.homestead.energy + (id === 'cabin' ? 20 : 0));
   logEvent('homestead_building_completed', { building_id: id, construction_ms: Date.now() - project.startedAt });
   advanceOnboarding('home-change', { kind: 'building', buildingId: id });
   persist();
   renderHomestead();
+  requestAnimationFrame(() => {
+    if (state.worldMode === 'cottage' && id !== 'cabin' && !homeBuildings.querySelector(`[data-building-id="${CSS.escape(id)}"]`)) renderHomestead();
+  });
   showToast(`${BUILDING_META[id].name}建好了，地块有了新的轮廓`);
 }
 
@@ -350,11 +383,15 @@ function buildStructure(id) {
   const meta = BUILDING_META[id];
   if (!meta || state.homestead.buildings[id] || state.homestead.construction?.[id]) return;
   if (creatorLevel().score < (meta.need || 0)) return showToast(`成长值达到 ${meta.need} 才能搭建${meta.name}`);
-  if (!hasResources(meta.cost)) return showToast(`材料不足：${costText(meta.cost)}`);
-  spendResources(meta.cost);
+  if (!hasResources(meta.cost, meta.coinCost || 0)) return showToast(`资源不足：${costText(meta.cost, meta.coinCost || 0)}`);
+  spendResources(meta.cost, meta.coinCost || 0, `building:${id}`, `建设${meta.name}`);
   state.homestead.construction = state.homestead.construction || {};
-  state.homestead.construction[id] = { phase: 'scaffold', startedAt: Date.now(), cost: meta.cost };
-  logEvent('homestead_building_started', { building_id: id, cost: meta.cost });
+  const placement = {
+    x: Math.round(Math.max(9, Math.min(91, state.cottageX))),
+    y: Math.round(Math.max(25, Math.min(86, state.cottageY))),
+  };
+  state.homestead.construction[id] = { phase: 'scaffold', startedAt: Date.now(), cost: meta.cost, placement };
+  logEvent('homestead_building_started', { building_id: id, cost: meta.cost, placement_x: placement.x, placement_y: placement.y });
   persist();
   closeSheet();
   renderHomestead();
@@ -365,9 +402,9 @@ function buildStructure(id) {
 function craftHomesteadItem(id) {
   const recipe = CRAFT_RECIPES[id];
   if (recipe && creatorLevel().score < recipe.need) return showToast(`成长值达到 ${recipe.need} 才能制作${recipe.name}`);
-  if (!recipe || !hasResources(recipe.cost)) return showToast(`材料不足：${costText(recipe?.cost || {})}`);
+  if (!recipe || !hasResources(recipe.cost, recipe.coinCost || 0)) return showToast(`资源不足：${costText(recipe?.cost || {}, recipe?.coinCost || 0)}`);
   if (!recipe.reward && state.homestead.decor.includes(id)) return showToast(`${recipe.name}已经放在地块上了`);
-  spendResources(recipe.cost);
+  spendResources(recipe.cost, recipe.coinCost || 0, `craft:${id}`, `制作${recipe.name}`);
   if (recipe.reward) Object.entries(recipe.reward).forEach(([key, amount]) => { state.homestead.resources[key] += amount; });
   else state.homestead.decor.push(id);
   logEvent('homestead_item_crafted', { recipe_id: id, cost: recipe.cost });
@@ -399,18 +436,20 @@ function showHomesteadPanel(initialTab = 'build') {
     const complete = !!built[id];
     const building = !!state.homestead.construction?.[id];
     const unlocked = level.score >= (meta.need || 0);
-    const ready = unlocked && !complete && !building && hasResources(meta.cost);
-    const label = complete ? (id === 'cabin' ? '已扩建' : '已建成') : building ? '搭建中' : !unlocked ? `${meta.need} 成长值解锁` : ready ? '材料就绪' : '材料不足';
-    return `<div class="build-row${ready ? ' is-ready' : ''}${building ? ' is-building' : ''}${complete ? ' is-complete' : ''}${!unlocked ? ' is-locked' : ''}"><div class="build-thumb build-${id}" aria-hidden="true"><i></i></div><div><b>${meta.name}</b><span>${meta.description}</span><small>${costText(meta.cost)}</small><em>${label}</em></div><button class="${ready ? 'primary-button' : 'paper-button'}" ${ready ? `data-build="${id}"` : unlocked && !complete && !building ? `data-gather-for="${id}"` : ''} ${complete || building || !unlocked ? 'disabled' : ''}>${complete ? '完成' : building ? '施工中' : !unlocked ? '尚未解锁' : ready ? '开始搭建' : '去采集'}</button></div>`;
+    const ready = unlocked && !complete && !building && hasResources(meta.cost, meta.coinCost || 0);
+    const coinMissing = state.wallet < (meta.coinCost || 0);
+    const label = complete ? (id === 'cabin' ? '已扩建' : '已建成') : building ? '搭建中' : !unlocked ? `${meta.need} 成长值解锁` : ready ? '资源就绪' : coinMissing ? `还差 ${meta.coinCost - state.wallet} 灵感币` : '材料不足';
+    const recoveryAction = coinMissing ? `data-earn-coins="${id}"` : `data-gather-for="${id}"`;
+    return `<div class="build-row${ready ? ' is-ready' : ''}${building ? ' is-building' : ''}${complete ? ' is-complete' : ''}${!unlocked ? ' is-locked' : ''}"><div class="build-thumb build-${id}" aria-hidden="true"><i></i></div><div><b>${meta.name}</b><span>${meta.description}</span><small>${costText(meta.cost, meta.coinCost || 0)}</small><em>${label}</em></div><button class="${ready ? 'primary-button' : 'paper-button'}" ${ready ? `data-build="${id}"` : unlocked && !complete && !building ? recoveryAction : ''} ${complete || building || !unlocked ? 'disabled' : ''}>${complete ? '完成' : building ? '施工中' : !unlocked ? '尚未解锁' : ready ? '开始搭建' : coinMissing ? '去种植收获' : '去采集'}</button></div>`;
   }).join('');
   const craftSection = built.workbench ? `
     <div class="note-section homestead-panel-section"><div class="section-kicker">制作台</div><h3>把一路带回来的材料，做成看得见的生活痕迹</h3><div class="craft-strip">
-      ${Object.entries(CRAFT_RECIPES).map(([id, recipe]) => `<button data-craft="${id}" ${level.score < recipe.need ? 'disabled' : ''}><span class="craft-icon ${id}"></span><b>${recipe.name}</b><small>${level.score < recipe.need ? `${recipe.need} 成长值解锁` : costText(recipe.cost)}</small></button>`).join('')}
+      ${Object.entries(CRAFT_RECIPES).map(([id, recipe]) => `<button data-craft="${id}" ${level.score < recipe.need ? 'disabled' : ''}><span class="craft-icon ${id}"></span><b>${recipe.name}</b><small>${level.score < recipe.need ? `${recipe.need} 成长值解锁` : costText(recipe.cost, recipe.coinCost || 0)}</small></button>`).join('')}
     </div></div>` : '<div class="homestead-empty-callout"><span aria-hidden="true">⌁</span><div><b>工作台还没搭起来</b><p>先在“建设”里完成露天工作台，就能制作装饰和更多种子。</p></div></div>';
   openSheet(`
     <div class="sheet-inner homestead-sheet">
       <div class="sheet-heading-row"><div><span class="sheet-eyebrow">我的永久空间</span><h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(state.profile.spaceName || '我的地块')}</h2><p class="sheet-subtitle">公共世界里的发现会再生，只有这里会记住你的清理、播种、制作和建造。</p></div><span class="homestead-day-seal" aria-label="当前是第 ${state.homestead.day} 天"><small>${state.homestead.season}</small><b>${state.homestead.day}</b><em>DAY</em></span></div>
-      <div class="home-summary"><div><span>今天</span><b>第 ${state.homestead.day} 天 · ${state.homestead.weather}</b></div><div><span>体力</span><b>${state.homestead.energy}/${energyCap()}</b></div><div><span>成熟作物</span><b>${state.homestead.plots.filter((plot) => plot.stage >= 3).length} 块</b></div></div>
+      <div class="home-summary"><div><span>今天</span><b>第 ${state.homestead.day} 天 · ${state.homestead.weather}</b></div><div><span>体力</span><b>${state.homestead.energy}/${energyCap()}</b></div><div><span>灵感币</span><b>${state.wallet}</b></div><div><span>成熟作物</span><b>${state.homestead.plots.filter((plot) => plot.stage >= 3).length} 块</b></div></div>
       <nav class="sheet-tabs" aria-label="地块管理分类">
         <button type="button" data-home-tab="today">今日照料 <em>${maturePlots.length || dryPlots.length || ''}</em></button>
         <button type="button" data-home-tab="build">建设 <em>${Object.values(built).filter(Boolean).length}/${Object.keys(BUILDING_META).length}</em></button>
@@ -457,6 +496,12 @@ function showHomesteadPanel(initialTab = 'build') {
       say(`建造${meta.name}还需要${costText(meta.cost)}。我把更适合的采集方向标在右上方；公共资源明天会重新生长。`, '木秋');
       showToast('已返回公域并标记采集方向，靠近资源按 E');
     }));
+    $$('[data-earn-coins]', sheet).forEach((button) => button.addEventListener('click', () => {
+      closeSheet();
+      if (state.worldMode !== 'cottage') enterCottage();
+      say('灵感币不会从报价和需求里扣。照料成熟作物并收获，互助箱会回赠灵感币。', '木秋');
+      showToast('已回到地块：播种、浇水、休息后收获作物');
+    }));
     $$('[data-craft]', sheet).forEach((button) => button.addEventListener('click', () => craftHomesteadItem(button.dataset.craft)));
     $('#returnToField')?.addEventListener('click', closeSheet);
     $('#waterFromPanel')?.addEventListener('click', () => { waterAllPlots(); showHomesteadPanel('today'); });
@@ -488,6 +533,7 @@ function enterCottage() {
   say(`这里是${state.profile.spaceName || '你的小窝'}。清地、种植和建造都会留在这里；公共世界不会因为采集而被你占有。`, '木秋', [
     { label: onboardingActive() && state.onboarding.step === 4 ? '搭建露天工作台' : '打开建设簿', handler: showHomesteadPanel },
     { label: '布置视频副本', handler: showPersonalSpace },
+    { label: '沿左侧小径回公域', handler: walkToCottageExit },
   ]);
 }
 
@@ -531,12 +577,15 @@ function cottageExitDistance() {
 }
 
 function updateCottageExitState() {
-  const near = state.worldMode === 'cottage' && cottageExitArmed && cottageExitDistance() <= 14;
+  const distance = cottageExitDistance();
+  if (state.worldMode === 'cottage' && !cottageExitArmed && distance >= HOMESTEAD_EXIT.armDistance) cottageExitArmed = true;
+  const near = state.worldMode === 'cottage' && cottageExitArmed && distance <= 14;
   cottageExit.classList.toggle('is-near', near);
-  cottageExit.setAttribute('aria-label', near ? '继续沿左侧小径返回开放公域' : '沿左侧小径返回开放公域');
+  cottageExit.setAttribute('aria-label', near ? '按 E 或点击，沿左侧小径返回开放公域' : '沿左侧小径返回开放公域');
 }
 
 function tryExitCottageByWalking() {
+  updateCottageExitState();
   if (state.worldMode !== 'cottage' || !cottageExitArmed || cottageExitPending || cottageExitDistance() > HOMESTEAD_EXIT.radius) return false;
   cottageExitPending = true;
   cottageExit.classList.add('is-entering');

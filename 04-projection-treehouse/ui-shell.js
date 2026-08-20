@@ -91,6 +91,7 @@ async function openNotificationTarget(item) {
     const note = allWorldNotes().find((candidate) => candidate.id === item.targetId);
     if (note) return showNoteDetail(note);
   }
+  if (item.targetType === 'neighbor' && item.targetId) return showNeighbor(item.targetId);
   if (item.targetType === 'record') return showSwapBox();
   showToast('这条回声对应的内容已经离开公域');
 }
@@ -102,6 +103,9 @@ function echoKindLabel(item) {
     demand_link: '素材关联',
     asset_bid: '模拟报价',
     swap_claim: '交换结果',
+    follow: '小窝来访',
+    space_message: '门口纸条',
+    content_share: '内容递送',
   }[item?.kind] || '世界回声';
 }
 
@@ -109,7 +113,8 @@ function showEchoDetail(item) {
   if (!item) return showToast('这条回声暂时无法读取');
   const targetLabel = item.targetType === 'asset' ? '查看对应素材'
     : item.targetType === 'demand' ? '查看对应需求'
-      : item.targetType === 'record' ? '打开交换箱' : '';
+      : item.targetType === 'neighbor' && item.targetId ? '沿小径回访'
+        : item.targetType === 'record' ? '打开交换箱' : '';
   logEvent('echo_detail_open', { notification_id: item.id, notification_kind: item.kind, target_type: item.targetType });
   openSheet(`
     <div class="sheet-inner echo-detail-sheet">
@@ -154,8 +159,6 @@ function beginOnboarding() {
   state.onboarding = { ...defaultState.onboarding, status: 'active', step: 1 };
   const firstVideo = worldVideos.find((video) => video.id === 'v-sneaker-rain') || worldVideos[0];
   if (firstVideo) {
-    state.wx = firstVideo.wx;
-    state.wy = firstVideo.wy + 80;
     state.guidanceTarget = { wx: firstVideo.wx, wy: firstVideo.wy, label: `先观看《${firstVideo.title}》` };
   }
   persist(); renderWorld(); renderOnboarding();
@@ -219,12 +222,17 @@ function say(text, who = '木秋', options = []) {
   $('#dialogueToggle').setAttribute('aria-expanded', 'true');
 }
 
-function openSheet(markup, setup) {
+function openSheet(markup, setup, options = {}) {
   stopMovement(true);
   closeContextWheel();
   if (sheet.hidden) sheetReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   sheetContent.innerHTML = markup;
   delete sheet.dataset.dirty;
+  const dismissible = options.dismissible !== false;
+  sheet.dataset.dismissible = String(dismissible);
+  const closeButton = $('#sheetClose');
+  closeButton.hidden = !dismissible;
+  closeButton.disabled = !dismissible;
   sheet.hidden = false;
   sheet.scrollTop = 0;
   scrim.hidden = false;
@@ -266,6 +274,7 @@ sheetContent.addEventListener('input', (event) => {
 });
 
 function requestCloseSheet() {
+  if (sheet.dataset.dismissible === 'false') return;
   if (sheet.dataset.dirty !== 'true') {
     closeSheet();
     return;
@@ -317,8 +326,10 @@ function closeSheet() {
   });
   sheet.hidden = true;
   delete sheet.dataset.dirty;
+  delete sheet.dataset.dismissible;
   $('.dirty-sheet-guard', sheet)?.remove();
   sheetContent.inert = false;
+  $('#sheetClose').hidden = false;
   $('#sheetClose').disabled = false;
   scrim.hidden = true;
   document.body.classList.remove('sheet-open');

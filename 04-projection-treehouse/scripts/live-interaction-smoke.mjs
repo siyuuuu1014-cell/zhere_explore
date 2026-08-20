@@ -125,7 +125,11 @@ try {
   cleanup.demandId = `${runId}-demand`;
   const demand = await a.request('账号A发布需求', '/api/public/demands', {
     method: 'POST',
-    body: { id: cleanup.demandId, title: `${runId} 测试需求`, description: '验证跨用户回应与视频关联。', type: 'personal', quantity: 1, budget: 20, wx: 140, wy: 140, zone: 'town' },
+    body: {
+      id: cleanup.demandId, title: `${runId} 测试需求`, theme: '端到端验证', description: '验证跨用户回应与视频关联。',
+      type: 'personal', durationSeconds: 20, aspectRatioPreset: '16:9', resolutionPreset: '1080p', priceAmount: 20,
+      startAt: '2026-09-01T10:00:00+08:00', endAt: '2026-09-02T10:00:00+08:00', wx: 140, wy: 140, zone: 'town',
+    },
     expect: [201],
   });
   assert(demand.demand.id === cleanup.demandId, '需求发布返回不正确。');

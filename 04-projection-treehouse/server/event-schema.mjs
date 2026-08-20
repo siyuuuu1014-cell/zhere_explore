@@ -1,26 +1,28 @@
 export const EVENT_TYPES = new Set(`
-approach asset_open asset_relation_delete asset_relation_save avoid bench_reply bench_sit
+approach asset_open asset_rate asset_relation_delete asset_relation_save asset_share avoid bench_reply bench_sit frame_message
 bid_abandon bid_accepted bid_attempt bid_enter bid_submit bid_validation_failed bottle_exposure bottle_keep bottle_open bottle_reply bottle_return
 business_scene_place business_scene_remove combine comment comment_delete comment_reply comment_reply_start comment_update
 content_report copy_acquired copy_long_term_kept copy_moved_home copy_placed_home copy_removed_home
-custom_tag_create data_export deletion_request demand_asset_link demand_close demand_delete demand_draft_save demand_reopen demand_response demand_update
+custom_tag_create data_export deletion_request demand_asset_link demand_close demand_delete demand_draft_save demand_rate demand_reopen demand_response demand_share demand_update
+dynamic_location_spawn dynamic_location_visit
 environment_match environment_unmatch exchange_take favorite favorite_revisit feedback follow free_semantic_cluster free_semantic_cluster_clear
 guide_travel homestead_building_completed homestead_building_started homestead_crop_harvested homestead_day_advanced homestead_item_crafted
 homestead_plot_cleared homestead_plot_tilled homestead_plot_watered homestead_seed_planted homestead_well_used
 impression_batch like line_change login logout mix_change mix_save move_click move_click_arrived move_click_blocked move_sample
+npc_encounter npc_story_completed npc_story_step
 onboarding_completed pause play play_complete play_error play_only_cat play_only_lamp play_progress profile_update publish_asset publish_demand
 random_exposure rare_discovery_found recommendation_request register research_consent_change seek session_end session_pause session_resume session_start
-sound_listen space_customize space_enter space_exit sticker_collect sticker_place tag_add tag_pluck tag_remove loose_tag_collect loose_tag_publish telescope_follow telescope_open unfavorite unfollow unlike
-upload_to_bag wall_pair_view wall_swap watch_time world_event_response world_resource_gathered zone_discover
+sound_listen space_customize space_enter space_exit space_message sticker_collect sticker_place tag_add tag_pluck tag_remove loose_tag_collect loose_tag_publish telescope_follow telescope_open unfavorite unfollow unlike
+upload_to_bag wall_pair_view wall_swap watch_time world_event_response world_resource_gathered zone_discover zone_event_seen
 `.trim().split(/\s+/));
 
 const ASSET_EVENTS = new Set(`
 approach asset_open avoid bid_accepted bid_abandon bid_attempt bid_enter bid_submit bid_validation_failed business_scene_place business_scene_remove copy_acquired
 copy_long_term_kept copy_moved_home copy_placed_home copy_removed_home environment_match environment_unmatch favorite favorite_revisit
-like pause play play_complete play_error play_progress seek tag_add tag_remove unfavorite unlike watch_time
+like pause play play_complete play_error play_progress seek tag_add tag_remove unfavorite unlike watch_time asset_rate asset_share
 `.trim().split(/\s+/));
-const DEMAND_EVENTS = new Set('demand_asset_link demand_close demand_delete demand_draft_save demand_reopen demand_response demand_update publish_demand'.split(' '));
-const POSITIVE_EVENTS = new Set('like favorite favorite_revisit tag_add comment comment_reply demand_response bid_submit bid_accepted copy_acquired copy_placed_home play_complete'.split(' '));
+const DEMAND_EVENTS = new Set('demand_asset_link demand_close demand_delete demand_draft_save demand_rate demand_reopen demand_response demand_share demand_update publish_demand'.split(' '));
+const POSITIVE_EVENTS = new Set('like favorite favorite_revisit tag_add comment comment_reply demand_response bid_submit bid_accepted copy_acquired copy_placed_home play_complete npc_story_completed dynamic_location_visit'.split(' '));
 const NEGATIVE_EVENTS = new Set('unlike unfavorite tag_remove avoid play_error'.split(' '));
 
 function finite(value) { return Number.isFinite(Number(value)); }
@@ -44,6 +46,7 @@ export function validateEventDetails(rawEvent, details) {
     }
   }
   if (rawEvent === 'watch_time' && !nonNegative(details.duration)) return 'invalid-watch-duration';
+  if ((rawEvent === 'asset_rate' || rawEvent === 'demand_rate') && (!Number.isInteger(Number(details.rate)) || Number(details.rate) < 1 || Number(details.rate) > 5)) return 'invalid-content-rating';
   if (rawEvent === 'play_progress' && (!nonNegative(details.current_time) || !nonNegative(details.duration))) return 'invalid-play-progress';
   if (rawEvent === 'seek' && (!nonNegative(details.from_time) || !nonNegative(details.to_time))) return 'invalid-seek';
   if (rawEvent === 'bid_submit' && (!validId(details.bid_id) || !finite(details.bid_price) || Number(details.bid_price) <= 0)) return 'invalid-bid-submit';
@@ -59,6 +62,17 @@ export function validateEventDetails(rawEvent, details) {
   if (rawEvent === 'bid_attempt' && details.bid_id != null && !validId(details.bid_id, 80)) return 'invalid-bid-attempt';
   if (rawEvent === 'bid_abandon' && !nonNegative(details.open_duration_ms)) return 'invalid-bid-abandon';
   if (rawEvent === 'bid_validation_failed' && (typeof details.reason !== 'string' || details.reason.length > 80)) return 'invalid-bid-validation-failed';
+  if ((rawEvent === 'dynamic_location_spawn' || rawEvent === 'dynamic_location_visit')) {
+    if (!validId(details.location_id, 80)) return 'invalid-dynamic-location-id';
+    if (typeof details.kind !== 'string' || !details.kind || details.kind.length > 40) return 'invalid-dynamic-location-kind';
+  }
+  if (rawEvent === 'zone_event_seen') {
+    if (!validId(details.zone_event_id, 80) || !validId(details.zone_id, 40)) return 'invalid-zone-event-seen';
+  }
+  if (rawEvent === 'npc_encounter' || rawEvent === 'npc_story_step' || rawEvent === 'npc_story_completed') {
+    if (!validId(details.npc_id, 40) || !nonNegative(details.step)) return 'invalid-npc-event';
+    if (rawEvent === 'npc_story_step' && (typeof details.choice !== 'string' || !details.choice || details.choice.length > 40)) return 'invalid-npc-choice';
+  }
   return null;
 }
 

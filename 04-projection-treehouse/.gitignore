@@ -4,3 +4,9 @@
 .env
 server-data/
 runtime-data/
+node_modules/
+.audit-data-*/
+.tmp-*/
+*.log
+coverage/
+upload-tmp/

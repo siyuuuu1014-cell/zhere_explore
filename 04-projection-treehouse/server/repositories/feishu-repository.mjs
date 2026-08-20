@@ -1,9 +1,43 @@
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { calculateBasePrice } from '../pricing.mjs';
 
 const RETRYABLE_CODES = new Set([99991400, 1254290, 1061045]);
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function publicDemandFields(record) {
+  return {
+    demand_id: record.id,
+    owner_id: record.ownerId,
+    status: record.status,
+    demand_type: record.type,
+    title: record.title,
+    theme: record.theme || '',
+    description: record.description || '',
+    duration_seconds: record.durationSeconds ?? null,
+    aspect_ratio: record.aspectRatio || '',
+    aspect_ratio_preset: record.aspectRatioPreset || '',
+    resolution: record.resolution || '',
+    resolution_preset: record.resolutionPreset || '',
+    price_amount: record.priceAmount ?? null,
+    price_role: record.priceRole || '',
+    price_unit: record.priceUnit || 'inspiration_coin',
+    pricing_signal_eligible: record.pricingSignalEligible === true,
+    company_name: record.companyName || '',
+    activity_name: record.activityName || '',
+    cooperation_scope: record.cooperationScope || '',
+    region: record.region || '',
+    skill_requirements: record.skillRequirements || '',
+    cooperation_description: record.cooperationDescription || '',
+    start_at: record.startAt || null,
+    end_at: record.endAt || null,
+    timezone: record.timezone || 'Asia/Shanghai',
+    created_at: record.createdAt || null,
+    updated_at: record.updatedAt || null,
+    payload_json: JSON.stringify(record),
+  };
+}
 
 function sliceReadable(readable, start, end) {
   return Readable.from((async function* () {
@@ -40,6 +74,12 @@ export class FeishuRepository {
     await this.healthCheck();
   }
 
+  async listAllUsers() { return (await this.#records('users')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((user) => user.id); }
+
+  async listAllResearchSubjects() { return (await this.#records('researchSubjects')).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')).filter((subject) => subject.subject_id); }
+
+  async listAllWorldStates() { return (await this.#records('worldStates')).map((record) => JSON.parse(this.#plain(record.fields.state_json) || '{}')).filter((state) => state.userId); }
+
   async #withLock(key, operation) {
     const previous = this.locks.get(key) || Promise.resolve();
     const next = previous.catch(() => {}).then(operation);
@@ -71,13 +111,14 @@ export class FeishuRepository {
   }
 
   async #request(path, options = {}) {
+    const { timeoutMs = 15000, signal, ...requestOptions } = options;
     let lastError;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
         const token = await this.#accessToken();
         const response = await fetch(`https://open.feishu.cn/open-apis${path}`, {
-          ...options, signal: options.signal || AbortSignal.timeout(15000),
-          headers: { authorization: `Bearer ${token}`, ...(options.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...options.headers },
+          ...requestOptions, signal: signal || AbortSignal.timeout(timeoutMs),
+          headers: { authorization: `Bearer ${token}`, ...(requestOptions.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...requestOptions.headers },
         });
         const body = await response.json().catch(() => ({}));
         if (response.ok && !body.code) return body.data;
@@ -122,7 +163,7 @@ export class FeishuRepository {
 
   async #compatibleFields(table, fields) {
     const types = await this.#tableFieldTypes(table);
-    return Object.fromEntries(Object.entries(fields).map(([name, value]) => {
+    return Object.fromEntries(Object.entries(fields).filter(([name]) => types.has(name)).map(([name, value]) => {
       const type = types.get(name);
       if (type === 1) return [name, value == null ? '' : (typeof value === 'string' ? value : String(value))];
       if (type === 2) return [name, value === '' || value == null ? null : Number(value)];
@@ -330,20 +371,80 @@ export class FeishuRepository {
       return next;
     });
   }
-  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes, mediaDurationSec = null, mediaWidth = null, mediaHeight = null, mediaBitrateKbps = null }) {
-    const form = new FormData();
-    form.set('file_name', fileName);
-    form.set('parent_type', 'explorer');
-    form.set('parent_node', this.config.driveFolderToken);
-    form.set('size', String(bytes.length));
-    form.set('file', new Blob([bytes], { type: mime }), fileName);
-    const drive = await this.#request('/drive/v1/files/upload_all', { method: 'POST', body: form });
+  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes = null, filePath = '', size = null, mediaDurationSec = null, mediaWidth = null, mediaHeight = null, mediaBitrateKbps = null }) {
+    const mediaSize = Number(size ?? bytes?.length);
+    if (!Number.isFinite(mediaSize) || mediaSize < 1) throw new Error('invalid-media-size');
+    const drive = await this.#uploadDriveFile({ fileName, mime, bytes, filePath, size: mediaSize });
     const asset = {
-      id: assetId, userId, title, description, fileName, mime, size: bytes.length, storageKey: drive.file_token, createdAt: new Date().toISOString(),
+      id: assetId, userId, title, description, fileName, mime, size: mediaSize, storageKey: drive.file_token, createdAt: new Date().toISOString(),
       media_duration_sec: mediaDurationSec, media_width: mediaWidth, media_height: mediaHeight, media_bitrate_kbps: mediaBitrateKbps,
     };
     await this.#create('assets', { asset_id: assetId, user_id: userId, file_token: drive.file_token, payload_json: JSON.stringify(asset) });
     return asset;
+  }
+
+  async #uploadDriveFile({ fileName, mime, bytes = null, filePath = '', size }) {
+    const simpleUploadLimit = 20 * 1024 * 1024;
+    if (size <= simpleUploadLimit) {
+      const payload = bytes || await fs.readFile(filePath);
+      const form = new FormData();
+      form.set('file_name', fileName);
+      form.set('parent_type', 'explorer');
+      form.set('parent_node', this.config.driveFolderToken);
+      form.set('size', String(size));
+      form.set('file', new Blob([payload], { type: mime }), fileName);
+      return this.#request('/drive/v1/files/upload_all', { method: 'POST', body: form, timeoutMs: 120_000 });
+    }
+
+    const prepared = await this.#request('/drive/v1/files/upload_prepare', {
+      method: 'POST',
+      body: JSON.stringify({
+        file_name: fileName,
+        parent_type: 'explorer',
+        parent_node: this.config.driveFolderToken,
+        size,
+      }),
+      timeoutMs: 30_000,
+    });
+    const uploadId = String(prepared?.upload_id || '');
+    const blockSize = Number(prepared?.block_size);
+    const blockCount = Number(prepared?.block_num);
+    if (!uploadId || !Number.isInteger(blockSize) || blockSize < 1 || !Number.isInteger(blockCount) || blockCount < 1) {
+      throw new Error('Feishu multipart upload preparation returned invalid parameters.');
+    }
+
+    const fileHandle = filePath ? await fs.open(filePath, 'r') : null;
+    try {
+      for (let sequence = 0; sequence < blockCount; sequence += 1) {
+        const start = sequence * blockSize;
+        const expectedSize = Math.min(blockSize, size - start);
+        let chunk;
+        if (fileHandle) {
+          chunk = Buffer.allocUnsafe(expectedSize);
+          const { bytesRead } = await fileHandle.read(chunk, 0, expectedSize, start);
+          chunk = chunk.subarray(0, bytesRead);
+        } else chunk = bytes.subarray(start, start + expectedSize);
+        if (chunk.length !== expectedSize) throw new Error('Feishu multipart upload block count does not match file size.');
+        const form = new FormData();
+        form.set('upload_id', uploadId);
+        form.set('seq', String(sequence));
+        form.set('size', String(chunk.length));
+        form.set('file', new Blob([chunk], { type: mime }), fileName);
+        await this.#request('/drive/v1/files/upload_part', { method: 'POST', body: form, timeoutMs: 120_000 });
+        // 飞书分片接口限流为 5 QPS；顺序发送并留出间隔，避免大文件上传时触发 429。
+        if (sequence + 1 < blockCount) await wait(220);
+      }
+    } finally {
+      await fileHandle?.close();
+    }
+
+    const finished = await this.#request('/drive/v1/files/upload_finish', {
+      method: 'POST',
+      body: JSON.stringify({ upload_id: uploadId, block_num: blockCount }),
+      timeoutMs: 30_000,
+    });
+    if (!finished?.file_token) throw new Error('Feishu multipart upload completed without a file token.');
+    return finished;
   }
   async getMedia(assetId) { const record = await this.#find('assets', 'asset_id', assetId); return record ? JSON.parse(this.#plain(record.fields.payload_json)) : null; }
   async listMediaByUser(userId) { return (await this.#recordsMatching('assets', [{ field: 'user_id', value: userId }])).map((record) => JSON.parse(this.#plain(record.fields.payload_json) || '{}')); }
@@ -495,19 +596,18 @@ export class FeishuRepository {
   async savePublicDemand(record, { skipLookup = false } = {}) {
     const { _recordId, responses: _responses, ...cleanRecord } = record;
     if (_recordId) {
-      await this.#update('publicDemands', _recordId, {
-        owner_id: cleanRecord.ownerId, status: cleanRecord.status, payload_json: JSON.stringify(cleanRecord),
-      });
+      await this.#update('publicDemands', _recordId, publicDemandFields(cleanRecord));
       return cleanRecord;
     }
     const existing = skipLookup ? null : await this.#find('publicDemands', 'demand_id', cleanRecord.id);
     if (existing) {
       const previous = JSON.parse(this.#plain(existing.fields.payload_json) || '{}');
       if (previous.ownerId !== cleanRecord.ownerId) throw new Error('public-demand-owner-conflict');
-      await this.#update('publicDemands', existing.record_id, { owner_id: cleanRecord.ownerId, status: cleanRecord.status, payload_json: JSON.stringify({ ...previous, ...cleanRecord }) });
-      return { ...previous, ...cleanRecord };
+      const merged = { ...previous, ...cleanRecord };
+      await this.#update('publicDemands', existing.record_id, publicDemandFields(merged));
+      return merged;
     }
-    await this.#create('publicDemands', { demand_id: cleanRecord.id, owner_id: cleanRecord.ownerId, status: cleanRecord.status, payload_json: JSON.stringify(cleanRecord) });
+    await this.#create('publicDemands', publicDemandFields(cleanRecord));
     return cleanRecord;
   }
   async deletePublicDemand(demandId, ownerId) {

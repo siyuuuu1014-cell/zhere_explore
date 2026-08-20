@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { config as defaultConfig } from './config.mjs';
 import { normalizeBidPrice } from './pricing.mjs';
 import { EVENT_TYPES, deriveSignals, validateTelemetryEvent } from './event-schema.mjs';
+import { receiveVideoMultipart } from './video-upload.mjs';
 import {
   createSessionToken,
   hashPassword,
@@ -17,12 +18,46 @@ import {
 } from './security.mjs';
 
 const APP_PREFIX = '/04-projection-treehouse/';
-const ESSENTIAL_EVENTS = new Set(['register', 'login', 'logout', 'research_consent_change', 'deletion_request', 'data_export', 'feedback']);
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.webm': 'video/webm',
+  '.woff': 'font/woff', '.woff2': 'font/woff2',
 };
+const PUBLIC_ROOT_EXTENSIONS = new Set(['.html', '.css', '.js']);
+const PUBLIC_ASSET_EXTENSIONS = new Set([
+  '.css', '.png', '.jpg', '.jpeg', '.webp', '.svg', '.gif', '.ico',
+  '.mp4', '.webm', '.woff', '.woff2', '.ttf',
+]);
+
+function publicStaticTarget(appDir, encodedRelative) {
+  let relative;
+  try { relative = decodeURIComponent(encodedRelative) || 'index.html'; }
+  catch { return null; }
+  relative = relative.replaceAll('\\', '/');
+  const segments = relative.split('/').filter(Boolean);
+  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..' || segment.startsWith('.'))) return null;
+  const extension = path.extname(segments.at(-1)).toLowerCase();
+  const allowed = segments.length === 1
+    ? PUBLIC_ROOT_EXTENSIONS.has(extension)
+    : segments[0] === 'assets' && PUBLIC_ASSET_EXTENSIONS.has(extension);
+  if (!allowed) return null;
+  const root = path.resolve(appDir);
+  const target = path.resolve(root, ...segments);
+  const contained = path.relative(root, target);
+  if (!contained || contained.startsWith('..') || path.isAbsolute(contained)) return null;
+  return target;
+}
+
+function sharedWorldClock(now = new Date()) {
+  const date = now.toISOString().slice(0, 10);
+  return {
+    date,
+    day: Math.floor(now.getTime() / 86400000),
+    eventSeed: Number.parseInt(createHash('sha256').update(`zhere-world:${date}`).digest('hex').slice(0, 8), 16),
+    version: `world-${date}`,
+  };
+}
 
 function json(response, status, payload, headers = {}) {
   const body = Buffer.from(JSON.stringify(payload));
@@ -58,21 +93,6 @@ async function readJson(request, maxBytes) {
   catch { throw Object.assign(new Error('invalid-json'), { status: 400 }); }
 }
 
-async function readBytes(request, maxBytes) {
-  const declaredSize = Number(request.headers['content-length'] || 0);
-  if (Number.isFinite(declaredSize) && declaredSize > maxBytes) {
-    throw Object.assign(new Error('payload-too-large'), { status: 413 });
-  }
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > maxBytes) throw Object.assign(new Error('payload-too-large'), { status: 413 });
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
 function validateIdentity(identity) {
   return /^1[3-9]\d{9}$/.test(identity) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identity);
 }
@@ -85,9 +105,79 @@ function cleanText(value, max = 200) {
   return String(value || '').trim().slice(0, max);
 }
 
+function cleanAvatarImage(value) {
+  const image = String(value || '').trim();
+  if (!image) return '';
+  if (image.length > 48 * 1024 || !/^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(image)) return null;
+  return image;
+}
+
 function cleanCoordinate(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(-1000000, Math.min(1000000, number)) : 0;
+}
+
+const DEMAND_ASPECT_RATIOS = new Set(['16:9', '9:16', '4:3', '3:4', '1:1', 'other']);
+const DEMAND_RESOLUTIONS = new Set(['1080p', '720p', '4K', '2K', '480p', 'other']);
+
+function normalizeDemandDate(value) {
+  const timestamp = Date.parse(String(value || ''));
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '';
+}
+
+function normalizeDemandInput(body, existing = {}) {
+  const source = { ...existing, ...body };
+  const type = source.type === 'commerce' ? 'commerce' : 'personal';
+  const aspectRatioPreset = DEMAND_ASPECT_RATIOS.has(source.aspectRatioPreset) ? source.aspectRatioPreset : '';
+  const resolutionPreset = DEMAND_RESOLUTIONS.has(source.resolutionPreset) ? source.resolutionPreset : '';
+  const activityName = cleanText(source.activityName, 80);
+  const cooperationDescription = cleanText(source.cooperationDescription, 1000);
+  return {
+    type,
+    title: type === 'commerce' ? activityName : cleanText(source.title, 80),
+    theme: type === 'personal' ? cleanText(source.theme, 80) : '',
+    description: type === 'commerce' ? cooperationDescription : cleanText(source.description, 1000),
+    durationSeconds: type === 'personal' ? sanitizeOptionalNumber(source.durationSeconds, { min: 1, max: 86400, integer: true }) : null,
+    aspectRatioPreset: type === 'personal' ? aspectRatioPreset : '',
+    aspectRatio: type === 'personal' ? cleanText(aspectRatioPreset === 'other' ? source.aspectRatioOther : aspectRatioPreset, 32) : '',
+    resolutionPreset: type === 'personal' ? resolutionPreset : '',
+    resolution: type === 'personal' ? cleanText(resolutionPreset === 'other' ? source.resolutionOther : resolutionPreset, 32) : '',
+    priceAmount: sanitizeOptionalNumber(source.priceAmount, { min: 1, max: 1000000 }),
+    priceRole: type === 'commerce' ? 'budget' : 'quote',
+    priceUnit: 'inspiration_coin',
+    pricingSignalEligible: true,
+    companyName: type === 'commerce' ? cleanText(source.companyName, 120) : '',
+    activityName: type === 'commerce' ? activityName : '',
+    cooperationScope: type === 'commerce' ? cleanText(source.cooperationScope, 240) : '',
+    region: type === 'commerce' ? cleanText(source.region, 120) : '',
+    skillRequirements: type === 'commerce' ? cleanText(source.skillRequirements, 1000) : '',
+    cooperationDescription: type === 'commerce' ? cooperationDescription : '',
+    startAt: normalizeDemandDate(source.startAt),
+    endAt: normalizeDemandDate(source.endAt),
+    timezone: 'Asia/Shanghai',
+  };
+}
+
+function validateDemandInput(demand) {
+  if (demand.type === 'personal') {
+    if (!demand.title) return ['demand-title-required', '请填写需求标题。'];
+    if (!demand.theme) return ['demand-theme-required', '请填写素材主题。'];
+    if (!demand.description) return ['demand-description-required', '请填写详细描述。'];
+    if (!demand.durationSeconds) return ['demand-duration-required', '请填写大于 0 的素材时长。'];
+    if (!demand.aspectRatioPreset || !demand.aspectRatio) return ['demand-aspect-ratio-required', '请选择尺寸；选择其他时还需填写自定义尺寸。'];
+    if (!demand.resolutionPreset || !demand.resolution) return ['demand-resolution-required', '请选择分辨率；选择其他时还需填写自定义分辨率。'];
+  } else {
+    if (!demand.companyName) return ['demand-company-required', '请填写公司名称。'];
+    if (!demand.activityName) return ['demand-activity-required', '请填写活动名称。'];
+    if (!demand.cooperationScope) return ['demand-scope-required', '请填写合作范围。'];
+    if (!demand.region) return ['demand-region-required', '请填写所在地区。'];
+    if (!demand.skillRequirements) return ['demand-skills-required', '请填写技能需求。'];
+    if (!demand.cooperationDescription) return ['demand-cooperation-description-required', '请填写合作描述。'];
+  }
+  if (!demand.priceAmount) return ['demand-price-required', `请填写大于 0 的${demand.type === 'commerce' ? '预算' : '报价'}。`];
+  if (!demand.startAt || !demand.endAt) return ['demand-time-required', '请填写开始时间和结束时间。'];
+  if (Date.parse(demand.startAt) >= Date.parse(demand.endAt)) return ['demand-time-order', '结束时间必须晚于开始时间。'];
+  return null;
 }
 
 // 客户端上传的可选媒体元数据字段：非有限、越界或空值一律置 null，避免污染事实表。
@@ -173,30 +263,27 @@ async function projectResearchEvents(repository, events, userId, subjectId) {
 }
 
 async function readVideoMultipart(request, config) {
-  const requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-  const multipartBytes = await readBytes(request, config.maxVideoBytes + 1024 * 1024);
-  const webRequest = new Request(requestUrl, { method: 'POST', headers: request.headers, body: multipartBytes });
-  const form = await webRequest.formData();
-  const file = form.get('file');
-  if (!(file instanceof File) || !file.type.startsWith('video/')) {
-    throw Object.assign(new Error('invalid-media'), { status: 400, publicMessage: '请选择有效视频文件。' });
-  }
-  if (file.size > config.maxVideoBytes) {
-    throw Object.assign(new Error('media-too-large'), { status: 413, publicMessage: `视频不能超过 ${Math.floor(config.maxVideoBytes / 1024 / 1024)}MB。` });
-  }
+  const received = await receiveVideoMultipart(request, {
+    maxVideoBytes: config.maxVideoBytes,
+    tempDir: path.join(config.dataDir, 'upload-tmp'),
+  });
+  const form = { get: (name) => received.fields.get(name) ?? null };
+  const file = received.file;
   const assetId = cleanText(form.get('assetId') || `u-${randomUUID()}`, 80).replace(/[^a-zA-Z0-9_-]/g, '');
   if (!/^[a-z0-9_-]{2,80}$/i.test(assetId)) {
+    await received.cleanup();
     throw Object.assign(new Error('invalid-asset-id'), { status: 400, publicMessage: '素材 ID 无效。' });
   }
   return {
-    form, file, assetId,
+    form, file, assetId, cleanup: received.cleanup,
     mediaInput: {
       assetId,
-      title: cleanText(form.get('title') || file.name, 80),
+      title: cleanText(form.get('title') || file.fileName, 80),
       description: cleanText(form.get('description'), 500),
-      fileName: cleanText(file.name, 180),
-      mime: file.type,
-      bytes: Buffer.from(await file.arrayBuffer()),
+      fileName: cleanText(file.fileName, 180),
+      mime: file.mime,
+      filePath: file.path,
+      size: file.size,
       // 可选媒体元数据：客户端用临时 video 元素提取；非法或缺失时置 null。
       mediaDurationSec: sanitizeOptionalNumber(form.get('media_duration_sec'), { max: 86400 }),
       mediaWidth: sanitizeOptionalNumber(form.get('media_width'), { max: 16384, integer: true }),
@@ -245,6 +332,11 @@ function publicAssetView(asset, viewerId) {
     liked: likedBy.includes(viewerId),
     likes: likedBy.length || Number(asset.likes || 0),
     tags: tagRecords.length ? tagRecords.map((record) => record.tag) : (asset.tags || []),
+    tagStats: tagRecords.map((record) => ({
+      tag: record.tag,
+      count: new Set(record.userIds || []).size,
+      selected: (record.userIds || []).includes(viewerId),
+    })),
     comments: comments.filter((comment) => comment.moderationStatus !== 'hidden' && comment.status !== 'deleted').map(({ ownerId: commentOwnerId, ...comment }) => ({ ...comment, owner: commentOwnerId === viewerId ? 'me' : 'other' })),
     mediaUrl: asset.hasMedia ? `/api/media/${encodeURIComponent(asset.id)}` : '',
   };
@@ -286,16 +378,32 @@ async function pricingInsight(repository, viewerId, materialId, minimumSample) {
 
 function publicRecordView(record, viewerId) {
   const { ownerId, ...publicRecord } = record;
-  return { ...publicRecord, owner: ownerId === viewerId ? 'me' : 'other' };
+  const payload = publicRecord.payload && typeof publicRecord.payload === 'object' ? { ...publicRecord.payload } : publicRecord.payload;
+  if (payload) delete payload.targetUserId;
+  return { ...publicRecord, payload, owner: ownerId === viewerId ? 'me' : 'other' };
+}
+
+function publicRecordVisibleTo(record, viewerId) {
+  if (!record || record.status === 'deleted' || record.moderationStatus === 'hidden') return false;
+  if (record.kind === 'content_rating') return record.ownerId === viewerId;
+  if (record.kind === 'content_share') return record.ownerId === viewerId || record.payload?.targetUserId === viewerId;
+  return true;
+}
+
+function stablePublicRecordId(kind, ...parts) {
+  return `${kind}-${createHash('sha256').update(parts.map(String).join('|')).digest('hex').slice(0, 32)}`;
 }
 
 async function notificationFeed(repository, viewerId) {
   const [assets, demands, records] = await Promise.all([
     repository.listPublicAssetsByOwner(viewerId, { includeDeleted: true }),
     repository.listPublicDemandsByOwner(viewerId, { includeDeleted: true }),
-    repository.listPublicRecordsByOwner(viewerId, { includeDeleted: true }),
+    repository.listPublicRecords({ includeDeleted: true }),
   ]);
   const transactions = await repository.listValidTransactionsForMaterials(assets.map((asset) => asset.id));
+  const spaceByOwner = new Map(records
+    .filter((record) => record.kind === 'space_snapshot' && record.status !== 'deleted')
+    .map((record) => [record.ownerId, record.payload?.spaceId || record.id]));
   const notices = [];
   const push = (notice) => notices.push({ read: false, ...notice });
   assets.filter((asset) => asset.ownerId === viewerId).forEach((asset) => {
@@ -319,6 +427,21 @@ async function notificationFeed(repository, viewerId) {
   records.filter((record) => record.ownerId === viewerId && record.kind === 'swap_offer' && record.status === 'deleted' && record.claimedBy).forEach((record) => push({
     id: `swap:${record.id}:${record.claimedAt || record.updatedAt}`, kind: 'swap_claim', title: '交换箱有了回声', summary: '另一位旅人带走了你的副本，并留下了新的东西', targetType: 'record', targetId: record.replacementId || record.id, createdAt: record.claimedAt || record.updatedAt,
   }));
+  records.filter((record) => record.status !== 'deleted' && record.ownerId !== viewerId && record.payload?.targetUserId === viewerId).forEach((record) => {
+    if (record.kind === 'follow') push({
+      id: `follow:${record.id}`, kind: 'follow', title: '小径上多了一位熟人',
+      summary: `${record.ownerName || record.name || '一位旅人'}关注了你的小窝`, targetType: 'neighbor', targetId: spaceByOwner.get(record.ownerId) || '', createdAt: record.createdAt,
+    });
+    if (record.kind === 'space_message') push({
+      id: `space-message:${record.id}`, kind: 'space_message', title: '小窝门口收到一张纸条',
+      summary: `${record.ownerName || record.name || '一位旅人'}留下了来访纸条`, targetType: 'neighbor', targetId: spaceByOwner.get(record.ownerId) || '', createdAt: record.createdAt,
+    });
+    if (record.kind === 'content_share') push({
+      id: `content-share:${record.id}`, kind: 'content_share', title: '有人递来一条内容线索',
+      summary: `${record.ownerName || record.name || '一位旅人'}分享了${record.payload?.targetType === 'demand' ? '一张需求' : '一段素材'}`,
+      targetType: record.payload?.targetType || 'record', targetId: record.payload?.targetId || record.id, createdAt: record.createdAt,
+    });
+  });
   return notices.filter((notice) => notice.createdAt).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
 }
 
@@ -343,7 +466,12 @@ export function createApp({ repository, config = defaultConfig }) {
   const sessionCleanupIntervalMs = Math.max(60_000, Number(config.sessionCleanupIntervalMs) || 15 * 60 * 1000);
   let lastSessionCleanupAt = 0;
   let sessionCleanup = null;
+  let guestCleanup = null;
+  let lastGuestCleanupAt = 0;
+  let activeVideoUploads = 0;
   const marketInsightMinSample = Math.max(3, Number(config.marketInsightMinSample) || 5);
+  const guestCleanupIntervalMs = Math.max(60_000, Number(config.guestCleanupIntervalMs) || 6 * 60 * 60 * 1000);
+  const maxConcurrentVideoUploads = Math.max(1, Math.floor(Number(config.maxConcurrentVideoUploads) || 2));
 
   function invalidatePublicWorldCache() {
     publicWorldCache = null;
@@ -398,6 +526,16 @@ export function createApp({ repository, config = defaultConfig }) {
     }, { skipLookup });
   }
 
+  async function ensureDefaultResearchCollection(user) {
+    if (user.research === true) return user;
+    user.research = true;
+    user.researchConsentUpdatedAt = new Date().toISOString();
+    user.updatedAt = user.researchConsentUpdatedAt;
+    await repository.updateUser(user);
+    await recordConsent(user, true, 'collection-policy-default');
+    return user;
+  }
+
   async function ensureRegistrationConsent(user) {
     const consents = await repository.listResearchConsents(user.id);
     if (consents.some((consent) => consent.reason === 'registration')) return consents.at(-1);
@@ -410,7 +548,41 @@ export function createApp({ repository, config = defaultConfig }) {
     const recent = (rateBuckets.get(key) || []).filter((timestamp) => now - timestamp < windowMs);
     if (recent.length >= limit) { rateBuckets.set(key, recent); return false; }
     recent.push(now); rateBuckets.set(key, recent);
+    if (rateBuckets.size > 10_000) {
+      for (const [bucketKey, timestamps] of rateBuckets) {
+        if (!timestamps.some((timestamp) => now - timestamp < 24 * 60 * 60 * 1000)) rateBuckets.delete(bucketKey);
+        if (rateBuckets.size <= 8_000) break;
+      }
+    }
     return true;
+  }
+
+  function clientAddress(request) {
+    if (config.trustProxy) {
+      const forwarded = String(request.headers['x-forwarded-for'] || '').split(',')[0].trim();
+      if (forwarded) return forwarded.slice(0, 80);
+    }
+    return String(request.socket?.remoteAddress || 'unknown').slice(0, 80);
+  }
+
+  function allowAnonymousRequest(request, scope, { ipLimit, deviceLimit, windowMs }) {
+    if (config.authRateLimitEnabled === false || (!config.isProduction && config.authRateLimitEnabled == null)) return true;
+    const ip = clientAddress(request);
+    const agent = String(request.headers['user-agent'] || '').slice(0, 256);
+    const device = createHash('sha256').update(`${ip}|${agent}`).digest('hex').slice(0, 24);
+    return allowPublicWrite(`ip:${ip}`, scope, ipLimit, windowMs)
+      && allowPublicWrite(`device:${device}`, scope, deviceLimit, windowMs);
+  }
+
+  function tryStartVideoUpload() {
+    if (activeVideoUploads >= maxConcurrentVideoUploads) return null;
+    activeVideoUploads += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      activeVideoUploads = Math.max(0, activeVideoUploads - 1);
+    };
   }
 
   async function publicTargetExists(targetType, targetId) {
@@ -439,7 +611,7 @@ export function createApp({ repository, config = defaultConfig }) {
     if (!record || Date.parse(record.expiresAt) <= Date.now()) {
       if (record) {
         if (record.id) await repository.endResearchSession(record.id, record.expiresAt || new Date().toISOString(), 'session-expired').catch(() => {});
-        await repository.deleteSession(record.tokenHash);
+        await repository.deleteSession(record.tokenHash).catch((error) => console.warn('Expired session deletion failed:', error.message));
       }
       return null;
     }
@@ -460,6 +632,37 @@ export function createApp({ repository, config = defaultConfig }) {
       .finally(() => { sessionCleanup = null; });
   }
 
+  function maybeCleanupExpiredGuests() {
+    if (typeof repository.listAllUsers !== 'function'
+      || typeof repository.anonymizeUserData !== 'function'
+      || typeof repository.deleteSessionsByUser !== 'function') return;
+    const now = Date.now();
+    if (guestCleanup || now - lastGuestCleanupAt < guestCleanupIntervalMs) return;
+    lastGuestCleanupAt = now;
+    guestCleanup = (async () => {
+      const expired = (await repository.listAllUsers())
+        .filter((user) => user.guest === true && !user.guestExpired && Date.parse(user.guestExpiresAt || '') <= now)
+        .slice(0, Math.max(1, Number(config.guestCleanupBatchSize) || 25));
+      for (const user of expired) {
+        const anonymized = await repository.anonymizeUserData(user.id);
+        const anonymousId = anonymized?.anonymousId || `anonymous-${randomUUID()}`;
+        await repository.deleteSessionsByUser(user.id);
+        user.identity = `${anonymousId}@expired.local`;
+        user.username = anonymousId;
+        user.nickname = '过期访客';
+        user.spaceName = '已归档小窝';
+        user.passwordHash = '';
+        user.guest = false;
+        user.guestExpired = true;
+        user.guestExpiredAt = new Date(now).toISOString();
+        user.updatedAt = user.guestExpiredAt;
+        await repository.updateUser(user);
+      }
+      if (expired.length) console.info(JSON.stringify({ level: 'info', kind: 'guest_cleanup', removed_access: expired.length, at: new Date().toISOString() }));
+    })().catch((error) => console.warn('Expired guest cleanup failed:', error.message))
+      .finally(() => { guestCleanup = null; });
+  }
+
   function secureSessionCookie(request) {
     if (config.sessionCookieSecure === 'true') return true;
     if (config.sessionCookieSecure === 'false') return false;
@@ -468,6 +671,7 @@ export function createApp({ repository, config = defaultConfig }) {
   }
 
   async function issueSession(request, response, user, { subject: suppliedSubject = null } = {}) {
+    await ensureDefaultResearchCollection(user);
     const subject = suppliedSubject || (user.researchSubjectId
       ? { subject_id: user.researchSubjectId }
       : await ensureResearchIdentity(user));
@@ -480,7 +684,7 @@ export function createApp({ repository, config = defaultConfig }) {
     const researchSession = {
         session_id: session.id, user_id: user.id, subject_id: subject.subject_id,
         started_at: session.createdAt, consent_version: config.researchConsentVersion || 'research-v1',
-        research_allowed: Boolean(user.research), entry_surface: 'web_game', client_version: 'formal-v4', schema_version: '1',
+        research_allowed: true, entry_surface: 'web_game', client_version: 'formal-v4', schema_version: '1',
     };
     try {
       await Promise.all([
@@ -517,6 +721,7 @@ export function createApp({ repository, config = defaultConfig }) {
 
   async function handleApi(request, response, url) {
     maybeCleanupExpiredSessions();
+    maybeCleanupExpiredGuests();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !sameOrigin(request)) return apiError(response, 403, 'bad-origin', '请求来源无效。');
     if (request.method === 'OPTIONS') { response.writeHead(204, headers); return response.end(); }
 
@@ -529,7 +734,21 @@ export function createApp({ repository, config = defaultConfig }) {
       }
     }
 
+    if (url.pathname === '/api/config' && request.method === 'GET') {
+      return json(response, 200, {
+        ok: true,
+        limits: {
+          maxVideoBytes: config.maxVideoBytes,
+          maxVideoMegabytes: Math.max(1, Math.floor(config.maxVideoBytes / 1024 / 1024)),
+        },
+      });
+    }
+
     if (url.pathname === '/api/auth/register' && request.method === 'POST') {
+      if (!allowAnonymousRequest(request, 'auth-register', { ipLimit: 20, deviceLimit: 8, windowMs: 60 * 60_000 })) {
+        response.setHeader('retry-after', '3600');
+        return apiError(response, 429, 'rate-limited', '注册请求过于频繁，请稍后再试。');
+      }
       const body = await readJson(request, 64 * 1024);
       const identity = normalizeIdentity(body.identity);
       if (!validateIdentity(identity)) return apiError(response, 400, 'invalid-identity', '请输入有效邮箱或中国大陆 11 位手机号。');
@@ -543,7 +762,8 @@ export function createApp({ repository, config = defaultConfig }) {
       const user = existingUser || {
         id: randomUUID(), identity, username: String(body.username || '').trim().slice(0, 32) || internalUsername(identity),
         nickname: String(body.nickname || '').trim().slice(0, 32), spaceName: String(body.spaceName || '').trim().slice(0, 40),
-        research: Boolean(body.research), passwordHash: hashPassword(String(body.password)), guest: false,
+        avatar: 0, avatarImage: '', bio: '',
+        research: true, passwordHash: hashPassword(String(body.password)), guest: false,
         failedLoginCount: 0, frozenUntil: null, registrationStatus: 'pending',
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
@@ -574,6 +794,10 @@ export function createApp({ repository, config = defaultConfig }) {
     }
 
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
+      if (!allowAnonymousRequest(request, 'auth-login', { ipLimit: 60, deviceLimit: 20, windowMs: 15 * 60_000 })) {
+        response.setHeader('retry-after', '900');
+        return apiError(response, 429, 'rate-limited', '登录尝试过于频繁，请稍后再试。');
+      }
       const body = await readJson(request, 32 * 1024);
       const identity = normalizeIdentity(body.identity);
       const user = await repository.findUserByIdentity(identity);
@@ -598,30 +822,49 @@ export function createApp({ repository, config = defaultConfig }) {
     }
 
     if (url.pathname === '/api/auth/guest' && request.method === 'POST') {
-      const suffix = randomUUID().slice(0, 8);
-      const user = {
-        id: randomUUID(), identity: `guest-${suffix}@local`, username: `visitor-${suffix}`,
-        nickname: '路过的风', spaceName: '礁石小窝', research: false, passwordHash: '', guest: true,
-        failedLoginCount: 0, frozenUntil: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      };
-      user.researchSubjectId = `rs-${randomUUID()}`;
-      const [, subject] = await Promise.all([
-        repository.createUser(user),
-        ensureResearchIdentity(user, { skipLookup: true }),
+      if (!allowAnonymousRequest(request, 'auth-guest', { ipLimit: 30, deviceLimit: 12, windowMs: 60 * 60_000 })) {
+        response.setHeader('retry-after', '3600');
+        return apiError(response, 429, 'rate-limited', '访客进入过于频繁，请稍后再试。');
+      }
+      const body = await readJson(request, 4 * 1024);
+      const suppliedKey = String(body.guest_key || '').trim();
+      const safeKey = /^[A-Za-z0-9-]{16,80}$/.test(suppliedKey) ? suppliedKey : randomUUID();
+      const suffix = createHash('sha256').update(safeKey).digest('hex').slice(0, 16);
+      const identity = `guest-${suffix}@local`;
+      let user = await repository.findUserByIdentity(identity);
+      if (user && !user.guest) return apiError(response, 409, 'guest-identity-conflict', '访客身份发生冲突，请刷新后重试。');
+      if (!user) {
+        user = {
+          id: randomUUID(), identity, username: `visitor-${suffix.slice(0, 8)}`,
+          nickname: '路过的风', spaceName: '礁石小窝', research: true, passwordHash: '', guest: true,
+          failedLoginCount: 0, frozenUntil: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          guestExpiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
+        };
+        user.researchSubjectId = `rs-${randomUUID()}`;
+        const [, subject] = await Promise.all([
+          repository.createUser(user),
+          ensureResearchIdentity(user, { skipLookup: true }),
+        ]);
+        await Promise.all([
+          recordConsent(user, true, 'guest-registration', { subject, skipLookup: true }),
+          issueSession(request, response, user, { subject }),
+        ]);
+        return json(response, 201, { ok: true, resumed: false, user: exposeUser(user), state: null, version: 0 });
+      }
+      user.updatedAt = new Date().toISOString();
+      user.guestExpiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+      const [, bootstrap] = await Promise.all([
+        issueSession(request, response, user),
+        sessionBootstrap(user),
       ]);
-      await Promise.all([
-        recordConsent(user, false, 'guest-registration', { subject, skipLookup: true }),
-        issueSession(request, response, user, { subject }),
-      ]);
-      // A newly-created guest cannot have a world snapshot yet. Avoid an
-      // unnecessary remote-table lookup on the most latency-sensitive path.
-      return json(response, 201, { ok: true, user: exposeUser(user), state: null, version: 0 });
+      return json(response, 200, { ok: true, resumed: true, user: exposeUser(user), ...bootstrap });
     }
 
     if (url.pathname === '/api/auth/session' && request.method === 'GET') {
       const session = await currentSession(request);
       return json(response, 200, {
         ok: true,
+        worldClock: sharedWorldClock(),
         authenticated: Boolean(session),
         user: exposeUser(session?.user),
         ...(session ? await sessionBootstrap(session.user) : {}),
@@ -630,29 +873,38 @@ export function createApp({ repository, config = defaultConfig }) {
 
     if (url.pathname === '/api/profile' && request.method === 'PUT') {
       const user = await requireUser(request, response); if (!user) return;
-      const body = await readJson(request, 16 * 1024);
+      const body = await readJson(request, 128 * 1024);
       const nickname = cleanText(body.nickname, 32);
       const spaceName = cleanText(body.spaceName, 40);
+      const avatarImage = cleanAvatarImage(body.avatarImage);
       if (!nickname) return apiError(response, 400, 'profile-invalid', '昵称不能为空。');
+      if (avatarImage === null) return apiError(response, 400, 'avatar-invalid', '头像格式无效或图片数据过大。');
       user.nickname = nickname;
       if (spaceName) user.spaceName = spaceName;
+      user.bio = cleanText(body.bio, 120);
+      user.avatar = Math.max(0, Math.min(12, Number(body.avatar) || 0));
+      user.avatarImage = avatarImage;
       user.updatedAt = new Date().toISOString();
       await repository.updateUser(user);
       return json(response, 200, { ok: true, user: exposeUser(user) });
     }
 
     if (url.pathname === '/api/auth/logout' && request.method === 'POST') {
+      response.setHeader('set-cookie', sessionCookie('', { secure: secureSessionCookie(request), maxAge: 0 }));
       const token = parseCookies(request.headers.cookie).zhere_session;
       if (token) {
         const tokenHash = hashToken(token);
-        const record = sessionCache.get(tokenHash)?.record || await repository.getSession(tokenHash);
-        await Promise.all([
+        const record = await repository.getSession(tokenHash).catch((error) => {
+          console.warn('Logout session lookup failed:', error.message);
+          return sessionCache.get(tokenHash)?.record || null;
+        });
+        const cleanup = await Promise.allSettled([
           record?.id ? repository.endResearchSession(record.id, new Date().toISOString(), 'logout') : Promise.resolve(),
           repository.deleteSession(tokenHash),
         ]);
+        cleanup.filter((result) => result.status === 'rejected').forEach((result) => console.warn('Logout session cleanup failed:', result.reason?.message || result.reason));
         sessionCache.delete(tokenHash);
       }
-      response.setHeader('set-cookie', sessionCookie('', { secure: secureSessionCookie(request), maxAge: 0 }));
       return json(response, 200, { ok: true });
     }
 
@@ -671,20 +923,16 @@ export function createApp({ repository, config = defaultConfig }) {
 
     if (url.pathname === '/api/privacy/consent' && request.method === 'PUT') {
       const user = await requireUser(request, response); if (!user) return;
-      const body = await readJson(request, 16 * 1024);
-      user.research = Boolean(body.active);
-      user.researchConsentUpdatedAt = new Date().toISOString();
-      user.updatedAt = user.researchConsentUpdatedAt;
-      await repository.updateUser(user);
-      await recordConsent(user, user.research, 'settings-change');
-      return json(response, 200, { ok: true, user: exposeUser(user) });
+      await readJson(request, 16 * 1024);
+      await ensureDefaultResearchCollection(user);
+      return apiError(response, 409, 'collection-policy-fixed', '页面活动会按隐私说明记录；你仍可导出数据或申请删除并匿名化。');
     }
 
     if (url.pathname === '/api/privacy/research-status' && request.method === 'GET') {
       const user = await requireUser(request, response); if (!user) return;
       const health = await repository.getResearchHealth(user.id);
       const latestEventAgeMs = health.lastEventAt ? Math.max(0, Date.now() - Date.parse(health.lastEventAt)) : null;
-      const collecting = Boolean(user.research && health.subjectReady);
+      const collecting = Boolean(health.subjectReady);
       return json(response, 200, {
         ok: true,
         status: collecting ? (health.eventCount > 0 ? 'collecting' : 'ready') : 'paused',
@@ -804,10 +1052,10 @@ export function createApp({ repository, config = defaultConfig }) {
         mode: since ? 'delta' : 'full', cursor, nextCursor: hasMore ? cursor + limit : null,
         assets: pageAssets.filter((asset) => asset.status === 'published' && asset.moderationStatus !== 'hidden').map((asset) => publicAssetView(asset, user.id)),
         demands: pageDemands.filter((demand) => demand.status !== 'deleted' && demand.moderationStatus !== 'hidden').map((demand) => publicDemandView(demand, user.id)),
-        records: pageRecords.filter((record) => record.status !== 'deleted' && record.moderationStatus !== 'hidden').map((record) => publicRecordView(record, user.id)),
+        records: pageRecords.filter((record) => publicRecordVisibleTo(record, user.id)).map((record) => publicRecordView(record, user.id)),
         deletedAssetIds: pageAssets.filter((asset) => asset.status !== 'published' || asset.moderationStatus === 'hidden').map((asset) => asset.id),
         deletedDemandIds: pageDemands.filter((demand) => demand.status === 'deleted' || demand.moderationStatus === 'hidden').map((demand) => demand.id),
-        deletedRecordIds: pageRecords.filter((record) => record.status === 'deleted' || record.moderationStatus === 'hidden').map((record) => record.id),
+        deletedRecordIds: pageRecords.filter((record) => !publicRecordVisibleTo(record, user.id)).map((record) => record.id),
         refreshedAt: snapshotAt,
       });
     }
@@ -1144,42 +1392,49 @@ export function createApp({ repository, config = defaultConfig }) {
     if (url.pathname === '/api/public/assets/upload' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
       if (!allowPublicWrite(user.id, 'asset-upload-publish', 20, 60 * 60_000)) return apiError(response, 429, 'rate-limited', '发布过于频繁，请稍后再试。');
+      const releaseUpload = tryStartVideoUpload();
+      if (!releaseUpload) return apiError(response, 503, 'upload-busy', '当前上传人数较多，请稍后再试。');
       let upload;
-      try { upload = await readVideoMultipart(request, config); }
-      catch (error) { return apiError(response, error.status || 400, error.message || 'invalid-media', error.publicMessage || '视频上传格式无效。'); }
+      try {
+        try { upload = await readVideoMultipart(request, config); }
+        catch (error) { return apiError(response, error.status || 400, error.message || 'invalid-media', error.publicMessage || '视频上传格式无效。'); }
 
-      const { form, assetId, mediaInput } = upload;
-      const [existingMedia, existingPublic] = await Promise.all([
-        repository.getMedia(assetId),
-        repository.getPublicAssetCore ? repository.getPublicAssetCore(assetId) : repository.getPublicAsset(assetId),
-      ]);
-      if (existingMedia && existingMedia.userId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
-      if (existingPublic && existingPublic.ownerId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
-      if (existingPublic?.moderationStatus === 'hidden') return apiError(response, 403, 'asset-hidden', '该素材已被隐藏，不能通过重试重新发布。');
-      if (existingPublic?.status === 'published' && existingPublic.moderationStatus !== 'hidden') {
-        return json(response, 200, { ok: true, duplicate: true, reusedMedia: Boolean(existingMedia), asset: publicAssetView(existingPublic, user.id) });
+        const { form, assetId, mediaInput } = upload;
+        const [existingMedia, existingPublic] = await Promise.all([
+          repository.getMedia(assetId),
+          repository.getPublicAssetCore ? repository.getPublicAssetCore(assetId) : repository.getPublicAsset(assetId),
+        ]);
+        if (existingMedia && existingMedia.userId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
+        if (existingPublic && existingPublic.ownerId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
+        if (existingPublic?.moderationStatus === 'hidden') return apiError(response, 403, 'asset-hidden', '该素材已被隐藏，不能通过重试重新发布。');
+        if (existingPublic?.status === 'published' && existingPublic.moderationStatus !== 'hidden') {
+          return json(response, 200, { ok: true, duplicate: true, reusedMedia: Boolean(existingMedia), asset: publicAssetView(existingPublic, user.id) });
+        }
+
+        // Feishu cannot wrap Drive and Bitable in one transaction. Keeping a
+        // successfully uploaded private media row lets the same asset id resume
+        // publication without uploading the file again after a partial failure.
+        const media = existingMedia || await repository.saveMedia({ userId: user.id, ...mediaInput });
+        const body = {
+          id: assetId,
+          title: form.get('title'), description: form.get('description'),
+          wx: form.get('wx'), wy: form.get('wy'), zone: form.get('zone'),
+        };
+        const record = await repository.savePublicAsset(publicAssetRecord(user, body, media, existingPublic), { existing: existingPublic, skipLookup: !existingPublic });
+        return json(response, existingPublic ? 200 : 201, {
+          ok: true, duplicate: false, reusedMedia: Boolean(existingMedia),
+          asset: publicAssetView(record, user.id),
+          media: {
+            id: media.id, fileName: media.fileName, mime: media.mime, size: media.size,
+            mediaUrl: `/api/media/${encodeURIComponent(media.id)}`,
+            media_duration_sec: media.media_duration_sec ?? null, media_width: media.media_width ?? null,
+            media_height: media.media_height ?? null, media_bitrate_kbps: media.media_bitrate_kbps ?? null,
+          },
+        });
+      } finally {
+        await upload?.cleanup?.();
+        releaseUpload();
       }
-
-      // Feishu cannot wrap Drive and Bitable in one transaction. Keeping a
-      // successfully uploaded private media row lets the same asset id resume
-      // publication without uploading the file again after a partial failure.
-      const media = existingMedia || await repository.saveMedia({ userId: user.id, ...mediaInput });
-      const body = {
-        id: assetId,
-        title: form.get('title'), description: form.get('description'),
-        wx: form.get('wx'), wy: form.get('wy'), zone: form.get('zone'),
-      };
-      const record = await repository.savePublicAsset(publicAssetRecord(user, body, media, existingPublic), { existing: existingPublic, skipLookup: !existingPublic });
-      return json(response, existingPublic ? 200 : 201, {
-        ok: true, duplicate: false, reusedMedia: Boolean(existingMedia),
-        asset: publicAssetView(record, user.id),
-        media: {
-          id: media.id, fileName: media.fileName, mime: media.mime, size: media.size,
-          mediaUrl: `/api/media/${encodeURIComponent(media.id)}`,
-          media_duration_sec: media.media_duration_sec ?? null, media_width: media.media_width ?? null,
-          media_height: media.media_height ?? null, media_bitrate_kbps: media.media_bitrate_kbps ?? null,
-        },
-      });
     }
 
     if (url.pathname === '/api/public/assets' && request.method === 'POST') {
@@ -1296,15 +1551,14 @@ export function createApp({ repository, config = defaultConfig }) {
       if (!/^[a-z0-9_-]{2,80}$/i.test(demandId)) return apiError(response, 400, 'invalid-demand-id', '需求 ID 无效。');
       const existing = await repository.getPublicDemandCore(demandId);
       if (existing && existing.ownerId !== user.id) return apiError(response, 409, 'demand-id-exists', '该需求 ID 已被使用。');
-      const title = cleanText(body.title, 48);
-      if (!title) return apiError(response, 400, 'demand-title-required', '请填写需求标题。');
+      const demandInput = normalizeDemandInput(body, existing || {});
+      const demandError = validateDemandInput(demandInput);
+      if (demandError) return apiError(response, 400, demandError[0], demandError[1]);
       const now = new Date().toISOString();
       const record = await repository.savePublicDemand({
         ...(existing || {}), id: demandId, ownerId: user.id, ownerName: user.nickname || '匿名旅人', by: user.nickname || '匿名旅人',
-        title, description: cleanText(body.description, 360), type: body.type === 'commerce' ? 'commerce' : 'personal',
-        projectName: cleanText(body.projectName, 48), audience: cleanText(body.audience, 48), format: cleanText(body.format, 48),
-        quantity: Math.max(1, Math.min(99, Number(body.quantity) || 1)), budget: Math.max(0, Math.min(9999, Number(body.budget) || 0)),
-        deadline: cleanText(body.deadline, 20), status: ['open', 'closed'].includes(body.status) ? body.status : existing?.status || 'open',
+        ...demandInput,
+        status: ['open', 'closed'].includes(body.status) ? body.status : existing?.status || 'open',
         wx: cleanCoordinate(body.wx), wy: cleanCoordinate(body.wy), zone: cleanText(body.zone, 40),
         refAsset: cleanText(body.refAsset, 80) || null, assetLinks: Array.isArray(existing?.assetLinks) ? existing.assetLinks : [],
         createdAt: existing?.createdAt || now, updatedAt: now,
@@ -1321,18 +1575,15 @@ export function createApp({ repository, config = defaultConfig }) {
       if (!existing) return apiError(response, 404, 'demand-not-found', '需求不存在。');
       if (existing.ownerId !== user.id) return apiError(response, 403, 'not-demand-owner', '只有发布者可以修改需求。');
       const body = await readJson(request, 128 * 1024);
+      const demandContentFields = ['type', 'title', 'theme', 'description', 'durationSeconds', 'aspectRatioPreset', 'aspectRatioOther', 'resolutionPreset', 'resolutionOther', 'priceAmount', 'companyName', 'activityName', 'cooperationScope', 'region', 'skillRequirements', 'cooperationDescription', 'startAt', 'endAt'];
+      const editsDemandContent = demandContentFields.some((field) => Object.hasOwn(body, field));
+      const demandInput = editsDemandContent ? normalizeDemandInput(body, existing) : null;
+      const demandError = demandInput ? validateDemandInput(demandInput) : null;
+      if (demandError) return apiError(response, 400, demandError[0], demandError[1]);
       const updated = await repository.savePublicDemand({
         ...existing,
-        ...(body.title != null ? { title: cleanText(body.title, 48) } : {}),
-        ...(body.description != null ? { description: cleanText(body.description, 360) } : {}),
+        ...(demandInput || {}),
         ...(body.status != null && ['open', 'closed'].includes(body.status) ? { status: body.status } : {}),
-        ...(body.type != null ? { type: body.type === 'commerce' ? 'commerce' : 'personal' } : {}),
-        projectName: body.projectName != null ? cleanText(body.projectName, 48) : existing.projectName,
-        audience: body.audience != null ? cleanText(body.audience, 48) : existing.audience,
-        format: body.format != null ? cleanText(body.format, 48) : existing.format,
-        quantity: body.quantity != null ? Math.max(1, Math.min(99, Number(body.quantity) || 1)) : existing.quantity,
-        budget: body.budget != null ? Math.max(0, Math.min(9999, Number(body.budget) || 0)) : existing.budget,
-        deadline: body.deadline != null ? cleanText(body.deadline, 20) : existing.deadline,
         ...(typeof body.archived === 'boolean' ? { archived: body.archived } : {}),
         updatedAt: new Date().toISOString(),
       });
@@ -1447,18 +1698,18 @@ export function createApp({ repository, config = defaultConfig }) {
       const user = await requireUser(request, response); if (!user) return;
       if (!allowPublicWrite(user.id, 'public-record', 50)) return apiError(response, 429, 'rate-limited', '公共互动过于频繁，请稍后再试。');
       const body = await readJson(request, 64 * 1024);
-      const allowedKinds = new Set(['asset_relation', 'bench_message', 'bottle_reply', 'follow', 'loose_tag']);
+      const allowedKinds = new Set(['asset_relation', 'bench_message', 'bottle_reply', 'frame_message', 'follow', 'loose_tag', 'space_snapshot', 'content_rating', 'content_share', 'content_tag', 'space_message']);
       const kind = cleanText(body.kind, 40);
       if (!allowedKinds.has(kind)) return apiError(response, 400, 'invalid-record-kind', '公共互动类型无效。');
-      const id = cleanText(body.id, 80) || `${kind}-${randomUUID()}`;
+      let id = cleanText(body.id, 80) || `${kind}-${randomUUID()}`;
       const payload = body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload) ? body.payload : {};
       if (kind === 'asset_relation') {
         const aId = cleanText(payload.aId, 80); const bId = cleanText(payload.bId, 80);
         if (!aId || !bId || aId === bId) return apiError(response, 400, 'invalid-relation', '请选择两段不同素材。');
         payload.aId = aId; payload.bId = bId; payload.type = ['echo', 'contrast', 'sequence', 'unresolved'].includes(payload.type) ? payload.type : 'unresolved'; payload.note = cleanText(payload.note, 300);
       }
-      if (kind === 'bench_message' || kind === 'bottle_reply') payload.text = cleanText(payload.text, 180);
-      if ((kind === 'bench_message' || kind === 'bottle_reply') && !payload.text) return apiError(response, 400, 'empty-record', '请填写内容。');
+      if (kind === 'bench_message' || kind === 'bottle_reply' || kind === 'frame_message' || kind === 'space_message') payload.text = cleanText(payload.text, 180);
+      if ((kind === 'bench_message' || kind === 'bottle_reply' || kind === 'frame_message' || kind === 'space_message') && !payload.text) return apiError(response, 400, 'empty-record', '请填写内容。');
       if (kind === 'loose_tag') {
         payload.tag = cleanText(payload.tag, 24);
         payload.wx = cleanCoordinate(payload.wx);
@@ -1466,9 +1717,54 @@ export function createApp({ repository, config = defaultConfig }) {
         payload.zone = cleanText(payload.zone, 40);
         if (payload.tag.length < 2) return apiError(response, 400, 'invalid-loose-tag', '标签至少需要 2 个字。');
       }
+      if (kind === 'space_snapshot') {
+        payload.spaceId = `space-${user.id}`;
+        payload.nickname = cleanText(payload.nickname, 16) || '匿名旅人';
+        payload.spaceName = cleanText(payload.spaceName, 24) || '未命名小窝';
+        payload.avatar = Math.max(0, Math.min(12, Number(payload.avatar) || 0));
+        payload.avatarImage = cleanAvatarImage(payload.avatarImage) || '';
+        payload.decor = Array.isArray(payload.decor) ? payload.decor.map((item) => cleanText(item, 32)).filter(Boolean).slice(0, 30) : [];
+        payload.stickers = Array.isArray(payload.stickers) ? payload.stickers.map((item) => cleanText(item, 48)).filter(Boolean).slice(0, 40) : [];
+        payload.placedAssetIds = Array.isArray(payload.placedAssetIds) ? payload.placedAssetIds.map((item) => cleanText(item, 80)).filter(Boolean).slice(0, 20) : [];
+        payload.buildings = Array.isArray(payload.buildings) ? payload.buildings.map((item) => cleanText(item, 32)).filter(Boolean).slice(0, 12) : [];
+        payload.day = Math.max(1, Math.min(100000, Number(payload.day) || 1));
+      }
+      if (kind === 'follow' || kind === 'content_share' || kind === 'space_message') {
+        payload.targetSpaceId = cleanText(payload.targetSpaceId, 80);
+        const targetSpace = (await repository.listPublicRecords()).find((record) => record.kind === 'space_snapshot' && record.id === payload.targetSpaceId && record.status !== 'deleted');
+        if (!targetSpace) return apiError(response, 404, 'target-space-not-found', '这个公开小窝已经不在小径上了。');
+        if (targetSpace.ownerId === user.id) return apiError(response, 400, 'self-target-not-allowed', '不用把纸条递给自己的小窝。');
+        payload.targetUserId = targetSpace.ownerId;
+        if (kind === 'follow') id = stablePublicRecordId('follow', user.id, targetSpace.ownerId);
+      }
+      if (kind === 'content_rating' || kind === 'content_share' || kind === 'content_tag') {
+        payload.targetType = cleanText(payload.targetType, 20);
+        payload.targetId = cleanText(payload.targetId, 80);
+        if (!['asset', 'demand'].includes(payload.targetType) || !payload.targetId) return apiError(response, 400, 'invalid-content-target', '要互动的内容已经不存在。');
+        const targetExists = payload.targetType === 'asset'
+          ? (payload.targetId.startsWith('v-') || Boolean(await repository.getPublicAsset(payload.targetId)))
+          : (payload.targetId.startsWith('sys-n-') || Boolean(await repository.getPublicDemandCore(payload.targetId)));
+        if (!targetExists) return apiError(response, 404, 'content-target-not-found', '要互动的内容已经不存在。');
+      }
+      if (kind === 'content_rating') {
+        payload.rate = Number(payload.rate);
+        if (!Number.isInteger(payload.rate) || payload.rate < 1 || payload.rate > 5) return apiError(response, 400, 'invalid-content-rating', '请选择 1 到 5 枚印记。');
+        id = stablePublicRecordId('rating', user.id, payload.targetType, payload.targetId);
+      }
+      if (kind === 'content_share') {
+        id = stablePublicRecordId('share', user.id, payload.targetType, payload.targetId, payload.targetUserId);
+      }
+      if (kind === 'content_tag') {
+        if (payload.targetType !== 'asset') return apiError(response, 400, 'tag-target-must-be-asset', '标签只能贴在素材旁。');
+        payload.tag = cleanText(payload.tag, 24).replace(/\s+/g, ' ');
+        if (payload.tag.length < 2) return apiError(response, 400, 'invalid-content-tag', '标签至少需要 2 个字。');
+        id = stablePublicRecordId('content-tag', user.id, payload.targetId, payload.tag.toLocaleLowerCase('zh-CN'));
+      }
+      const now = new Date().toISOString();
+      const existingRecord = (await repository.listPublicRecords({ includeDeleted: true })).find((record) => record.id === id);
       const record = await repository.savePublicRecord({
         id, kind, ownerId: user.id, ownerName: user.nickname || '匿名旅人', name: user.nickname || '匿名旅人',
-        payload, status: 'published', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        payload, status: 'published', createdAt: existingRecord?.createdAt || now, updatedAt: now,
       });
       if (!record) return apiError(response, 409, 'record-owner-conflict', '该公共记录已属于其他用户。');
       return json(response, 201, { ok: true, record: publicRecordView(record, user.id) });
@@ -1560,16 +1856,15 @@ export function createApp({ repository, config = defaultConfig }) {
       const body = await readJson(request, config.maxJsonBytes);
       const rawEvents = Array.isArray(body.events) ? body.events.slice(0, 200) : [];
       const validated = rawEvents.map((event) => ({ raw: event, ...validateTelemetryEvent(event) }));
-      const events = validated.map((entry) => entry.event).filter(Boolean);
+      const events = validated.map((entry) => entry.event).filter(Boolean).map((event) => ({ ...event, research_consent: true }));
       const rejectedIds = validated.filter((entry) => !entry.event && entry.raw?.event_id).map((entry) => String(entry.raw.event_id));
       const rejectionReasons = Object.fromEntries(validated.filter((entry) => !entry.event && entry.raw?.event_id).map((entry) => [String(entry.raw.event_id), entry.error]));
       if (!events.length) return json(response, 200, { ok: true, accepted: [], acknowledged: [], rejected: rejectedIds.length, rejected_ids: rejectedIds, rejection_reasons: rejectionReasons });
-      const allowedEvents = user.research ? events : events.filter((event) => ESSENTIAL_EVENTS.has(event.raw_event));
       const subject = await ensureResearchIdentity(user);
-      const accepted = await repository.appendEvents(user.id, allowedEvents, subject.subject_id);
+      const accepted = await repository.appendEvents(user.id, events, subject.subject_id);
       // 投影到研究事实表：只处理本次真正新落库的事件，避免重放重复写入；失败只告警。
       const acceptedSet = new Set(accepted);
-      const newlyAccepted = allowedEvents.filter((event) => acceptedSet.has(event.event_id));
+      const newlyAccepted = events.filter((event) => acceptedSet.has(event.event_id));
       if (newlyAccepted.length) {
         try { await projectResearchEvents(repository, newlyAccepted, user.id, subject.subject_id); }
         catch (error) { console.warn(`research post-processing failed: ${error.message}`); }
@@ -1584,17 +1879,24 @@ export function createApp({ repository, config = defaultConfig }) {
 
     if (url.pathname === '/api/media' && request.method === 'POST') {
       const user = await requireUser(request, response); if (!user) return;
+      const releaseUpload = tryStartVideoUpload();
+      if (!releaseUpload) return apiError(response, 503, 'upload-busy', '当前上传人数较多，请稍后再试。');
       let upload;
-      try { upload = await readVideoMultipart(request, config); }
-      catch (error) { return apiError(response, error.status || 400, error.message || 'invalid-media', error.publicMessage || '视频上传格式无效。'); }
-      const { assetId, mediaInput } = upload;
-      const existing = await repository.getMedia(assetId);
-      if (existing && existing.userId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
-      if (existing) return json(response, 200, { ok: true, duplicate: true, asset: { ...existing, storageKey: undefined, mediaUrl: `/api/media/${encodeURIComponent(existing.id)}` } });
-      const asset = await repository.saveMedia({
-        userId: user.id, ...mediaInput,
-      });
-      return json(response, 201, { ok: true, asset: { ...asset, storageKey: undefined, mediaUrl: `/api/media/${encodeURIComponent(asset.id)}` } });
+      try {
+        try { upload = await readVideoMultipart(request, config); }
+        catch (error) { return apiError(response, error.status || 400, error.message || 'invalid-media', error.publicMessage || '视频上传格式无效。'); }
+        const { assetId, mediaInput } = upload;
+        const existing = await repository.getMedia(assetId);
+        if (existing && existing.userId !== user.id) return apiError(response, 409, 'asset-id-exists', '该素材 ID 已被使用。');
+        if (existing) return json(response, 200, { ok: true, duplicate: true, asset: { ...existing, storageKey: undefined, mediaUrl: `/api/media/${encodeURIComponent(existing.id)}` } });
+        const asset = await repository.saveMedia({
+          userId: user.id, ...mediaInput,
+        });
+        return json(response, 201, { ok: true, asset: { ...asset, storageKey: undefined, mediaUrl: `/api/media/${encodeURIComponent(asset.id)}` } });
+      } finally {
+        await upload?.cleanup?.();
+        releaseUpload();
+      }
     }
 
     if (url.pathname.startsWith('/api/media/') && request.method === 'GET') {
@@ -1645,14 +1947,19 @@ export function createApp({ repository, config = defaultConfig }) {
   async function serveStatic(request, response, url) {
     if (url.pathname === '/') { response.writeHead(302, { location: APP_PREFIX }); return response.end(); }
     if (!url.pathname.startsWith(APP_PREFIX)) return apiError(response, 404, 'not-found', '页面不存在。');
-    const relative = decodeURIComponent(url.pathname.slice(APP_PREFIX.length)) || 'index.html';
-    const target = path.resolve(config.appDir, relative);
-    if (!target.startsWith(path.resolve(config.appDir))) return apiError(response, 403, 'forbidden', '无权访问。');
+    if (!['GET', 'HEAD'].includes(request.method)) {
+      response.setHeader('allow', 'GET, HEAD');
+      return apiError(response, 405, 'method-not-allowed', '该页面请求方式无效。');
+    }
+    const target = publicStaticTarget(config.appDir, url.pathname.slice(APP_PREFIX.length));
+    if (!target) return apiError(response, 404, 'not-found', '页面不存在。');
     try {
       const stat = await fs.stat(target);
-      const file = stat.isDirectory() ? path.join(target, 'index.html') : target;
-      const bytes = await fs.readFile(file);
-      response.writeHead(200, { ...headers, 'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'content-length': bytes.length, 'cache-control': config.isProduction ? 'public, max-age=300' : 'no-store' });
+      if (!stat.isFile()) return apiError(response, 404, 'not-found', '页面不存在。');
+      const responseHeaders = { ...headers, 'content-type': MIME[path.extname(target).toLowerCase()] || 'application/octet-stream', 'content-length': stat.size, 'cache-control': config.isProduction ? 'public, max-age=300' : 'no-store' };
+      if (request.method === 'HEAD') { response.writeHead(200, responseHeaders); return response.end(); }
+      const bytes = await fs.readFile(target);
+      response.writeHead(200, responseHeaders);
       response.end(bytes);
     } catch {
       apiError(response, 404, 'not-found', '页面不存在。');

@@ -61,7 +61,6 @@ const HOME_CAPACITY = 20;
 const RAW_EVENT_CAP = 600;
 const TELEMETRY_SCHEMA_VERSION = 2;
 const TELEMETRY_SESSION_ID = crypto.randomUUID ? crypto.randomUUID() : `session-${Date.now()}-${Math.random()}`;
-const ESSENTIAL_EVENTS = new Set(['register', 'login', 'logout', 'research_consent_change', 'deletion_request', 'data_export', 'feedback']);
 const daySeed = Math.floor(Date.now() / 86400000);
 const RESOURCE_RESPAWN_DAYS = 1;
 const PLOT_COUNT = 16;
@@ -71,30 +70,41 @@ let cottageExitArmed = false;
 let pointerMoveTarget = null;
 let pointerMoveSequence = 0;
 let publicSyncPromise = null;
+let publicSyncRenderRequested = false;
 let notificationSyncPromise = null;
 let lastPublicSyncAt = 0;
 let lastNotificationSyncAt = 0;
-const PUBLIC_SYNC_INTERVAL_MS = 5000;
-const NOTIFICATION_SYNC_INTERVAL_MS = 5000;
+const PUBLIC_SYNC_INTERVAL_MS = 12000;
+const NOTIFICATION_SYNC_INTERVAL_MS = 15000;
+let backgroundSyncTimer = null;
+let spaceSnapshotTimer = null;
+let lastPublishedSpaceSignature = '';
 let performanceWindowStartedAt = performance.now();
 let performanceWindowFrames = 0;
 let performanceLastFrameAt = performanceWindowStartedAt;
 let performanceLongestFrameMs = 0;
 let worldNodeSizeCache = new WeakMap();
+let worldViewportMetrics = { width: 0, height: 0, centerX: 0, anchorY: 0 };
 let terrainRenderOrigin = null;
 let terrainRenderVersion = 0;
 let terrainRenderPending = false;
 let terrainRenderHandle = null;
+let terrainLayers = null;
+const terrainChunkCache = new Map();
+let terrainChunkUseClock = 0;
+const TERRAIN_CHUNK_CACHE_LIMIT = 180;
 let auraRenderSignature = '';
 let lastWorldContextUpdateAt = 0;
 let worldFrameRegistry = null;
 const WORLD_CONTEXT_INTERVAL_MS = 100;
-const TERRAIN_OVERSCAN_X = 1100;
-const TERRAIN_OVERSCAN_Y = 820;
-const WORLD_NODE_OVERSCAN_X = 560;
-const WORLD_NODE_OVERSCAN_Y = 440;
-const AMBIENT_UPDATE_INTERVAL_MS = 16;
+const TERRAIN_OVERSCAN_X = 1800;
+const TERRAIN_OVERSCAN_Y = 1400;
+const WORLD_NODE_OVERSCAN_X = 900;
+const WORLD_NODE_OVERSCAN_Y = 720;
+const AMBIENT_UPDATE_INTERVAL_MS = 100;
 let lastAmbientUpdateAt = 0;
+let contextHintMode = 'hidden';
+let contextHintTimer = null;
 
 const worldRegistryObserver = new MutationObserver(() => { worldFrameRegistry = null; });
 [screenLayer, creationLayer, resourceLayer, decoLayer, auraLayer].forEach((layer) => {
@@ -131,6 +141,8 @@ const {
   freshPlots,
   mulberry32,
   zoneAt,
+  gameplayAchievementKey,
+  applyWalletChange,
 } = globalThis.ZhereWorldFoundation;
 
 const VIDEO_POOL = [
@@ -333,6 +345,7 @@ const defaultState = {
   research: true,
   anonymized: false,
   eventChoice: 'none',
+  worldEventChoices: {},
   exposureCounts: {},
   lastKeptDay: '',
   following: false,
@@ -351,9 +364,23 @@ const defaultState = {
   guideIntroSeen: false,
   onboarding: { status: 'new', step: 0, watchedAssetId: '', respondedDemandId: '', gathered: false, homeChanged: false },
   notificationReadAt: '',
+  publicContentVersion: 0,
+  growthStats: { eventCounts: {}, openedAssetIds: [], processedEventIds: [], achievementKeys: [], updatedAt: '' },
+  economy: { version: 1, earned: 0, spent: 0, transactions: [] },
+  zoneEventChoices: {},
+  seenZoneEventOccurrences: [],
+  npcStories: {
+    chiye: { step: 1, completed: false, metAt: '' },
+    nanzhi: { step: 1, completed: false, metAt: '' },
+  },
   homestead: JSON.parse(JSON.stringify(HOMESTEAD_DEFAULT)),
-  profile: { nickname: '路过的风', username: 'visitor', bio: '收集不太确定的影像', interests: '海、树、慢节奏', spaceName: '礁石小窝', avatar: 0, avatarImage: '' },
+  profile: { nickname: '路过的风', username: 'visitor', bio: '收集不太确定的影像', interests: '海、树、慢节奏', spaceName: '礁石小窝', avatar: 0, avatarImage: '', spacePublic: true },
 };
+
+function safeAvatarImage(value) {
+  const image = String(value || '');
+  return image.length <= 48 * 1024 && /^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(image) ? image : '';
+}
 
 function normalizeState(source = {}) {
   try {
@@ -364,12 +391,21 @@ function normalizeState(source = {}) {
       ...(loaded.homestead || {}),
       resources: { ...HOMESTEAD_DEFAULT.resources, ...(loaded.homestead?.resources || {}) },
       buildings: { ...HOMESTEAD_DEFAULT.buildings, ...(loaded.homestead?.buildings || {}) },
+      buildingPlacements: loaded.homestead?.buildingPlacements && typeof loaded.homestead.buildingPlacements === 'object'
+        ? loaded.homestead.buildingPlacements
+        : {},
       plots: Array.isArray(loaded.homestead?.plots) && loaded.homestead.plots.length === PLOT_COUNT
         ? loaded.homestead.plots.map((plot) => ({ state: 'wild', stage: 0, growth: Number(plot.stage || 0), cropId: plot.state === 'planted' ? 'fieldbean' : '', watered: false, ...plot }))
         : freshPlots(),
       decor: Array.isArray(loaded.homestead?.decor) ? loaded.homestead.decor : [],
       forageDays: loaded.homestead?.forageDays || {},
     };
+    if (loaded.homestead.buildings.workbench && !loaded.homestead.buildingPlacements.workbench) {
+      loaded.homestead.buildingPlacements.workbench = {
+        x: Math.round(Math.max(9, Math.min(91, Number(loaded.cottageX) || 50))),
+        y: Math.round(Math.max(25, Math.min(86, Number(loaded.cottageY) || 62))),
+      };
+    }
     loaded.bag = Array.isArray(loaded.bag) ? loaded.bag : [];
     if (!loaded.benchMessages.length) loaded.benchMessages = [{ name: '木秋', text: '海风把白天的声音都吹散了。' }];
     loaded.demandDrafts = Array.isArray(loaded.demandDrafts) ? loaded.demandDrafts : [];
@@ -389,8 +425,60 @@ function normalizeState(source = {}) {
     loaded.journalStickers = Array.isArray(loaded.journalStickers) ? loaded.journalStickers : [];
     loaded.homeStickers = Array.isArray(loaded.homeStickers) ? loaded.homeStickers : [];
     loaded.profile = { ...defaultState.profile, ...(loaded.profile || {}) };
+    loaded.profile.avatarImage = safeAvatarImage(loaded.profile.avatarImage);
     loaded.onboarding = { ...defaultState.onboarding, ...(loaded.onboarding || {}) };
+    loaded.zoneEventChoices = loaded.zoneEventChoices && typeof loaded.zoneEventChoices === 'object' && !Array.isArray(loaded.zoneEventChoices) ? loaded.zoneEventChoices : {};
+    loaded.worldEventChoices = loaded.worldEventChoices && typeof loaded.worldEventChoices === 'object' && !Array.isArray(loaded.worldEventChoices) ? loaded.worldEventChoices : {};
+    // Migrate the old single-day visual choice without letting it leak into future days.
+    if (loaded.eventChoice && loaded.eventChoice !== 'none' && !loaded.worldEventChoices[loaded.homestead.day]) {
+      loaded.worldEventChoices[loaded.homestead.day] = loaded.eventChoice;
+    }
+    loaded.seenZoneEventOccurrences = Array.isArray(loaded.seenZoneEventOccurrences)
+      ? [...new Set(loaded.seenZoneEventOccurrences.map(String))].slice(-180)
+      : [];
+    loaded.npcStories = {
+      ...defaultState.npcStories,
+      ...(loaded.npcStories && typeof loaded.npcStories === 'object' ? loaded.npcStories : {}),
+    };
+    Object.entries(loaded.npcStories).forEach(([npcId, progress]) => {
+      loaded.npcStories[npcId] = { ...defaultState.npcStories[npcId], ...(progress || {}) };
+    });
     loaded.notificationReadAt = String(loaded.notificationReadAt || '');
+    loaded.publicContentVersion = Math.max(0, Number(loaded.publicContentVersion) || 0);
+    loaded.wallet = Math.max(0, Number(loaded.wallet) || 0);
+    loaded.economy = {
+      version: 1,
+      earned: Math.max(0, Number(loaded.economy?.earned) || 0),
+      spent: Math.max(0, Number(loaded.economy?.spent) || 0),
+      transactions: Array.isArray(loaded.economy?.transactions) ? loaded.economy.transactions.filter((entry) => entry?.id && Number.isFinite(Number(entry.amount))).slice(-240) : [],
+    };
+    if (!loaded.economy.transactions.length) {
+      loaded.economy.transactions.push({ id: 'wallet-opening-balance', type: 'opening', amount: loaded.wallet, balance: loaded.wallet, label: '初始灵感币', sourceId: 'account', createdAt: loaded.createdAt || new Date().toISOString() });
+    }
+    loaded.growthStats = {
+      eventCounts: { ...(loaded.growthStats?.eventCounts || {}) },
+      openedAssetIds: Array.isArray(loaded.growthStats?.openedAssetIds) ? [...new Set(loaded.growthStats.openedAssetIds.map(String))] : [],
+      processedEventIds: Array.isArray(loaded.growthStats?.processedEventIds) ? [...new Set(loaded.growthStats.processedEventIds.map(String))].slice(-1200) : [],
+      achievementKeys: Array.isArray(loaded.growthStats?.achievementKeys) ? [...new Set(loaded.growthStats.achievementKeys.map(String))].slice(-2400) : [],
+      updatedAt: String(loaded.growthStats?.updatedAt || ''),
+    };
+    loaded.journalEntries
+      .filter((entry) => entry?.type === 'asset' && entry.assetId)
+      .forEach((entry) => {
+        if (!loaded.growthStats.openedAssetIds.includes(entry.assetId)) loaded.growthStats.openedAssetIds.push(entry.assetId);
+      });
+    loaded.growthStats.openedAssetIds.forEach((assetId) => {
+      const key = `asset_open:${assetId}`;
+      if (!loaded.growthStats.achievementKeys.includes(key)) loaded.growthStats.achievementKeys.push(key);
+    });
+    loaded.discoveredZones.forEach((zoneId) => {
+      const key = `zone_discover:${zoneId}`;
+      if (!loaded.growthStats.achievementKeys.includes(key)) loaded.growthStats.achievementKeys.push(key);
+    });
+    loaded.discoveries.forEach((discovery) => {
+      const key = `rare_discovery_found:${discovery.id}`;
+      if (!loaded.growthStats.achievementKeys.includes(key)) loaded.growthStats.achievementKeys.push(key);
+    });
     loaded.notes = (loaded.notes || []).map((note) => ({ status: 'open', owner: 'me', ...note }));
     return loaded;
   } catch {
@@ -451,7 +539,7 @@ let lastPersistWarningAt = 0;
 
 function serializableState() {
   const serializable = { ...state };
-  ['keys', 'nearest', 'activeVideo', 'videoOpenedAt', 'lastTime', 'carryTag', 'carryPlaced', 'pendingCopyPlacement', 'approached', 'avoidLogged', 'openedVideos', 'impressionAccum', 'activeGatherables', 'gatherRenderKey', 'gathering', 'commentReplyTo', 'activeObjectUrl', 'lastImpressions', 'publicAssets', 'pendingUploads', 'publicDemands', 'publicRecords', 'publicWorldUpdatedAt', 'pricingPurchases', 'notifications', 'rawEvents'].forEach((field) => delete serializable[field]);
+  ['keys', 'nearest', 'activeVideo', 'videoOpenedAt', 'lastTime', 'carryTag', 'carryPlaced', 'pendingCopyPlacement', 'approached', 'avoidLogged', 'openedVideos', 'impressionAccum', 'activeGatherables', 'gatherRenderKey', 'gathering', 'commentReplyTo', 'activeObjectUrl', 'lastImpressions', 'publicAssets', 'pendingUploads', 'publicDemands', 'publicRecords', 'publicWorldUpdatedAt', 'worldClock', 'pricingPurchases', 'notifications', 'rawEvents', 'zoneEventsOfDay', 'dynamicLocations', 'dynamicLocationsDay', 'dynamicLocationsVersion', 'loggedDynamicSpawns', 'seenZoneEvents'].forEach((field) => delete serializable[field]);
   return serializable;
 }
 
@@ -504,6 +592,47 @@ function enhanceTabKeyboard(container, selector, panelForButton) {
   sync();
 }
 
+function applyResolvedWorldProgress(snapshot) {
+  if (!snapshot?.state || typeof snapshot.state !== 'object') throw new Error('服务端进度暂时无法读取，请重试。');
+  stopMovement(true);
+  closeContextWheel();
+  Object.assign(state, normalizeState(snapshot.state));
+  state.keys.clear();
+  state.nearest = null;
+  state.activeVideo = null;
+  state.videoOpenedAt = 0;
+  state.carryTag = null;
+  state.carryPlaced = null;
+  state.pendingCopyPlacement = null;
+  state.gathering = null;
+  state.approached.clear();
+  state.avoidLogged.clear();
+  state.openedVideos.clear();
+  state.lastImpressions.clear();
+  state.impressionAccum = {};
+  state.activeGatherables = [];
+  state.gatherRenderKey = '';
+  player.classList.remove('is-moving', 'is-gathering');
+  worldVideos.forEach((video) => {
+    const base = VIDEO_POOL.find((item) => item.id === video.id);
+    Object.assign(video, base || {}, state.assetOverrides[video.id] || {});
+  });
+  const cottage = state.worldMode === 'cottage';
+  worldStage.classList.toggle('is-cottage', cottage);
+  worldArt.hidden = true;
+  homesteadLayer.hidden = !cottage;
+  cottageExit.hidden = !cottage;
+  if (cottage) {
+    renderPlaced();
+    renderHomestead();
+  }
+  renderScreens();
+  updateCounters();
+  refreshIdentity();
+  renderWorld();
+  updateHudState();
+}
+
 window.addEventListener('zhere:world-state-conflict', (event) => {
   if (worldConflictOpen) return;
   worldConflictOpen = true;
@@ -521,29 +650,66 @@ window.addEventListener('zhere:world-state-conflict', (event) => {
       </div>
     </div>
   `, () => {
-    $('#loadServerProgress').addEventListener('click', async () => {
-      $('#loadServerProgress').disabled = true;
-      await window.ZhereService.resolveWorldStateConflict('server');
-      location.reload();
+    const serverButton = $('#loadServerProgress');
+    const localButton = $('#keepLocalProgress');
+    serverButton.addEventListener('click', async () => {
+      setPendingButton(serverButton, true, '正在载入…');
+      localButton.disabled = true;
+      try {
+        const resolved = await window.ZhereService.resolveWorldStateConflict('server');
+        applyResolvedWorldProgress(resolved);
+        worldConflictOpen = false;
+        sheet.dataset.dismissible = 'true';
+        $('#sheetClose').hidden = false;
+        $('#sheetClose').disabled = false;
+        closeSheet();
+        showToast('已载入服务端的最新进度');
+      } catch (error) {
+        setPendingButton(serverButton, false);
+        localButton.disabled = false;
+        showToast(error.message || '服务端进度载入失败，请重试');
+      }
     });
-    $('#keepLocalProgress').addEventListener('click', async () => {
-      $('#keepLocalProgress').disabled = true;
+    localButton.addEventListener('click', async () => {
+      setPendingButton(localButton, true, '正在保留…');
+      serverButton.disabled = true;
       try {
         await window.ZhereService.resolveWorldStateConflict('local');
         worldConflictOpen = false;
+        sheet.dataset.dismissible = 'true';
+        $('#sheetClose').hidden = false;
+        $('#sheetClose').disabled = false;
         closeSheet();
         showToast('已保留本页进度');
       } catch (error) {
-        worldConflictOpen = false;
-        closeSheet();
+        setPendingButton(localButton, false);
+        serverButton.disabled = false;
         showToast(error.message || '进度保存失败，请重试');
       }
     });
-  });
+  }, { dismissible: false });
 });
 
 function fmtNow() {
   return new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function datetimeLocalValue(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return '';
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function demandIsoTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+}
+
+function demandTimeLabel(value) {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '未填写';
 }
 
 sheet.addEventListener('keydown', (event) => {
@@ -585,7 +751,8 @@ async function getUploadFile(id) {
 function validateMediaFile(file) {
   if (!file) return '';
   if (!file.type.startsWith('video/')) return '目前只支持视频文件，请选择 MP4、WebM 等视频格式。';
-  if (file.size > 20 * 1024 * 1024) return '当前正式存储单个视频不能超过 20MB，请压缩后重新选择。';
+  const limits = window.ZhereService?.limits?.() || { maxVideoBytes: 100 * 1024 * 1024, maxVideoMegabytes: 100 };
+  if (file.size > limits.maxVideoBytes) return `当前正式存储单个视频不能超过 ${limits.maxVideoMegabytes}MB，请压缩后重新选择。`;
   return '';
 }
 
@@ -827,7 +994,16 @@ function refreshIdentity() {
 }
 
 function creatorScore() {
-  return countEvent('bid_accepted') * 3 + countEvent('copy_placed_home') * 2 + countEvent('publish_asset') + countEvent('publish_demand') + countEvent('like') + Math.floor(countEvent('tag_add') / 2) + state.discoveries.length * 2 + Math.floor(countEvent('homestead_crop_harvested') / 2);
+  return countEvent('bid_accepted') * 3
+    + countEvent('copy_placed_home') * 2
+    + countEvent('publish_asset')
+    + countEvent('publish_demand')
+    + countEvent('like')
+    + Math.floor(countEvent('tag_add') / 2)
+    + countEvent('rare_discovery_found') * 2
+    + Math.floor(countEvent('homestead_crop_harvested') / 2)
+    + Math.floor(countEvent('asset_open') / 3)
+    + countEvent('zone_discover');
 }
 
 function creatorLevel() {
@@ -864,6 +1040,9 @@ function nearestTarget() {
   state.activeGatherables.forEach((item) => consider(Math.hypot(state.wx - item.wx, state.wy - item.wy), { type: 'resource', item }));
   NAMELESS_REGIONS.forEach((region) => consider(Math.hypot(state.wx - region.x, state.wy - region.y), { type: 'nameless', region }));
   if (state.bottleState?.open === false) consider(Math.hypot(state.wx - state.bottleState.wx, state.wy - state.bottleState.wy), { type: 'bottle' });
+  if (typeof activeZoneEvents === 'function') activeZoneEvents().forEach((entry) => consider(Math.hypot(state.wx - entry.spot.wx, state.wy - entry.spot.wy), { type: 'zone-event', zoneId: entry.zoneId, event: entry.event }));
+  if (typeof visibleDynamicLocations === 'function') visibleDynamicLocations().forEach((loc) => consider(Math.hypot(state.wx - loc.wx, state.wy - loc.wy), { type: 'dynamic-location', loc }));
+  if (typeof visibleNpcNodes === 'function') visibleNpcNodes().forEach((entry) => consider(Math.hypot(state.wx - entry.wx, state.wy - entry.wy), { type: 'npc', npcId: entry.npcId }));
   return result;
 }
 
@@ -876,12 +1055,30 @@ function hintVideo() {
   return keys.join(' · ');
 }
 
+function hideContextHint(mode = '') {
+  if (mode && contextHintMode !== mode) return;
+  clearTimeout(contextHintTimer);
+  contextHintTimer = null;
+  contextHintMode = 'hidden';
+  contextHint.hidden = true;
+}
+
+function showContextHint(content, { mode = 'interaction', duration = 0, userInitiated = false } = {}) {
+  // 靠近只更新可交互目标，不主动打断探索；交互提示必须来自一次明确点击。
+  if (mode === 'interaction' && !userInitiated) return;
+  clearTimeout(contextHintTimer);
+  contextHintTimer = null;
+  contextHintMode = mode;
+  contextHint.innerHTML = content;
+  contextHint.hidden = false;
+  if (duration > 0) contextHintTimer = setTimeout(() => hideContextHint(mode), duration);
+}
+
 function updateHudState() {
   const tasking = !sheet.hidden || !profileDrawer.hidden || !contextWheel.hidden || !entry.classList.contains('is-gone');
   const hudState = tasking ? 'tasking'
-    : state.nearest ? 'near'
-      : (player.classList.contains('is-moving') || pointerMoveTarget || state.keys.size) ? 'moving'
-        : 'idle';
+    : (player.classList.contains('is-moving') || pointerMoveTarget || state.keys.size) ? 'moving'
+      : 'idle';
   if (worldStage.dataset.hudState !== hudState) {
     worldStage.dataset.hudState = hudState;
     document.body.dataset.hudState = hudState;
@@ -891,48 +1088,12 @@ function updateHudState() {
 function updateNearby() {
   const previousId = state.nearest?.type === 'video' ? state.nearest.video.id : state.nearest?.type === 'note' ? state.nearest.note.id : null;
   state.nearest = nearestTarget();
-  $$('.media-screen').forEach((node) => node.classList.toggle('is-near', state.nearest?.type === 'video' && node.dataset.videoId === state.nearest.video.id));
-  $$('.player-creation').forEach((node) => node.classList.toggle('is-near', state.nearest?.type === 'note' && node.dataset.creationId === state.nearest.note.id));
-  $$('.world-object').forEach((node) => node.classList.toggle('is-near', state.nearest?.type === 'object' && state.nearest.id === node.dataset.object));
+  $$('.media-screen, .player-creation, .world-object').forEach((node) => node.classList.remove('is-near'));
   if (state.nearest?.type === 'video') {
-    contextHint.innerHTML = `《${escapeHtml(state.nearest.video.title)}》 · ${hintVideo()}`;
     if (!state.approached.has(state.nearest.video.id)) {
       state.approached.add(state.nearest.video.id);
       logEvent('approach', { asset_id: state.nearest.video.id });
     }
-  } else if (state.nearest?.type === 'note') {
-    contextHint.innerHTML = `一张纸条「${escapeHtml(state.nearest.note.title)}」 · <kbd>E</kbd> 展开看看`;
-  } else if (state.nearest?.type === 'tagplant') {
-    contextHint.innerHTML = `一株标签植物「${state.nearest.tag}」 · <kbd>E</kbd> 拔下来带走`;
-  } else if (state.nearest?.type === 'loosetag') {
-    contextHint.innerHTML = `旅人留下的标签「${escapeHtml(state.nearest.tag.tag)}」 · <kbd>E</kbd> 捡一枚副本`;
-  } else if (state.nearest?.type === 'sticker') {
-    contextHint.innerHTML = `发现贴纸「${escapeHtml(state.nearest.sticker.label)}」 · <kbd>E</kbd> 收进贴纸册`;
-  } else if (state.nearest?.type === 'resource') {
-    const item = state.nearest.item;
-    contextHint.innerHTML = `${item.label} · <kbd>E</kbd> 收集 · 消耗 ${item.energy} 体力 · 明天再生`;
-  } else if (state.nearest?.type === 'bottle') {
-    contextHint.innerHTML = '一只漂流瓶被冲到了这里 · <kbd>E</kbd> 打开';
-  } else if (state.nearest?.type === 'nameless') {
-    const name = state.namedZones[state.nearest.region.id];
-    contextHint.innerHTML = name ? `「${escapeHtml(name)}」 · <kbd>E</kbd> 改个名字` : '一处无名之地 · <kbd>E</kbd> 给它起个名字';
-  } else if (state.nearest?.type === 'object') {
-    contextHint.innerHTML = `${state.nearest.hint.replace('E ', '<kbd>E</kbd> ')} · <kbd>?</kbd> 这是什么`;
-  } else if (state.worldMode === 'cottage' && cottageExitArmed && cottageExitDistance() <= 14) {
-    contextHint.innerHTML = '继续沿左侧小径行走即可回到公域 · 也可以点击路牌自动走过去';
-  } else if (state.carryTag) {
-    contextHint.innerHTML = `你带着标签「${state.carryTag}」 · 靠近视频按 <kbd>F</kbd> 贴上去`;
-  } else {
-    if (pointerMoveTarget) {
-      const currentX = state.worldMode === 'cottage' ? state.cottageX : state.wx;
-      const currentY = state.worldMode === 'cottage' ? state.cottageY : state.wy;
-      const destination = pointerMoveTarget.destination || pointerMoveTarget;
-      const remaining = Math.max(0, Math.round(Math.hypot(destination.x - currentX, destination.y - currentY)));
-      const targetName = pointerMoveTarget.label ? `「${escapeHtml(pointerMoveTarget.label)}」` : '落点';
-      contextHint.innerHTML = `正在前往${targetName} · 约 ${remaining} 步 · 再点地面可改道 · <kbd>Esc</kbd> 取消`;
-    } else contextHint.innerHTML = state.worldMode === 'cottage'
-      ? '点击地块开荒、翻土、播种和浇水 · <kbd>?</kbd> 图鉴 · <kbd>R</kbd> 休息到明天'
-      : `<kbd>WASD</kbd> 行走 · 点击地面自动走到落点 · <kbd>?</kbd> 图鉴 · <kbd>J</kbd> 手账 · 当前在${currentZoneName()}`;
   }
   if (previousId && (!state.nearest || (state.nearest.video?.id || state.nearest.note?.id) !== previousId) && !state.openedVideos.has(previousId) && !state.avoidLogged.has(previousId)) {
     state.avoidLogged.add(previousId);
@@ -1108,6 +1269,124 @@ function toggleFavoriteVideo(video) {
   showVideo(video);
 }
 
+function contentRecords(kind, targetType, targetId, { mineOnly = false } = {}) {
+  return state.publicRecords.filter((record) => record.kind === kind
+    && record.status !== 'deleted'
+    && record.payload?.targetType === targetType
+    && record.payload?.targetId === targetId
+    && (!mineOnly || record.owner === 'me'));
+}
+
+function myContentRating(targetType, targetId) {
+  return contentRecords('content_rating', targetType, targetId, { mineOnly: true })[0] || null;
+}
+
+function contentFeedbackMarkup(targetType, targetId, { own = false } = {}) {
+  const rating = myContentRating(targetType, targetId);
+  const shared = contentRecords('content_share', targetType, targetId, { mineOnly: true }).length;
+  return `<section class="content-feedback" aria-label="内容印象与分享">
+    <div class="content-feedback-copy"><h3>留下印象</h3><p>${own ? '自己的内容不参与评分，但可以递给邻居。' : '用 1—5 枚叶印记录它对你的帮助程度；再次选择会更新原来的印象。'}</p></div>
+    ${own ? '' : `<div class="rating-leaves" role="group" aria-label="选择一到五枚叶印">${[1, 2, 3, 4, 5].map((rate) => `<button class="rating-leaf${Number(rating?.payload?.rate) === rate ? ' is-selected' : ''}" type="button" data-content-rate="${rate}" aria-pressed="${Number(rating?.payload?.rate) === rate}"><span aria-hidden="true">${rate}</span><small>${rate === 1 ? '一点帮助' : rate === 5 ? '非常有用' : `${rate} 枚`}</small></button>`).join('')}</div>`}
+    <button class="paper-button content-share-button" type="button" data-content-share>${shared ? `已递给 ${shared} 位邻居 · 继续分享` : '递给一位邻居'}</button>
+    <p class="form-error content-feedback-error" role="alert"></p>
+  </section>`;
+}
+
+function replacePublicRecord(record) {
+  state.publicRecords = [...state.publicRecords.filter((item) => item.id !== record.id), record];
+}
+
+async function saveContentRating(targetType, targetId, rate, onSaved) {
+  const error = $('.content-feedback-error', sheet);
+  const buttons = $$('[data-content-rate]', sheet);
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'content_rating', payload: { targetType, targetId, rate } });
+    replacePublicRecord(result.record);
+    logEvent(targetType === 'asset' ? 'asset_rate' : 'demand_rate', { [`${targetType}_id`]: targetId, rate, record_id: result.record.id });
+    onSaved?.();
+    showToast(`留下了 ${rate} 枚叶印，可以随时改写`);
+  } catch (requestError) {
+    buttons.forEach((button) => { button.disabled = false; });
+    if (error) error.textContent = requestError.message || '印象没有保存，请重试。';
+  }
+}
+
+function showContentSharePicker({ targetType, targetId, title, onBack }) {
+  const spaces = publicSpaces().filter((record) => record.owner !== 'me');
+  const sharedSpaceIds = new Set(contentRecords('content_share', targetType, targetId, { mineOnly: true }).map((record) => record.payload?.targetSpaceId));
+  openSheet(`<div class="sheet-inner share-path-sheet">
+    <button class="text-button sheet-back-button" id="sharePickerBack" type="button">← 返回${targetType === 'asset' ? '素材' : '需求'}</button>
+    <h2 class="sheet-title" id="sheetTitle" tabindex="-1">把线索递上邻居小径</h2>
+    <p class="sheet-subtitle">选择一间公开小窝，把《${escapeHtml(title)}》递过去。每位邻居只记一次分享，不会公开你的评分。</p>
+    ${spaces.length ? `<div class="share-neighbor-list">${spaces.map((record) => {
+      const space = record.payload || {};
+      const already = sharedSpaceIds.has(space.spaceId || record.id);
+      return `<button class="share-neighbor-row" type="button" data-share-space="${escapeHtml(space.spaceId || record.id)}" ${already ? 'disabled' : ''}><span class="share-neighbor-mark" aria-hidden="true"></span><b>${escapeHtml(space.nickname || record.name || '匿名旅人')}</b><small>${escapeHtml(space.spaceName || '未命名小窝')}</small><em>${already ? '已递过' : '递过去'}</em></button>`;
+    }).join('')}</div>` : '<div class="empty-state"><b>小径上还没有别人的公开小窝</b><p>等有玩家公开自己的空间后，就能把素材和需求递给对方。</p></div>'}
+    <p class="form-error" id="sharePickerError" role="alert"></p>
+  </div>`, () => {
+    $('#sharePickerBack')?.addEventListener('click', () => onBack?.());
+    $$('[data-share-space]', sheet).forEach((button) => button.addEventListener('click', async () => {
+      setPendingButton(button, true, '正在沿小径递送…');
+      try {
+        const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'content_share', payload: { targetType, targetId, targetSpaceId: button.dataset.shareSpace } });
+        replacePublicRecord(result.record);
+        logEvent(targetType === 'asset' ? 'asset_share' : 'demand_share', { [`${targetType}_id`]: targetId, target_space_id: button.dataset.shareSpace, record_id: result.record.id });
+        onBack?.();
+        showToast('线索已经递到邻居的小窝');
+      } catch (error) {
+        setPendingButton(button, false);
+        $('#sharePickerError').textContent = error.message || '线索没有递出去，请重试。';
+      }
+    }));
+  });
+}
+
+function bindContentFeedback({ targetType, targetId, title, own = false, onRefresh }) {
+  if (!own) $$('[data-content-rate]', sheet).forEach((button) => button.addEventListener('click', () => saveContentRating(targetType, targetId, Number(button.dataset.contentRate), onRefresh)));
+  $('[data-content-share]', sheet)?.addEventListener('click', () => showContentSharePicker({ targetType, targetId, title, onBack: onRefresh }));
+}
+
+function communityTagStats(video) {
+  const stats = new Map();
+  (video.tags || []).forEach((tag) => stats.set(tag, { tag, count: 0, selected: false, source: 'published' }));
+  (video.tagStats || []).forEach((item) => stats.set(item.tag, { tag: item.tag, count: Number(item.count) || 0, selected: Boolean(item.selected), source: 'community' }));
+  contentRecords('content_tag', 'asset', video.id).forEach((record) => {
+    const tag = record.payload?.tag;
+    if (!tag) return;
+    const current = stats.get(tag) || { tag, count: 0, selected: false, source: 'community' };
+    current.count += 1;
+    current.selected ||= record.owner === 'me';
+    current.source = 'community';
+    stats.set(tag, current);
+  });
+  return [...stats.values()].sort((a, b) => Number(b.selected) - Number(a.selected) || b.count - a.count || a.tag.localeCompare(b.tag, 'zh-CN'));
+}
+
+async function setCommunityTag(video, tag, active) {
+  const publicAsset = state.publicAssets.some((asset) => asset.id === video.id);
+  if (publicAsset) {
+    const result = await window.ZhereService.publicWorld.setAssetTag(video.id, tag, active);
+    Object.assign(video, result.asset);
+  } else {
+    const existing = contentRecords('content_tag', 'asset', video.id, { mineOnly: true }).find((record) => record.payload?.tag === tag);
+    if (active && !existing) {
+      const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'content_tag', payload: { targetType: 'asset', targetId: video.id, tag } });
+      replacePublicRecord(result.record);
+    }
+    if (!active && existing) {
+      await window.ZhereService.publicWorld.deleteRecord(existing.id);
+      state.publicRecords = state.publicRecords.filter((record) => record.id !== existing.id);
+    }
+  }
+  if (active) video.tags = [...new Set([...(video.tags || []), tag])];
+  else if (!communityTagStats(video).some((item) => item.tag === tag && (item.selected || item.count > 0))) video.tags = (video.tags || []).filter((value) => value !== tag);
+  commitVideoState(video);
+  persist();
+  logEvent(active ? 'tag_add' : 'tag_remove', { asset_id: video.id, tag, source: 'community' });
+}
+
 function showVideo(video) {
   const demoMediaUrl = video ? demoMediaFor(video) : '';
   if (!video) return showToast('这段素材暂时不可用');
@@ -1120,6 +1399,7 @@ function showVideo(video) {
   const hasCopy = state.copies.some((copy) => copy.assetId === video.id) || state.placed.some((placed) => placed.assetId === video.id || (placed.parts || []).includes(video.id));
   const publicAsset = state.publicAssets.find((asset) => asset.id === video.id);
   const ownsPublicAsset = publicAsset?.owner === 'me';
+  const communityTags = communityTagStats(video);
   const relatedNotes = relatedNotesForVideo(video.id);
   const assetRelations = relationsForAsset(video.id);
   const relationRows = assetRelations.map((relation) => {
@@ -1132,12 +1412,19 @@ function showVideo(video) {
   openSheet(`
     <div class="sheet-inner media-sheet">
       <div class="media-detail-layout">
+        <header class="media-detail-header">
+          <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(video.title)}</h2>
+          <p class="sheet-subtitle">${video.catalogOnly ? '这段素材今天没有出现在地图上，但详情和回应仍然保留。' : `这段公共视频留在${zone.name}。`}你可以整理它、回应需求，或把不同片段连成一条线索。</p>
+          <div class="meta-chips"><span class="chip">${zone.name}</span><span class="chip">${escapeHtml(video.spawn_source || '公共素材')}</span><span class="chip">时长 ${escapeHtml(video.dur || '—')}</span><span class="chip">${escapeHtml(video.res || '—')}</span><span class="chip">授权 · ${escapeHtml(video.license || '一次视频素材授权')}</span></div>
+        </header>
         <section class="media-visual-column" aria-label="素材播放与快捷操作">
           <div class="video-frame" id="videoFrame">${mediaFrameMarkup(video)}</div>
+          <p class="video-status" id="videoStatus" aria-live="polite"></p>
           <button class="primary-button media-play-button" id="playButton" type="button">播放 / 暂停</button>
           <div class="media-quick-actions">
             <button class="paper-button" id="likeButton" type="button">${liked ? '已喜欢' : '喜欢'}</button>
             <button class="paper-button" id="favoriteVideoButton" type="button">${favorite ? '取消收藏' : '收藏'}</button>
+            ${state.carryTag ? `<button class="paper-button" id="plantTagButton" type="button">贴上携带的标签「${escapeHtml(state.carryTag)}」</button>` : ''}
             <button class="text-button" id="focusCommentButton" type="button">写一条回应</button>
           </div>
           <p class="media-watch-note">播放、停留、点赞和收藏分别记录；不会自动产生购买。</p>
@@ -1155,15 +1442,13 @@ function showVideo(video) {
               </div>
             </details>
           </div>
-          <div class="note-section media-tag-section"><h3>标签</h3><div class="tag-row">${(video.tags || []).map((tag) => `<button class="tag-button is-selected" data-tag="${escapeHtml(tag)}" type="button">${escapeHtml(tag)} ×</button>`).join('')}</div><form id="customTagForm"><input name="customTag" maxlength="24" placeholder="添加自定义标签" /><button class="paper-button" type="submit">贴上</button><p class="form-error" id="customTagError"></p></form></div>
         </section>
         <section class="media-detail-column">
-          <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(video.title)}</h2>
-          <p class="sheet-subtitle">${video.catalogOnly ? '这段素材今天没有出现在地图上，但详情和回应仍然保留。' : `这段公共视频留在${zone.name}。`}你可以整理它、回应需求，或把不同片段连成一条线索。</p>
-          <div class="meta-chips"><span class="chip">${zone.name}</span><span class="chip">${escapeHtml(video.spawn_source || '公共素材')}</span><span class="chip">时长 ${escapeHtml(video.dur || '—')}</span><span class="chip">${escapeHtml(video.res || '—')}</span><span class="chip">授权 · ${escapeHtml(video.license || '一次视频素材授权')}</span></div>
+          ${contentFeedbackMarkup('asset', video.id, { own: ownsPublicAsset })}
           <div class="note-section"><h3>回应素材</h3><div id="commentList">${renderVideoComments(video)}</div><form id="commentForm"><input name="comment" maxlength="300" placeholder="描述你看见的东西" /><button class="primary-button" type="submit">留下回应</button></form><div id="replyComposer" hidden><button id="cancelReply" type="button">取消回复</button></div></div>
           ${relatedNotes.length ? `<div class="note-section"><h3>可以回应的需求</h3>${relatedNotes.slice(0, 4).map((note) => `<button class="relation-row media-linked-row" data-open-note="${escapeHtml(note.id)}" type="button"><span>需求</span><b>${escapeHtml(note.title)}</b><small>${escapeHtml(note.type || '个人需求')} · ${escapeHtml(note.status || '开放中')}</small></button>`).join('')}</div>` : ''}
           ${assetRelations.length ? `<div class="note-section media-relation-section"><h3>一起看过的片段</h3><p class="section-intro">这些片段曾被放在一起看。点开可以继续整理当时留下的线索。</p>${relationRows}</div>` : ''}
+          <div class="note-section media-tag-section"><h3>路过的人这样形容</h3><p class="section-intro">数字表示有多少位旅人认同这枚标签；你只能摘下自己贴过的那一枚。</p><div class="tag-row">${communityTags.map((item) => `<button class="tag-button${item.selected ? ' is-selected' : ''}" data-community-tag="${escapeHtml(item.tag)}" type="button" aria-pressed="${item.selected}"><span>${escapeHtml(item.tag)}</span>${item.count ? `<small>${item.count}</small>` : '<small>原始</small>'}</button>`).join('')}</div><form id="customTagForm"><input name="customTag" maxlength="24" placeholder="补上一种新的感觉" /><button class="paper-button" type="submit">贴上</button><p class="form-error" id="customTagError"></p></form></div>
         </section>
       </div>
     </div>
@@ -1176,6 +1461,7 @@ function showVideo(video) {
     });
     $('#likeButton')?.addEventListener('click', () => toggleLike(video));
     $('#favoriteVideoButton')?.addEventListener('click', () => toggleFavoriteVideo(video));
+    bindContentFeedback({ targetType: 'asset', targetId: video.id, title: video.title, own: ownsPublicAsset, onRefresh: () => showVideo(video) });
     $('#openBidButton')?.addEventListener('click', () => openBidPanel(video));
     $('#compareButton')?.addEventListener('click', () => showComparePicker(video));
     $('#linkNoteButton')?.addEventListener('click', () => showLinkNote(video));
@@ -1189,46 +1475,18 @@ function showVideo(video) {
     }));
     const plantTagButton = $('#plantTagButton', sheet);
     if (plantTagButton) plantTagButton.addEventListener('click', () => plantCarriedTag(video));
-    $$('.tag-button', sheet).forEach((button) => button.addEventListener('click', async () => {
-      const tag = button.dataset.tag;
-      video.tags = video.tags || [];
-      const active = !button.classList.contains('is-selected');
-      if (state.publicAssets.some((asset) => asset.id === video.id)) {
-        const previousTags = [...video.tags];
-        video.tags = active ? [...new Set([...video.tags, tag])] : video.tags.filter((value) => value !== tag);
-        button.classList.toggle('is-selected', active);
-        button.dataset.idleLabel = active ? `${tag} ×` : tag;
-        setPendingButton(button, true, active ? '已贴上 · 同步中' : '已摘下 · 同步中');
-        try {
-          const result = await window.ZhereService.publicWorld.setAssetTag(video.id, tag, active);
-          Object.assign(video, result.asset);
-        } catch (error) {
-          video.tags = previousTags;
-          button.classList.toggle('is-selected', previousTags.includes(tag));
-          button.dataset.idleLabel = previousTags.includes(tag) ? `${tag} ×` : tag;
-          setPendingButton(button, false);
-          return showToast(`${error.message || '标签保存失败'}，已恢复原状态`);
-        }
-        commitVideoState(video);
-        logEvent(active ? 'tag_add' : 'tag_remove', { asset_id: video.id, tag, ...(active ? { source: 'sheet' } : {}) });
-        persist();
+    $$('[data-community-tag]', sheet).forEach((button) => button.addEventListener('click', async () => {
+      const tag = button.dataset.communityTag;
+      const active = button.getAttribute('aria-pressed') !== 'true';
+      setPendingButton(button, true, active ? '正在贴上…' : '正在摘下…');
+      try {
+        await setCommunityTag(video, tag, active);
         showVideo(video);
-        showToast(active ? `贴上了标签「${tag}」` : `已取消你贴的「${tag}」`);
-        return;
-      } else if (!active) {
-        video.tags = video.tags.filter((value) => value !== tag);
-      } else video.tags.push(tag);
-      if (!active) {
-        button.remove();
-        logEvent('tag_remove', { asset_id: video.id, tag });
-        showToast(`摘掉了标签「${tag}」`);
-      } else {
-        button.classList.add('is-selected');
-        button.textContent = `${tag} ×`;
-        logEvent('tag_add', { asset_id: video.id, tag, source: 'sheet' });
+        showToast(active ? `你也贴上了「${tag}」` : `已摘下你贴过的「${tag}」`);
+      } catch (error) {
+        setPendingButton(button, false);
+        showToast(`${error.message || '标签保存失败'}，原来的标签没有改变`);
       }
-      commitVideoState(video);
-      persist();
     }));
     $('#customTagForm').addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -1236,17 +1494,12 @@ function showVideo(video) {
       const tag = input.value.trim().replace(/\s+/g, ' ');
       const error = $('#customTagError');
       if (tag.length < 2) return error.textContent = '标签至少需要 2 个字。';
-      if ((video.tags || []).includes(tag)) return error.textContent = '这段视频已经有这个标签。';
+      const existingTag = communityTagStats(video).find((item) => item.tag === tag);
+      if (existingTag?.selected) return error.textContent = '你已经贴过这枚标签了。';
       state.customTags = [...new Set([...state.customTags, tag])].slice(-24);
-      if (state.publicAssets.some((asset) => asset.id === video.id)) {
-        try {
-          const result = await window.ZhereService.publicWorld.setAssetTag(video.id, tag, true);
-          Object.assign(video, result.asset);
-        } catch (requestError) { return error.textContent = requestError.message || '标签保存失败。'; }
-      } else video.tags = [...(video.tags || []), tag];
-      commitVideoState(video);
+      try { await setCommunityTag(video, tag, true); }
+      catch (requestError) { return error.textContent = requestError.message || '标签保存失败。'; }
       logEvent('custom_tag_create', { asset_id: video.id, tag });
-      persist();
       showVideo(video);
       showToast(`已创建并贴上「${tag}」`);
     });
@@ -1554,13 +1807,12 @@ function revisitJournalPlace(zoneId) {
   const entry = state.journalEntries.find((item) => item.type === 'zone' && item.id === zoneId);
   if (!entry) return showToast('这页地点记录已经褪色了');
   if (state.worldMode === 'cottage') exitCottage();
-  state.wx = Number(entry.wx) || 0;
-  state.wy = Number(entry.wy) || 0;
-  recordJournalEntry('zone', entry.id, entry.title, { wx: state.wx, wy: state.wy });
+  state.guidanceTarget = { wx: Number(entry.wx) || 0, wy: Number(entry.wy) || 0, label: entry.title };
+  recordJournalEntry('zone', entry.id, entry.title, { wx: state.guidanceTarget.wx, wy: state.guidanceTarget.wy });
   persist();
   closeSheet();
   renderWorld();
-  showToast(`沿着手账的折痕，回到了「${entry.title}」附近`);
+  showToast(`手账已经标出「${entry.title}」的方向`);
 }
 
 function openJournalEntry(key) {
@@ -1697,16 +1949,12 @@ async function togglePlayback(video) {
 
 async function plantCarriedTag(video) {
   if (!state.carryTag) return;
-  video.tags = video.tags || [];
-  if (state.publicAssets.some((asset) => asset.id === video.id)) {
-    try {
-      const result = await window.ZhereService.publicWorld.setAssetTag(video.id, state.carryTag, true);
-      Object.assign(video, result.asset);
-    } catch (error) { return showToast(error.message || '标签保存失败'); }
-  } else if (!video.tags.includes(state.carryTag)) video.tags.push(state.carryTag);
-  commitVideoState(video);
-  logEvent('tag_add', { asset_id: video.id, tag: state.carryTag, source: 'tag_plant' });
   const tag = state.carryTag;
+  if (communityTagStats(video).some((item) => item.tag === tag && item.selected)) {
+    return showToast(`你已经给《${video.title}》贴过「${tag}」了`);
+  }
+  try { await setCommunityTag(video, tag, true); }
+  catch (error) { return showToast(error.message || '标签保存失败'); }
   state.carryTag = null;
   persist();
   closeSheet();
@@ -1790,8 +2038,30 @@ function showNoteDetail(note) {
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(note.title)}</h2>
       <p class="sheet-subtitle">${note.type === 'commerce' ? '模拟商业需求' : '个人需求'} · 发布人 ${escapeHtml(note.by || state.profile.nickname)} · ${escapeHtml(zoneAt(note.wx, note.wy).name)}${note.createdAt ? ' · ' + escapeHtml(note.createdAt) : ''} · ${closed ? '已关闭' : '开放回应'}</p>
       ${own ? `<div class="demand-owner-actions"><button class="paper-button" id="editDemand" type="button">修改纸条</button><button class="paper-button" id="toggleDemandStatus" type="button">${closed ? '重新开放' : '关闭需求'}</button>${state.publicDemands.some((item) => item.id === note.id) ? `<button class="paper-button" id="toggleDemandArchive" type="button">${note.archived ? '恢复到地图' : '收进档案'}</button>` : ''}<button class="danger-button" id="deleteDemand" type="button">删除</button></div>` : state.publicDemands.some((item) => item.id === note.id) ? '<div class="demand-owner-actions"><button class="text-button" id="reportDemand" type="button">举报这张需求</button></div>' : ''}
-      ${note.description ? `<div class="status-banner">${escapeHtml(note.description)}</div>` : ''}
-      ${note.type === 'commerce' ? `<div class="commerce-summary"><div><span>项目</span><b>${escapeHtml(note.projectName || '未填写')}</b></div><div><span>受众</span><b>${escapeHtml(note.audience || '未填写')}</b></div><div><span>规格</span><b>${escapeHtml(note.format || '未填写')}</b></div><div><span>数量</span><b>${escapeHtml(note.quantity || 1)} 段</b></div><div><span>虚拟预算</span><b>${escapeHtml(note.budget || 0)} 灵感币</b></div><div><span>截止</span><b>${escapeHtml(note.deadline || '开放')}</b></div></div><div class="danger-zone"><b>模拟说明</b><p>此需求不形成真实合同、支付或授权。所有金额都是灵感币虚拟预算。</p></div>` : ''}
+      ${contentFeedbackMarkup('demand', note.id, { own })}
+      ${note.type === 'personal' && note.description ? `<div class="status-banner">${escapeHtml(note.description)}</div>` : ''}
+      ${note.type === 'commerce' ? `
+        <div class="commerce-summary demand-detail-grid">
+          <div><span>公司</span><b>${escapeHtml(note.companyName || note.projectName || '未填写')}</b></div>
+          <div><span>活动</span><b>${escapeHtml(note.activityName || note.title)}</b></div>
+          <div><span>合作范围</span><b>${escapeHtml(note.cooperationScope || '未填写')}</b></div>
+          <div><span>所在地区</span><b>${escapeHtml(note.region || '未填写')}</b></div>
+          <div><span>预算意向</span><b>${escapeHtml(note.priceAmount || note.budget || 0)} 灵感币</b></div>
+          <div><span>开放时间</span><b>${escapeHtml(demandTimeLabel(note.startAt))}—${escapeHtml(demandTimeLabel(note.endAt || note.deadline))}</b></div>
+        </div>
+        <div class="note-section"><h3>技能需求</h3><p>${escapeHtml(note.skillRequirements || '未填写')}</p></div>
+        <div class="note-section"><h3>合作描述</h3><p>${escapeHtml(note.cooperationDescription || note.description || '未填写')}</p></div>
+        <div class="danger-zone"><b>灵感币说明</b><p>预算是需求侧智能定价信号；发布时不扣除或冻结，也不直接形成素材成交价。</p></div>
+      ` : `
+        <div class="commerce-summary demand-detail-grid">
+          <div><span>主题</span><b>${escapeHtml(note.theme || '未填写')}</b></div>
+          <div><span>时长</span><b>${escapeHtml(note.durationSeconds || '未填写')} 秒</b></div>
+          <div><span>尺寸</span><b>${escapeHtml(note.aspectRatio || '未填写')}</b></div>
+          <div><span>分辨率</span><b>${escapeHtml(note.resolution || '未填写')}</b></div>
+          <div><span>报价意向</span><b>${escapeHtml(note.priceAmount || 0)} 灵感币</b></div>
+          <div><span>开放时间</span><b>${escapeHtml(demandTimeLabel(note.startAt))}—${escapeHtml(demandTimeLabel(note.endAt))}</b></div>
+        </div>
+      `}
       ${refVideo ? `<div class="meta-chips"><span class="chip">参考视频 · ${escapeHtml(refVideo.title)}</span><button class="text-button" id="openRef">去看参考视频</button></div>` : ''}
       <div class="note-section relation-section"><h3>关联视频 ${linkedVideos.length}</h3>
         <div class="relation-list">${linkedVideos.length ? linkedVideos.map((video) => `<button class="relation-row" type="button" data-linked-video="${escapeHtml(video.id)}"><span>视频</span><b>${escapeHtml(video.title)}</b><small>打开播放</small></button>`).join('') : '<div class="empty-state">还没有视频与这张需求相连。回应时可以直接选择一段。</div>'}</div>
@@ -1817,6 +2087,7 @@ function showNoteDetail(note) {
       </form>`}
     </div>
   `, () => {
+    bindContentFeedback({ targetType: 'demand', targetId: note.id, title: note.title, own, onRefresh: () => showNoteDetail(note) });
     $('#noteResponseForm')?.addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
@@ -2004,31 +2275,57 @@ function showLeaveNote(referenceVideo = null, record = null) {
   const isPublished = !!record && (state.notes.some((note) => note.id === record.id) || state.publicDemands.some((note) => note.id === record.id && note.owner === 'me'));
   const isPublicRecord = !!record && state.publicDemands.some((note) => note.id === record.id);
   const initialType = record?.type || 'personal';
+  const initialAspectPreset = record?.aspectRatioPreset || (['16:9', '9:16', '4:3', '3:4', '1:1'].includes(record?.aspectRatio) ? record.aspectRatio : record?.aspectRatio ? 'other' : '');
+  const initialResolutionPreset = record?.resolutionPreset || (['1080p', '720p', '4K', '2K', '480p'].includes(record?.resolution) ? record.resolution : record?.resolution ? 'other' : '');
   openSheet(`
-    <div class="sheet-inner">
+    <div class="sheet-inner demand-editor-sheet">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${isPublished ? '修改需求纸条' : record ? '继续编辑草稿' : '在这里留一张纸条'}</h2>
-      <p class="sheet-subtitle">${isPublished ? '修改后纸条仍留在原来的位置，已有回应和素材关联不会消失。' : `你正站在${currentZoneName()}。发布后纸条会出现在当前位置附近；保存草稿则不会出现在公共世界。`}${referenceVideo ? ` 这张纸条会引用《${escapeHtml(referenceVideo.title)}》。` : ''}</p>
-      <form id="leaveNoteForm">
-        <label>类型
-          <span class="option-row">
-            <label><input type="radio" name="noteType" value="personal" ${initialType === 'personal' ? 'checked' : ''} /> 个人需求</label>
-            <label><input type="radio" name="noteType" value="commerce" ${initialType === 'commerce' ? 'checked' : ''} /> 模拟商业需求</label>
-          </span>
-        </label>
-        <label>需求标题<input name="title" required maxlength="48" value="${escapeHtml(record?.title || '')}" placeholder="想找一段……" /></label>
-        <label>补充说明<textarea name="description" rows="3" maxlength="360" placeholder="希望看到什么、会如何使用、哪些内容不要出现">${escapeHtml(record?.description || '')}</textarea></label>
-        <fieldset class="commerce-fields" id="commerceFields" ${initialType === 'commerce' ? '' : 'hidden'}>
-          <legend>模拟商业需求信息</legend>
-          <div class="field-grid">
-            <label>项目或品牌<input name="projectName" maxlength="48" value="${escapeHtml(record?.projectName || '')}" placeholder="例如：北巷宠物铺春季短片" /></label>
-            <label>目标受众<input name="audience" maxlength="48" value="${escapeHtml(record?.audience || '')}" placeholder="例如：养猫的新手家庭" /></label>
-            <label>视频规格<input name="format" maxlength="48" value="${escapeHtml(record?.format || '')}" placeholder="例如：9:16，15–30 秒" /></label>
-            <label>需要数量<input name="quantity" type="number" min="1" max="99" value="${escapeHtml(record?.quantity || 1)}" /></label>
-            <label>虚拟预算<input name="budget" type="number" min="0" max="9999" value="${escapeHtml(record?.budget || '')}" placeholder="灵感币" /></label>
-            <label>截止日期<input name="deadline" type="date" value="${escapeHtml(record?.deadline || '')}" /></label>
-          </div>
-          <p class="field-help">这里不产生真实合同、支付或授权；预算仅用于原型中的灵感币协作。</p>
+      <p class="sheet-subtitle">${isPublished ? '修改后仍保留原位置、回应和视频关系。' : `你正站在${currentZoneName()}，发布后纸条会落在当前位置附近。`}${referenceVideo ? ` 已引用《${escapeHtml(referenceVideo.title)}》。` : ''}</p>
+      <form id="leaveNoteForm" class="demand-form" novalidate>
+        <fieldset class="demand-type-switch">
+          <legend class="sr-only">选择需求类型</legend>
+          <label><input type="radio" name="noteType" value="personal" ${initialType === 'personal' ? 'checked' : ''} /><span>个人需求<small>寻找一段符合条件的视频素材</small></span></label>
+          <label><input type="radio" name="noteType" value="commerce" ${initialType === 'commerce' ? 'checked' : ''} /><span>企业合作<small>发布一次明确的模拟合作邀请</small></span></label>
         </fieldset>
+
+        <section class="demand-form-section" id="personalDemandFields" ${initialType === 'personal' ? '' : 'hidden'}>
+          <h3>想找怎样的素材</h3>
+          <div class="field-grid demand-primary-grid">
+            <label>标题<span class="required-mark" aria-hidden="true">*</span><input name="title" data-demand-required="1" maxlength="80" value="${escapeHtml(record?.title || '')}" placeholder="例如：寻找雨后的城市街景" /></label>
+            <label>主题<span class="required-mark" aria-hidden="true">*</span><input name="theme" data-demand-required="1" maxlength="80" value="${escapeHtml(record?.theme || '')}" placeholder="自由填写素材主题" /></label>
+          </div>
+          <label>详细描述<span class="required-mark" aria-hidden="true">*</span><textarea name="description" data-demand-required="1" rows="4" maxlength="1000" placeholder="希望看到什么、会如何使用、哪些内容不要出现">${escapeHtml(record?.description || '')}</textarea></label>
+          <div class="field-grid demand-spec-grid">
+            <label>时长（秒）<span class="required-mark" aria-hidden="true">*</span><input name="durationSeconds" data-demand-required="1" type="number" min="1" max="86400" step="1" value="${escapeHtml(record?.durationSeconds || '')}" placeholder="例如：30" /></label>
+            <label>尺寸<span class="required-mark" aria-hidden="true">*</span><select name="aspectRatioPreset" data-demand-required="1"><option value="">选择尺寸</option>${['16:9', '9:16', '4:3', '3:4', '1:1', 'other'].map((value) => `<option value="${value}" ${initialAspectPreset === value ? 'selected' : ''}>${value === 'other' ? '其他' : value}</option>`).join('')}</select></label>
+            <label class="demand-other-field" id="aspectRatioOtherField" ${initialAspectPreset === 'other' ? '' : 'hidden'}>自定义尺寸<span class="required-mark" aria-hidden="true">*</span><input name="aspectRatioOther" maxlength="32" value="${escapeHtml(initialAspectPreset === 'other' ? record?.aspectRatio || '' : '')}" placeholder="例如：21:9" /></label>
+            <label>分辨率<span class="required-mark" aria-hidden="true">*</span><select name="resolutionPreset" data-demand-required="1"><option value="">选择分辨率</option>${['1080p', '720p', '4K', '2K', '480p', 'other'].map((value) => `<option value="${value}" ${initialResolutionPreset === value ? 'selected' : ''}>${value === 'other' ? '其他' : value}</option>`).join('')}</select></label>
+            <label class="demand-other-field" id="resolutionOtherField" ${initialResolutionPreset === 'other' ? '' : 'hidden'}>自定义分辨率<span class="required-mark" aria-hidden="true">*</span><input name="resolutionOther" maxlength="32" value="${escapeHtml(initialResolutionPreset === 'other' ? record?.resolution || '' : '')}" placeholder="例如：8K" /></label>
+            <label>报价（灵感币）<span class="required-mark" aria-hidden="true">*</span><input name="personalPriceAmount" data-demand-required="1" type="number" min="1" max="1000000" step="0.01" value="${escapeHtml(record?.type !== 'commerce' ? record?.priceAmount || record?.budget || '' : '')}" placeholder="填写你的价格意愿" /></label>
+          </div>
+        </section>
+
+        <section class="demand-form-section" id="commerceDemandFields" ${initialType === 'commerce' ? '' : 'hidden'}>
+          <h3>这次合作需要什么</h3>
+          <div class="field-grid demand-primary-grid">
+            <label>公司名称<span class="required-mark" aria-hidden="true">*</span><input name="companyName" data-demand-required="1" maxlength="120" value="${escapeHtml(record?.companyName || record?.projectName || '')}" placeholder="每次发布时填写" /></label>
+            <label>活动名称<span class="required-mark" aria-hidden="true">*</span><input name="activityName" data-demand-required="1" maxlength="80" value="${escapeHtml(record?.activityName || (record?.type === 'commerce' ? record?.title || '' : ''))}" placeholder="例如：秋季城市影像计划" /></label>
+            <label>合作范围<span class="required-mark" aria-hidden="true">*</span><input name="cooperationScope" data-demand-required="1" maxlength="240" value="${escapeHtml(record?.cooperationScope || '')}" placeholder="自由填写合作范围" /></label>
+            <label>所在地区<span class="required-mark" aria-hidden="true">*</span><input name="region" data-demand-required="1" maxlength="120" value="${escapeHtml(record?.region || '')}" placeholder="自由填写所在地区" /></label>
+            <label>预算（灵感币）<span class="required-mark" aria-hidden="true">*</span><input name="commercePriceAmount" data-demand-required="1" type="number" min="1" max="1000000" step="0.01" value="${escapeHtml(record?.type === 'commerce' ? record?.priceAmount || record?.budget || '' : '')}" placeholder="填写合作预算" /></label>
+          </div>
+          <label>技能需求<span class="required-mark" aria-hidden="true">*</span><textarea name="skillRequirements" data-demand-required="1" rows="4" maxlength="1000" placeholder="自由填写拍摄、剪辑、创作或素材能力要求">${escapeHtml(record?.skillRequirements || '')}</textarea></label>
+          <label>合作描述<span class="required-mark" aria-hidden="true">*</span><textarea name="cooperationDescription" data-demand-required="1" rows="5" maxlength="1000" placeholder="说明合作目标、交付预期和不希望出现的内容">${escapeHtml(record?.cooperationDescription || (record?.type === 'commerce' ? record?.description || '' : ''))}</textarea></label>
+        </section>
+
+        <section class="demand-form-section demand-schedule-section">
+          <h3>开放时间</h3>
+          <div class="field-grid">
+            <label>开始时间<span class="required-mark" aria-hidden="true">*</span><input name="startAt" data-demand-required="1" type="datetime-local" value="${escapeHtml(datetimeLocalValue(record?.startAt))}" /></label>
+            <label>结束时间<span class="required-mark" aria-hidden="true">*</span><input name="endAt" data-demand-required="1" type="datetime-local" value="${escapeHtml(datetimeLocalValue(record?.endAt || record?.deadline))}" /></label>
+          </div>
+          <p class="field-help">金额使用灵感币，只记录需求侧价格意愿；发布时不扣除、不冻结，也不直接形成素材成交价。</p>
+        </section>
         <p class="form-error" id="leaveNoteError" role="alert"></p>
         <div class="media-actions">
           <button class="primary-button" type="submit">${isPublished ? '保存修改' : '发布到当前位置'}</button>
@@ -2038,28 +2335,86 @@ function showLeaveNote(referenceVideo = null, record = null) {
     </div>
   `, () => {
     const form = $('#leaveNoteForm');
-    const fields = $('#commerceFields');
+    const personalFields = $('#personalDemandFields');
+    const commerceFields = $('#commerceDemandFields');
     const error = $('#leaveNoteError');
-    const toggleCommerce = () => { fields.hidden = form.elements.noteType.value !== 'commerce'; error.textContent = ''; };
-    $$('input[name="noteType"]', form).forEach((input) => input.addEventListener('change', toggleCommerce));
-    const collect = () => ({
-      id: record?.id || `n-${Date.now()}`,
-      title: form.elements.title.value.trim(),
-      description: form.elements.description.value.trim(),
-      type: form.elements.noteType.value,
-      projectName: form.elements.projectName.value.trim(),
-      audience: form.elements.audience.value.trim(),
-      format: form.elements.format.value.trim(),
-      quantity: Math.max(1, Number(form.elements.quantity.value) || 1),
-      budget: Math.max(0, Number(form.elements.budget.value) || 0),
-      deadline: form.elements.deadline.value,
-    });
+    const syncOtherFields = () => {
+      const aspectOther = form.elements.aspectRatioPreset.value === 'other';
+      const resolutionOther = form.elements.resolutionPreset.value === 'other';
+      $('#aspectRatioOtherField').hidden = !aspectOther;
+      $('#resolutionOtherField').hidden = !resolutionOther;
+      form.elements.aspectRatioOther.required = !personalFields.hidden && aspectOther;
+      form.elements.resolutionOther.required = !personalFields.hidden && resolutionOther;
+    };
+    const syncDemandType = () => {
+      const commerce = form.elements.noteType.value === 'commerce';
+      personalFields.hidden = commerce;
+      commerceFields.hidden = !commerce;
+      $$('[data-demand-required="1"]', form).forEach((control) => {
+        control.required = control.closest('[hidden]') == null;
+      });
+      syncOtherFields();
+      error.textContent = '';
+    };
+    $$('input[name="noteType"]', form).forEach((input) => input.addEventListener('change', syncDemandType));
+    form.elements.aspectRatioPreset.addEventListener('change', syncOtherFields);
+    form.elements.resolutionPreset.addEventListener('change', syncOtherFields);
+    const collect = () => {
+      const type = form.elements.noteType.value;
+      const personal = type === 'personal';
+      const aspectRatioPreset = form.elements.aspectRatioPreset.value;
+      const resolutionPreset = form.elements.resolutionPreset.value;
+      const activityName = form.elements.activityName.value.trim();
+      return {
+        id: record?.id || `n-${Date.now()}`,
+        type,
+        title: personal ? form.elements.title.value.trim() : activityName,
+        theme: personal ? form.elements.theme.value.trim() : '',
+        description: personal ? form.elements.description.value.trim() : form.elements.cooperationDescription.value.trim(),
+        durationSeconds: personal ? Math.max(0, Number(form.elements.durationSeconds.value) || 0) : null,
+        aspectRatioPreset: personal ? aspectRatioPreset : '',
+        aspectRatioOther: personal && aspectRatioPreset === 'other' ? form.elements.aspectRatioOther.value.trim() : '',
+        aspectRatio: personal ? (aspectRatioPreset === 'other' ? form.elements.aspectRatioOther.value.trim() : aspectRatioPreset) : '',
+        resolutionPreset: personal ? resolutionPreset : '',
+        resolutionOther: personal && resolutionPreset === 'other' ? form.elements.resolutionOther.value.trim() : '',
+        resolution: personal ? (resolutionPreset === 'other' ? form.elements.resolutionOther.value.trim() : resolutionPreset) : '',
+        priceAmount: Math.max(0, Number(personal ? form.elements.personalPriceAmount.value : form.elements.commercePriceAmount.value) || 0),
+        priceRole: personal ? 'quote' : 'budget',
+        priceUnit: 'inspiration_coin',
+        pricingSignalEligible: true,
+        companyName: personal ? '' : form.elements.companyName.value.trim(),
+        activityName: personal ? '' : activityName,
+        cooperationScope: personal ? '' : form.elements.cooperationScope.value.trim(),
+        region: personal ? '' : form.elements.region.value.trim(),
+        skillRequirements: personal ? '' : form.elements.skillRequirements.value.trim(),
+        cooperationDescription: personal ? '' : form.elements.cooperationDescription.value.trim(),
+        startAt: demandIsoTime(form.elements.startAt.value),
+        endAt: demandIsoTime(form.elements.endAt.value),
+        timezone: 'Asia/Shanghai',
+      };
+    };
     const validate = (payload) => {
-      if (!payload.title) return '请填写需求标题。';
-      if (payload.type === 'commerce' && !payload.projectName) return '模拟商业需求需要填写项目或品牌。';
-      if (payload.type === 'commerce' && payload.budget <= 0) return '请填写大于 0 的虚拟预算。';
+      if (payload.type === 'personal') {
+        if (!payload.title) return '请填写需求标题。';
+        if (!payload.theme) return '请填写素材主题。';
+        if (!payload.description) return '请填写详细描述。';
+        if (!payload.durationSeconds) return '请填写大于 0 的素材时长。';
+        if (!payload.aspectRatioPreset || !payload.aspectRatio) return '请选择尺寸；选择其他时还需填写自定义尺寸。';
+        if (!payload.resolutionPreset || !payload.resolution) return '请选择分辨率；选择其他时还需填写自定义分辨率。';
+      } else {
+        if (!payload.companyName) return '请填写公司名称。';
+        if (!payload.activityName) return '请填写活动名称。';
+        if (!payload.cooperationScope) return '请填写合作范围。';
+        if (!payload.region) return '请填写所在地区。';
+        if (!payload.skillRequirements) return '请填写技能需求。';
+        if (!payload.cooperationDescription) return '请填写合作描述。';
+      }
+      if (payload.priceAmount <= 0) return `请填写大于 0 的${payload.type === 'commerce' ? '预算' : '报价'}。`;
+      if (!payload.startAt || !payload.endAt) return '请填写开始时间和结束时间。';
+      if (Date.parse(payload.startAt) >= Date.parse(payload.endAt)) return '结束时间必须晚于开始时间。';
       return '';
     };
+    syncDemandType();
     $('#saveDemandDraft')?.addEventListener('click', () => {
       const payload = collect();
       if (!payload.title) return error.textContent = '至少填写标题后才能保存草稿。';
@@ -2120,11 +2475,21 @@ function showLeaveNote(referenceVideo = null, record = null) {
         showLeaveNote(referenceVideo, record);
         const retryForm = $('#leaveNoteForm', sheet);
         if (retryForm) {
-          const values = { title: payload.title, description: payload.description, projectName: payload.projectName, audience: payload.audience, format: payload.format, quantity: payload.quantity, budget: payload.budget, deadline: payload.deadline };
+          const values = {
+            title: payload.title, theme: payload.theme, description: payload.description,
+            durationSeconds: payload.durationSeconds, aspectRatioPreset: payload.aspectRatioPreset, aspectRatioOther: payload.aspectRatioOther,
+            resolutionPreset: payload.resolutionPreset, resolutionOther: payload.resolutionOther,
+            personalPriceAmount: payload.type === 'personal' ? payload.priceAmount : '',
+            companyName: payload.companyName, activityName: payload.activityName, cooperationScope: payload.cooperationScope,
+            region: payload.region, commercePriceAmount: payload.type === 'commerce' ? payload.priceAmount : '',
+            skillRequirements: payload.skillRequirements, cooperationDescription: payload.cooperationDescription,
+            startAt: datetimeLocalValue(payload.startAt), endAt: datetimeLocalValue(payload.endAt),
+          };
           Object.entries(values).forEach(([name, value]) => { if (retryForm.elements[name]) retryForm.elements[name].value = value ?? ''; });
           const typeInput = retryForm.querySelector(`[name="noteType"][value="${CSS.escape(payload.type)}"]`);
-          if (typeInput) typeInput.checked = true;
-          retryForm.dispatchEvent(new Event('change', { bubbles: true }));
+          if (typeInput) { typeInput.checked = true; typeInput.dispatchEvent(new Event('change', { bubbles: true })); }
+          retryForm.elements.aspectRatioPreset.dispatchEvent(new Event('change', { bubbles: true }));
+          retryForm.elements.resolutionPreset.dispatchEvent(new Event('change', { bubbles: true }));
           $('#leaveNoteError', sheet).textContent = `${serviceError.message || '公共需求发布失败'}，内容已保留，请重试。`;
         }
         return;
@@ -2132,7 +2497,10 @@ function showLeaveNote(referenceVideo = null, record = null) {
       state.publicDemands = [...state.publicDemands.filter((item) => item.id !== publicDemand.id), publicDemand];
       state.notes = state.notes.filter((item) => item.id !== publicDemand.id);
       state.demandDrafts = state.demandDrafts.filter((draft) => draft.id !== record?.id);
-      logEvent(isPublished ? 'demand_update' : 'publish_demand', { demand_id: publicDemand.id, demand_type: publicDemand.type, zone_id: publicDemand.zone });
+      logEvent(isPublished ? 'demand_update' : 'publish_demand', {
+        demand_id: publicDemand.id, demand_type: publicDemand.type, zone_id: publicDemand.zone,
+        price_amount: publicDemand.priceAmount, price_unit: publicDemand.priceUnit, pricing_signal_kind: 'demand_price_intent',
+      });
       if (referenceVideo && !isPublished) logEvent('demand_asset_link', { demand_id: note.id, asset_id: referenceVideo.id, auto: true });
       persist();
       renderCreations();
@@ -2180,7 +2548,7 @@ function showBoard() {
       } else if (activeTab === 'media') {
         allAssets().forEach((video) => {
           if (query && !`${video.title}${(video.tags || []).join('')}`.toLowerCase().includes(query)) return;
-          rows.push(`<div class="list-row"><div><b>${escapeHtml(video.title)}</b><span>公共素材 · ${escapeHtml(video.freshnessLabel || '世界档案')}${video.archived ? ' · 已从地图收起' : ` · ${escapeHtml(videoLocationLabel(video))}${video.catalogOnly ? ' · 今日未摆放' : ''}`}</span></div><div class="row-actions"><button class="text-button" data-open-video="${escapeHtml(video.id)}">打开</button>${video.catalogOnly || video.archived ? '' : `<button class="text-button" data-goto-video="${escapeHtml(video.id)}">定位</button>`}</div></div>`);
+          rows.push(`<div class="list-row"><div><b>${escapeHtml(video.title)}</b><span>公共素材 · ${escapeHtml(video.freshnessLabel || '世界档案')}${video.archived ? ' · 已从地图收起' : ` · ${escapeHtml(videoLocationLabel(video))}${video.catalogOnly ? ' · 今日未摆放' : ''}`}</span></div><div class="row-actions"><button class="text-button" data-open-video="${escapeHtml(video.id)}">打开</button>${video.catalogOnly || video.archived ? '' : `<button class="text-button" data-goto-video="${escapeHtml(video.id)}">标记路线</button>`}</div></div>`);
         });
       } else {
         allNotes.filter((note) => {
@@ -2189,8 +2557,8 @@ function showBoard() {
           if (activeTab === 'archive') return note.archived;
           return note.owner === 'me' && note.status === 'closed' && !note.archived;
         }).forEach((note) => {
-          if (query && !`${note.title}${note.description || ''}${note.projectName || ''}`.toLowerCase().includes(query)) return;
-          rows.push(`<div class="list-row"><div><b>${escapeHtml(note.title)}</b><span>${note.type === 'commerce' ? '模拟商业需求' : '个人需求'} · ${escapeHtml(note.by || '我')} · ${escapeHtml(note.freshnessLabel || zoneAt(note.wx, note.wy).name)} · ${note.archived ? '已归档' : note.status === 'closed' ? '已关闭' : `${responsesForNote(note).length} 个回应`}</span></div><div class="row-actions"><button class="text-button" data-open-note="${escapeHtml(note.id)}">打开</button>${note.archived ? '' : `<button class="text-button" data-goto-note="${escapeHtml(note.id)}">定位</button>`}</div></div>`);
+          if (query && !`${note.title}${note.theme || ''}${note.description || ''}${note.companyName || note.projectName || ''}${note.activityName || ''}${note.cooperationScope || ''}${note.region || ''}${note.skillRequirements || ''}`.toLowerCase().includes(query)) return;
+          rows.push(`<div class="list-row"><div><b>${escapeHtml(note.title)}</b><span>${note.type === 'commerce' ? '模拟商业需求' : '个人需求'} · ${escapeHtml(note.by || '我')} · ${escapeHtml(note.freshnessLabel || zoneAt(note.wx, note.wy).name)} · ${note.archived ? '已归档' : note.status === 'closed' ? '已关闭' : `${responsesForNote(note).length} 个回应`}</span></div><div class="row-actions"><button class="text-button" data-open-note="${escapeHtml(note.id)}">打开</button>${note.archived ? '' : `<button class="text-button" data-goto-note="${escapeHtml(note.id)}">标记路线</button>`}</div></div>`);
         });
       }
       $('#boardSummary').textContent = `${rows.length} 条结果 · ${activeTab === 'drafts' ? '草稿不会公开' : activeTab === 'media' ? '素材关系不会随每日地图轮换消失' : '任何公开需求都可以忽略'}`;
@@ -2198,21 +2566,21 @@ function showBoard() {
       $$('[data-open-note]', box).forEach((button) => button.addEventListener('click', () => showNoteDetail(allNotes.find((note) => note.id === button.dataset.openNote))));
       $$('[data-goto-note]', box).forEach((button) => button.addEventListener('click', () => {
         const note = allNotes.find((candidate) => candidate.id === button.dataset.gotoNote);
-        state.wx = note.wx;
-        state.wy = note.wy + 84;
+        state.guidanceTarget = { wx: note.wx, wy: note.wy, label: note.title };
         closeSheet();
+        persist();
         renderWorld();
-        showToast('已在纸条旁');
+        showToast('纸条方向已经标在右上方');
       }));
       $$('[data-open-video]', box).forEach((button) => button.addEventListener('click', () => showVideo(findVideoById(button.dataset.openVideo))));
       $$('[data-goto-video]', box).forEach((button) => button.addEventListener('click', () => {
         const video = findVideoById(button.dataset.gotoVideo);
         if (!video) return;
-        state.wx = video.wx;
-        state.wy = video.wy + 84;
+        state.guidanceTarget = { wx: video.wx, wy: video.wy, label: video.title };
         closeSheet();
+        persist();
         renderWorld();
-        setTimeout(() => showVideo(video), 80);
+        showToast('素材方向已经标在右上方');
       }));
       $$('[data-edit-draft]', box).forEach((button) => button.addEventListener('click', () => {
         const draft = state.demandDrafts.find((item) => item.id === button.dataset.editDraft);
@@ -2260,7 +2628,7 @@ function showPublishAnywhere() {
         <h3>上传并直接发布</h3>
         <div class="field-grid">
           <label>视频标题<input name="title" required maxlength="48" placeholder="给这段素材一个名字" /></label>
-          <label>视频文件（必需）<input name="file" type="file" accept="video/*" required /><span class="field-help">公开视频必须包含可播放文件，单个文件不超过 20MB。</span></label>
+          <label>视频文件（必需）<input name="file" type="file" accept="video/*" required /><span class="field-help">公开视频必须包含可播放文件，单个文件不超过 ${window.ZhereService?.limits?.().maxVideoMegabytes || 100}MB。</span></label>
         </div>
         <label>一句话说明<input name="description" maxlength="80" placeholder="希望别人从什么角度看它" /></label>
         <p class="form-error" id="quickUploadError" role="alert"></p>
@@ -2309,7 +2677,7 @@ function showWorkshop() {
       <form id="uploadForm">
         <label>标题<input name="title" required placeholder="给这段素材一个名字" /></label>
         <label>一句话说明<input name="description" placeholder="希望别人怎么看它" /></label>
-        <label>视频文件（必需）<input name="file" type="file" accept="video/*" required /><span class="field-help">支持浏览器可播放的视频格式，单个文件不超过 20MB。</span></label>
+        <label>视频文件（必需）<input name="file" type="file" accept="video/*" required /><span class="field-help">支持浏览器可播放的视频格式，单个文件不超过 ${window.ZhereService?.limits?.().maxVideoMegabytes || 100}MB。</span></label>
         <p class="form-error" id="uploadError"></p>
         <button class="primary-button" type="submit">放进背包</button>
       </form>
@@ -2878,10 +3246,15 @@ function showShop(shopId) {
 function showFrame() {
   const current = state.frameSlot;
   const target = objectTargets.frame;
+  const messages = state.publicRecords
+    .filter((record) => record.kind === 'frame_message' && record.status !== 'deleted')
+    .slice(-3)
+    .reverse();
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">空白画框</h2>
       <p class="sheet-subtitle">框上只刻着一行小字：“这里好像缺了一段什么。”你可以放进去一段，也可以留下一句话。</p>
+      ${messages.length ? `<div class="note-list">${messages.map((record) => `<article class="note-card"><b>${escapeHtml(record.author || record.payload?.name || '路过的风')}</b><p>${escapeHtml(record.payload?.text || '')}</p></article>`).join('')}</div>` : ''}
       ${current
         ? `<div class="status-banner">框里现在是《${escapeHtml(copyTitle(current))}》</div>
           <div class="media-actions"><button class="text-button" id="frameRemove">取下来</button></div>`
@@ -2916,29 +3289,19 @@ function showFrame() {
         event.preventDefault();
         const text = event.currentTarget.elements.text.value.trim();
         if (!text) return;
-        const note = {
-          id: `n-frame-${Date.now()}`,
-          title: text,
-          description: '',
-          type: 'personal',
-          by: state.profile.nickname || '路过的风',
-          wx: target.wx + 30,
-          wy: target.wy + 40,
-          zone: zoneAt(target.wx, target.wy).id,
-          refAsset: null,
-          responses: [],
-          createdAt: '刚刚',
-        };
         try {
-          const result = await window.ZhereService.publicWorld.createDemand(note);
-          state.publicDemands = [...state.publicDemands.filter((item) => item.id !== result.demand.id), result.demand];
+          const result = await window.ZhereService.publicWorld.saveRecord({
+            kind: 'frame_message',
+            payload: { text, source: 'blank_frame', wx: target.wx, wy: target.wy },
+          });
+          state.publicRecords = [...state.publicRecords.filter((item) => item.id !== result.record.id), result.record];
         } catch (error) { return showToast(error.message || '纸条发布失败'); }
         persist();
-        logEvent('publish_demand', { demand_id: note.id, demand_type: 'personal', source: 'blank_frame' });
-        closeSheet();
+        logEvent('frame_message', { length: text.length, source: 'blank_frame' });
         renderCreations();
         renderWorld();
         showToast('这句话钉在了画框下');
+        showFrame();
       }));
     });
     const remove = $('#frameRemove', sheet);
@@ -3008,7 +3371,7 @@ function showTelescope() {
         <p class="sheet-subtitle">远处的${zone.name}好像有什么在动。</p>
         <div class="status-banner">${escapeHtml(pick.title)} · ${escapeHtml(pick.spawn_source || '')} · 被看得很少的内容也会到这里来</div>
         <div class="media-actions">
-          <button class="primary-button" id="telescopeGo">走过去看看</button>
+          <button class="primary-button" id="telescopeGo">标记这个方向</button>
           <button class="paper-button" id="telescopeNext">换一个方向</button>
           <button class="text-button" id="telescopeDown">放下望远镜</button>
         </div>
@@ -3018,11 +3381,11 @@ function showTelescope() {
       $('#telescopeGo').addEventListener('click', () => {
         logEvent('telescope_follow', { asset_id: pick.id });
         const target = pick;
-        state.wx = target.wx;
-        state.wy = target.wy + 84;
+        state.guidanceTarget = { wx: target.wx, wy: target.wy, label: target.title };
         closeSheet();
+        persist();
         renderWorld();
-        setTimeout(() => showVideo(target), 80);
+        showToast('望远镜看见的方向已经标在右上方');
       });
       $('#telescopeNext').addEventListener('click', () => {
         const candidates = far.filter((entry) => entry.video.id !== pick.id);
@@ -3077,11 +3440,11 @@ function openBottle() {
     if (go) go.addEventListener('click', () => {
       const video = allVideos().find((candidate) => candidate.id === content.asset_id);
       if (!video) return closeSheet();
-      state.wx = video.wx;
-      state.wy = video.wy + 84;
+      state.guidanceTarget = { wx: video.wx, wy: video.wy, label: video.title };
       closeSheet();
+      persist();
       renderWorld();
-      setTimeout(() => showVideo(video), 80);
+      showToast('漂流瓶里的方向已经标在右上方');
     });
     const take = $('#bottleTake', sheet);
     if (take) take.addEventListener('click', () => {
@@ -3166,30 +3529,74 @@ function showSeabench() {
   });
 }
 
-function showNeighbor() {
-  const followRecord = state.publicRecords.find((record) => record.kind === 'follow' && record.owner === 'me' && record.payload?.targetSpaceId === 'late-branch-repair');
+function showNeighbor(preferredSpaceId = '') {
+  const spaces = publicSpaces().filter((record) => record.owner !== 'me');
+  const selected = spaces.find((record) => (record.payload?.spaceId || record.id) === preferredSpaceId) || spaces[0] || null;
+  if (!selected) {
+    openSheet(`
+      <div class="sheet-inner">
+        <h2 class="sheet-title" id="sheetTitle" tabindex="-1">邻居小径</h2>
+        <div class="empty-state"><b>路上还没有公开的小窝</b><p>玩家在角色资料中选择公开后，这里才会出现可参观的空间。</p></div>
+      </div>
+    `);
+    return;
+  }
+  const space = selected.payload || {};
+  const neighborAvatarImage = safeAvatarImage(space.avatarImage);
+  const targetSpaceId = space.spaceId || selected.id;
+  const followRecord = state.publicRecords.find((record) => record.kind === 'follow' && record.owner === 'me' && record.payload?.targetSpaceId === targetSpaceId);
+  const guestbook = state.publicRecords.filter((record) => record.kind === 'space_message' && record.status !== 'deleted' && record.payload?.targetSpaceId === targetSpaceId).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 8);
+  const placedTitles = (space.placedAssetIds || []).map((id) => findVideoById(id)?.title).filter(Boolean).slice(0, 4);
   openSheet(`
     <div class="sheet-inner">
-      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">晚枝修理所</h2>
+      <h2 class="sheet-title" id="sheetTitle" tabindex="-1">${escapeHtml(space.spaceName || '未命名小窝')}</h2>
       <p class="sheet-subtitle">一个玩家自愿公开的小窝。你只能看和回应，不能移动对方的副本。</p>
-      <div class="video-frame"><span class="video-status">邻居空间预览</span></div>
+      ${spaces.length > 1 ? `<nav class="neighbor-path-tabs" aria-label="选择邻居">${spaces.map((record) => { const id = record.payload?.spaceId || record.id; return `<button class="text-button${id === targetSpaceId ? ' is-current' : ''}" type="button" data-neighbor-space="${escapeHtml(id)}">${escapeHtml(record.payload?.nickname || record.name || '匿名旅人')}</button>`; }).join('')}</nav>` : ''}
+      <div class="neighbor-space-preview">
+        <div class="neighbor-identity">${neighborAvatarImage ? `<img src="${neighborAvatarImage}" alt="${escapeHtml(space.nickname || selected.name || '匿名旅人')}的头像" />` : ''}<span><b>${escapeHtml(space.nickname || selected.name || '匿名旅人')}</b><small>第 ${Number(space.day) || 1} 天 · 建筑 ${(space.buildings || []).length} · 摆设 ${(space.decor || []).length}</small></span></div>
+        <p>${placedTitles.length ? `窗边正在展示：${placedTitles.map(escapeHtml).join('、')}` : '这里暂时没有公开展示的视频副本。'}</p>
+      </div>
       <div class="media-actions">
         <button class="primary-button" id="followButton">${followRecord ? '取消关注' : '关注这个空间'}</button>
       </div>
+      <section class="neighbor-guestbook">
+        <h3>门口的来访纸条</h3>
+        <p>纸条公开留在这间小窝门口，也会提醒小窝主人。</p>
+        <div class="neighbor-message-list">${guestbook.length ? guestbook.map((record) => `<article><b>${escapeHtml(record.name || record.author || '一位旅人')}</b><span>${escapeHtml(record.payload?.text || '')}</span></article>`).join('') : '<div class="empty-state">还没有人留下纸条。只关注也可以，不必说些什么。</div>'}</div>
+        <form id="neighborMessageForm"><label>写一张来访纸条<textarea name="message" rows="3" maxlength="180" placeholder="例如：窗边那段雨声让我停了一会儿"></textarea></label><p class="form-error" id="neighborMessageError" role="alert"></p><button class="paper-button" type="submit">压在门口石头下</button></form>
+      </section>
     </div>
   `, () => {
+    $$('[data-neighbor-space]', sheet).forEach((button) => button.addEventListener('click', () => showNeighbor(button.dataset.neighborSpace)));
     $('#followButton').addEventListener('click', async () => {
       try {
         if (followRecord) {
           await window.ZhereService.publicWorld.deleteRecord(followRecord.id);
           state.publicRecords = state.publicRecords.filter((record) => record.id !== followRecord.id);
         } else {
-          const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'follow', payload: { targetSpaceId: 'late-branch-repair' } });
-          state.publicRecords.push(result.record);
+          const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'follow', payload: { targetSpaceId } });
+          replacePublicRecord(result.record);
         }
       } catch (error) { return showToast(error.message || '关注状态保存失败'); }
-      logEvent(followRecord ? 'unfollow' : 'follow', { space_id: 'late-branch-repair' });
-      showNeighbor();
+      logEvent(followRecord ? 'unfollow' : 'follow', { space_id: targetSpaceId });
+      showNeighbor(targetSpaceId);
+    });
+    $('#neighborMessageForm').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const text = event.currentTarget.elements.message.value.trim();
+      if (!text) return $('#neighborMessageError').textContent = '写下一句话后再压在门口。';
+      const submit = event.currentTarget.querySelector('[type="submit"]');
+      setPendingButton(submit, true, '正在压好纸条…');
+      try {
+        const result = await window.ZhereService.publicWorld.saveRecord({ kind: 'space_message', payload: { targetSpaceId, text } });
+        replacePublicRecord(result.record);
+        logEvent('space_message', { target_space_id: targetSpaceId, record_id: result.record.id, length: text.length });
+        showNeighbor(targetSpaceId);
+        showToast('纸条留在了邻居门口');
+      } catch (error) {
+        setPendingButton(submit, false);
+        $('#neighborMessageError').textContent = error.message || '纸条没有留住，请重试。';
+      }
     });
   });
 }
@@ -3213,17 +3620,19 @@ function showSoundDock() {
 
 function showAnomaly() {
   const cycle = currentWorldCycle();
+  const previousChoice = state.worldEventChoices[state.homestead.day] || 'none';
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">今日潮讯：${cycle.title}</h2>
       <p class="sheet-subtitle">${cycle.summary} 这是世界当天的自然变化，不是限时任务；明天会换一种，也可以完全忽略。</p>
       <div class="world-cycle-strip"><span class="cycle-mark cycle-${cycle.zone}" aria-hidden="true"><i></i></span><div><b>${cycle.zoneName}</b><small>在这里采集时，${resourceLabel(cycle.resource)}额外 +${cycle.bonus}</small></div><button class="paper-button" id="goToCycle" type="button">沿风去看看</button></div>
       <h3>也可以回应今天的颜色异象</h3>
+      ${previousChoice !== 'none' ? '<div class="status-banner">今天已经回应过这次颜色异象；明天会出现新的变化。</div>' : ''}
       <div class="choice-grid">
-        <button class="choice-button" data-event-choice="restore"><b>尝试恢复颜色</b><span>把色彩放回自己的物件</span></button>
-        <button class="choice-button" data-event-choice="replace"><b>接受灰一点</b><span>让世界安静一次</span></button>
-        <button class="choice-button" data-event-choice="ignore"><b>什么都不做</b><span>继续按自己的方式探索</span></button>
-        <button class="choice-button" data-event-choice="mix"><b>搅一搅</b><span>产生一个无法预先判断的结果</span></button>
+        <button class="choice-button" data-event-choice="restore" ${previousChoice !== 'none' ? 'disabled' : ''}><b>尝试恢复颜色</b><span>把色彩放回自己的物件</span></button>
+        <button class="choice-button" data-event-choice="replace" ${previousChoice !== 'none' ? 'disabled' : ''}><b>接受灰一点</b><span>让世界安静一次</span></button>
+        <button class="choice-button" data-event-choice="ignore" ${previousChoice !== 'none' ? 'disabled' : ''}><b>什么都不做</b><span>继续按自己的方式探索</span></button>
+        <button class="choice-button" data-event-choice="mix" ${previousChoice !== 'none' ? 'disabled' : ''}><b>搅一搅</b><span>产生一个无法预先判断的结果</span></button>
       </div>
     </div>
   `, () => {
@@ -3233,13 +3642,16 @@ function showAnomaly() {
       closeSheet(); persist(); renderWorld(); showToast(`右上方已标记${cycle.zoneName}方向`);
     });
     $$('[data-event-choice]', sheet).forEach((button) => button.addEventListener('click', () => {
-    state.eventChoice = button.dataset.eventChoice;
-    worldStage.classList.toggle('event-muted', state.eventChoice === 'replace' || state.eventChoice === 'mix');
+    if (state.worldEventChoices[state.homestead.day]) return;
+    const choice = button.dataset.eventChoice;
+    state.worldEventChoices[state.homestead.day] = choice;
+    state.eventChoice = choice;
+    worldStage.classList.toggle('event-muted', choice === 'replace' || choice === 'mix');
     persist();
-    logEvent('world_event_response', { choice: state.eventChoice });
+    logEvent('world_event_response', { choice, occurrence_id: `anomaly:${state.homestead.day}` });
     closeSheet();
     const messages = { restore: '你把颜色留在了自己的物件上。', replace: '世界安静了一点。', ignore: '你选择继续散步，世界没有催促你。', mix: '颜色们暂时达成了不稳定的和平。' };
-    say(messages[state.eventChoice]);
+    say(messages[choice]);
     }));
   });
 }
@@ -3267,12 +3679,10 @@ function showFavorites() {
       if (!found) { closeSheet(); return showToast('它已经不在世界里了'); }
       if (fav.type === 'demand') { closeSheet(); showNoteDetail(found); return; }
       if (found.catalogOnly || !Number.isFinite(found.wx)) { showVideo(found); return; }
-      state.wx = found.wx;
-      state.wy = found.wy + 84;
-      closeSheet();
-      renderWorld();
+      state.guidanceTarget = { wx: found.wx, wy: found.wy, label: found.title };
+      persist();
       logEvent('favorite_revisit', { asset_id: found.id });
-      setTimeout(() => showVideo(found), 80);
+      showVideo(found);
     }));
     $$('[data-remove-favorite]', sheet).forEach((button) => button.addEventListener('click', () => {
       state.favorites.splice(Number(button.dataset.removeFavorite), 1);
@@ -3312,11 +3722,11 @@ function showData(initialTab = 'growth') {
         <div class="price-block"><span>成长值</span><strong>${level.score}</strong>${level.next ? ` / ${level.next.need}` : ' · 已展开全部能力'}</div>
         <div class="price-block"><span>曝光样本</span><strong>${Object.keys(state.exposureCounts).length}</strong> 段视频</div>
       </div>
-      <div class="growth-track" aria-label="成长进度"><i style="width:${nextProgress}%"></i></div>
+      <div class="growth-track" aria-label="成长进度"><i data-progress="${nextProgress}"></i></div>
       <nav class="sheet-tabs" aria-label="数据与成长分类"><button type="button" data-data-tab="growth">成长路径</button><button type="button" data-data-tab="activity">行为记录</button><button type="button" data-data-tab="signals">字段说明</button></nav>
       <div class="sheet-tab-panel" data-data-panel="growth"><div class="note-section"><div class="section-kicker">能力展开</div><h3>成长会真正改变什么</h3><div class="growth-tier-list">${CREATOR_TIERS.map((tier) => `<div class="growth-tier${level.score >= tier.need ? ' is-unlocked' : ''}"><span>${level.score >= tier.need ? '已展开' : `${tier.need} 成长值`}</span><div><b>${tier.label}</b><small>${tier.benefit}</small></div></div>`).join('')}</div><button class="paper-button" id="openGrowthAtlas" type="button">打开区域珍藏图鉴</button></div></div>
       <div class="sheet-tab-panel" data-data-panel="activity"><div class="note-section"><div class="section-kicker">只读统计</div><h3>行为记录</h3>
-        ${stats.map(([label, value]) => `<div class="stat-row"><span>${label}</span><div class="stat-track"><i style="width:${Math.min(100, Math.round(value / max * 100))}%"></i></div><b>${value}</b></div>`).join('')}
+        ${stats.map(([label, value]) => `<div class="stat-row"><span>${label}</span><div class="stat-track"><i data-progress="${Math.min(100, Math.round(value / max * 100))}"></i></div><b>${value}</b></div>`).join('')}
       </div></div>
       <div class="sheet-tab-panel" data-data-panel="signals"><div class="note-section"><div class="section-kicker">研究透明度</div><h3>重要信号说明</h3>
         <p class="section-intro">原始行为不会被直接解释成喜欢或不喜欢。以下派生信号全部基于原始事件重算。</p>
@@ -3326,6 +3736,7 @@ function showData(initialTab = 'growth') {
       </div></div>
     </div>
   `, () => {
+    $$('[data-progress]', sheet).forEach((bar) => { bar.style.width = `${Math.max(0, Math.min(100, Number(bar.dataset.progress) || 0))}%`; });
     const selectTab = (tab) => {
       const safeTab = ['growth', 'activity', 'signals'].includes(tab) ? tab : 'growth';
       $$('[data-data-tab]', sheet).forEach((button) => {
@@ -3345,16 +3756,22 @@ function showData(initialTab = 'growth') {
 function showLedger() {
   const quotes = state.rawEvents.filter((event) => event.raw_event === 'bid_accepted');
   const total = quotes.reduce((sum, event) => sum + (event.details.transaction_price || 0), 0);
+  const walletTransactions = [...(state.economy?.transactions || [])].reverse();
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">灵感币账本</h2>
-      <p class="sheet-subtitle">素材报价是独立的模拟价格表达，不扣除灵感币，不可提现、不可兑换，也不产生真实购买。灵感币继续用于原有游戏玩法。</p>
+      <p class="sheet-subtitle">灵感币来自种植收获，用于地块建设与制作；素材报价和需求预算始终是独立研究数据，不会扣减这里的余额。</p>
       <div class="auction-price">
         <div class="price-block"><span>当前余额</span><strong>${state.wallet}</strong></div>
+        <div class="price-block"><span>玩法收入</span><strong>${state.economy?.earned || 0}</strong></div>
+        <div class="price-block"><span>建设与制作</span><strong>${state.economy?.spent || 0}</strong></div>
         <div class="price-block"><span>累计模拟报价</span><strong>${Number(total.toFixed(2))}</strong></div>
       </div>
-      <div class="note-section"><h3>最近出价</h3>
-        <div class="list-stack">${quotes.length ? quotes.slice(-12).reverse().map((event) => `<div class="list-row"><div><b>报价 ${event.details.transaction_price}</b><span>${escapeHtml(event.details.asset_id)} · ${event.created_at.slice(11, 16)}</span></div><b class="amount-in">已记录</b></div>`).join('') : '<div class="empty-state">还没有报价记录。视频旁按 G 表达你认为合适的价格。</div>'}</div>
+      <div class="note-section"><h3>灵感币流水</h3>
+        <div class="list-stack">${walletTransactions.length ? walletTransactions.slice(0, 30).map((entry) => `<div class="list-row"><div><b>${escapeHtml(entry.label || '灵感币变化')}</b><span>${new Date(entry.createdAt).toLocaleString('zh-CN')} · 余额 ${entry.balance}</span></div><b class="${entry.amount >= 0 ? 'amount-in' : 'amount-out'}">${entry.amount >= 0 ? '+' : ''}${entry.amount}</b></div>`).join('') : '<div class="empty-state">还没有灵感币流水。</div>'}</div>
+      </div>
+      <div class="note-section"><h3>独立估值记录</h3>
+        <div class="list-stack">${quotes.length ? quotes.slice(-12).reverse().map((event) => `<div class="list-row"><div><b>报价 ${event.details.transaction_price}</b><span>${escapeHtml(event.details.asset_id)} · ${event.created_at.slice(11, 16)}</span></div><b class="amount-in">不扣余额</b></div>`).join('') : '<div class="empty-state">还没有报价记录。视频旁按 G 表达你认为合适的价格。</div>'}</div>
       </div>
       <div class="status-banner">报价是可忽略的探索行为。每次有效报价都会直接成交，发布者不能接受、拒绝或修改价格。</div>
     </div>
@@ -3403,10 +3820,13 @@ function showPrivacy() {
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">数据与隐私</h2>
-      <p class="sheet-subtitle">适用年龄 16+。靠近、观看、点赞、收藏、评论、标签、竞价和副本去向都会被记录，用于推荐与模型研究，不提供给第三方训练。</p>
-      <div class="status-banner">原始事件永久保存，派生结论后算。退出研究不会删除账户；删除申请会匿名化行为记录，并保留公共世界的连续性。</div>
-      <label class="check-label"><input type="checkbox" id="researchToggle" ${state.research ? 'checked' : ''} /> 参与推荐与模型研究</label>
-      <div class="status-banner" id="researchCollectionStatus" role="status">正在检查服务端采集状态……</div>
+      <p class="sheet-subtitle">适用年龄 16+。靠近、观看、点赞、收藏、评论、标签、竞价和副本去向会按隐私说明记录，用于提供游戏功能及推荐与定价研究，不提供给第三方训练。</p>
+      <div class="status-banner">创建角色后默认开启页面活动记录。原始事件长期保存，派生结论后算；申请匿名化会移除直接身份，并保留公共世界的连续性。</div>
+      <div class="privacy-scope-grid">
+        <section><span class="sheet-eyebrow">会记录</span><h3>与玩法和研究直接相关的行为</h3><ul><li>素材曝光、播放进度、停留与完成观看</li><li>点赞、收藏、评论、标签和需求回应</li><li>模拟报价、成交、副本获得与摆放去向</li><li>移动采样、区域发现、采集、种植、制作与建造</li></ul></section>
+        <section><span class="sheet-eyebrow">不会记录</span><h3>与目的无关或尚未提交的内容</h3><ul><li>明文密码和密码输入过程</li><li>未提交的表单、评论或需求草稿内容</li><li>任意鼠标轨迹、键盘原始输入和设备其他文件</li><li>与当前游戏功能和研究目的无关的浏览活动</li></ul></section>
+      </div>
+      <div class="status-banner" id="researchCollectionStatus" role="status">正在检查服务端记录状态……</div>
       <div class="media-actions"><button class="paper-button" id="exportData">导出我的行为记录</button><button class="danger-button" id="deleteData">申请删除并匿名化</button></div>
       <div class="danger-zone"><b>虚拟声明</b><p>灵感币无现金价值，不可提现、不可兑换。NPC（如慢半拍的鹿）始终被明确标记。</p></div>
     </div>
@@ -3416,34 +3836,14 @@ function showPrivacy() {
       if (!banner) return;
       try {
         const result = await window.ZhereService.privacy.researchStatus();
-        if (!result.collecting) banner.textContent = `研究采集已暂停 · 授权版本 ${result.consent_version}`;
-        else if (result.status === 'ready') banner.textContent = `研究采集已开启 · 等待第一条事件写入 · 授权版本 ${result.consent_version}`;
-        else banner.textContent = `研究采集正常 · 服务端已保存 ${result.event_count} 条事件${result.last_event_at ? ` · 最近写入 ${new Date(result.last_event_at).toLocaleString('zh-CN')}` : ''}`;
+        if (!result.collecting) banner.textContent = `活动记录暂未就绪，请刷新后重试 · 数据规则版本 ${result.consent_version}`;
+        else if (result.status === 'ready') banner.textContent = `活动记录已开启 · 等待第一条事件写入 · 数据规则版本 ${result.consent_version}`;
+        else banner.textContent = `活动记录正常 · 服务端已保存 ${result.event_count} 条事件${result.last_event_at ? ` · 最近写入 ${new Date(result.last_event_at).toLocaleString('zh-CN')}` : ''}`;
       } catch (error) {
         banner.textContent = '暂时无法确认服务端采集状态，请稍后重试。';
       }
     };
     refreshResearchStatus();
-    $('#researchToggle').addEventListener('change', async (event) => {
-      const input = event.currentTarget;
-      const previous = state.research;
-      const next = input.checked;
-      input.disabled = true;
-      try {
-        await window.ZhereService.privacy.updateConsent(next);
-        state.research = next;
-        persist();
-        logEvent('research_consent_change', { active: next, previous });
-        await window.ZhereService.events.flush().catch(() => {});
-        await refreshResearchStatus();
-        showToast(next ? '已加入研究' : '已退出研究，账户仍保留');
-      } catch (error) {
-        input.checked = previous;
-        showToast(error.message || '研究设置保存失败，请稍后重试');
-      } finally {
-        input.disabled = false;
-      }
-    });
     $('#exportData').addEventListener('click', async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
@@ -3538,25 +3938,30 @@ async function showAdmin() {
 
 function showProfileForm() {
   const profile = state.profile;
+  const avatarImage = safeAvatarImage(profile.avatarImage);
   openSheet(`
     <div class="sheet-inner">
       <h2 class="sheet-title" id="sheetTitle" tabindex="-1">角色与小窝</h2>
       <form id="profileForm">
         <label>选择一位林间角色
-          <span class="avatar-row">${AVATAR_SWATCHES.map((swatch, index) => `<button type="button" class="avatar-swatch${!profile.avatarImage && profile.avatar === index ? ' is-selected' : ''}" data-avatar="${index}" style="--swatch:${swatch.color}" aria-label="${escapeHtml(swatch.label || `头像 ${swatch.glyph}`)}" title="${escapeHtml(swatch.label || '')}">${swatch.glyph}</button>`).join('')}</span>
+          <span class="avatar-row">${AVATAR_SWATCHES.map((swatch, index) => `<button type="button" class="avatar-swatch${!profile.avatarImage && profile.avatar === index ? ' is-selected' : ''}" data-avatar="${index}" aria-label="${escapeHtml(swatch.label || `头像 ${swatch.glyph}`)}" title="${escapeHtml(swatch.label || '')}">${swatch.glyph}</button>`).join('')}</span>
         </label>
         <div class="avatar-upload">
-          <img class="avatar-upload-preview" id="avatarUploadPreview" alt="当前自定义头像预览" src="${profile.avatarImage || ''}" ${profile.avatarImage ? '' : 'hidden'} />
-          <div class="avatar-upload-copy"><label>上传自己的头像<input id="avatarImageInput" type="file" accept="image/png,image/jpeg,image/webp" /></label><small>会自动裁成 160 × 160；建议选择主体清楚、背景简单的图片，最大 5 MB。</small><button class="text-button" id="removeAvatarImage" type="button" ${profile.avatarImage ? '' : 'hidden'}>移除上传图片</button></div>
+          <img class="avatar-upload-preview" id="avatarUploadPreview" alt="当前自定义头像预览" src="${avatarImage}" ${avatarImage ? '' : 'hidden'} />
+          <div class="avatar-upload-copy"><label class="avatar-file-button">上传自己的头像<input id="avatarImageInput" type="file" accept="image/png,image/jpeg,image/webp" /></label><small>会自动裁成清晰的小尺寸头像；建议选择主体清楚、背景简单的图片，最大 5 MB。</small><button class="text-button" id="removeAvatarImage" type="button" ${profile.avatarImage ? '' : 'hidden'}>移除上传图片</button></div>
         </div>
         <label>昵称<input name="nickname" value="${escapeHtml(profile.nickname)}" required /></label>
         <label>一句话介绍<input name="bio" value="${escapeHtml(profile.bio)}" /></label>
         <label>小窝名称<input name="spaceName" value="${escapeHtml(profile.spaceName)}" /></label>
+        <label class="check-row"><input name="spacePublic" type="checkbox" ${profile.spacePublic ? 'checked' : ''} /><span>允许其他玩家在邻居小径参观我的小窝快照</span></label>
         <p class="form-error" id="profileError" role="alert"></p>
         <button class="primary-button" type="submit">保存角色</button>
       </form>
     </div>
   `, () => {
+    $$('[data-avatar]', sheet).forEach((button) => {
+      button.style.setProperty('--swatch', AVATAR_SWATCHES[Number(button.dataset.avatar)]?.color || AVATAR_SWATCHES[0].color);
+    });
     $$('[data-avatar]', sheet).forEach((button) => button.addEventListener('click', () => {
       profile.avatar = Number(button.dataset.avatar);
       profile.avatarImage = '';
@@ -3597,7 +4002,17 @@ function showProfileForm() {
       submit.disabled = true;
       submit.textContent = '正在保存…';
       try {
-        await window.ZhereService.updateProfile({ nickname, spaceName });
+        const bio = form.elements.bio.value.trim();
+        const result = await window.ZhereService.updateProfile({
+          nickname,
+          spaceName,
+          bio,
+          avatar: profile.avatar,
+          avatarImage: profile.avatarImage,
+        });
+        profile.avatar = result.user.avatar;
+        profile.avatarImage = result.user.avatarImage || '';
+        profile.bio = result.user.bio || bio;
       } catch (error) {
         submit.disabled = false;
         submit.textContent = '保存角色';
@@ -3605,9 +4020,10 @@ function showProfileForm() {
         return;
       }
       profile.nickname = nickname;
-      profile.bio = form.elements.bio.value.trim();
       profile.spaceName = spaceName;
+      profile.spacePublic = form.elements.spacePublic.checked;
       persist();
+      schedulePublicSpaceSnapshot();
       logEvent('profile_update');
       closeSheet();
       refreshIdentity();
@@ -3625,13 +4041,15 @@ function resizeAvatarImage(file) {
     image.onload = () => {
       try {
         const canvas = document.createElement('canvas');
-        canvas.width = 160; canvas.height = 160;
+        canvas.width = 128; canvas.height = 128;
         const context = canvas.getContext('2d');
         const side = Math.min(image.naturalWidth, image.naturalHeight);
         const sx = (image.naturalWidth - side) / 2;
         const sy = (image.naturalHeight - side) / 2;
-        context.drawImage(image, sx, sy, side, side, 0, 0, 160, 160);
-        resolve(canvas.toDataURL('image/webp', .82));
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
+        context.drawImage(image, sx, sy, side, side, 0, 0, 128, 128);
+        resolve(canvas.toDataURL('image/webp', .78));
       } catch (error) { reject(error); }
       finally { URL.revokeObjectURL(url); }
     };
@@ -3710,6 +4128,10 @@ function runContextAction(action) {
 }
 
 function observe() {
+  if (state.worldMode === 'cottage') {
+    if (cottageExitArmed && cottageExitDistance() <= 14) return walkToCottageExit();
+    return showHomesteadPanel('today');
+  }
   if (!state.nearest) return say('附近没有特别的东西。海在更南边，林子在西边。');
   if (state.nearest.type === 'video') return showVideo(state.nearest.video);
   if (state.nearest.type === 'note') return showNoteDetail(state.nearest.note);
@@ -3719,6 +4141,9 @@ function observe() {
   if (state.nearest.type === 'resource') return gatherResource(state.nearest.item);
   if (state.nearest.type === 'nameless') return showNameless(state.nearest.region);
   if (state.nearest.type === 'bottle') return openBottle();
+  if (state.nearest.type === 'zone-event') return showZoneEvent(state.nearest.zoneId);
+  if (state.nearest.type === 'dynamic-location') return showDynamicLocation(state.nearest.loc);
+  if (state.nearest.type === 'npc') return showNpcEncounter(state.nearest.npcId);
   const actions = {
     cottage: enterCottage, board: showBoard, workshop: showWorkshop, telescope: showTelescope,
     sound: showSoundDock, seabench: showSeabench, neighbor: showNeighbor, anomaly: showAnomaly,
@@ -3854,14 +4279,16 @@ function enterWorld(mode) {
   entry.inert = true;
   entry.setAttribute('aria-hidden', 'true');
   updateHudState();
+  showContextHint('<kbd>WASD</kbd> 行走 · 点击地面自动前往 · 点击物品查看互动', { mode: 'intro', duration: 8000 });
   history.replaceState({}, '', appBasePath);
   refreshIdentity();
   telemetryWorldEntered = true;
   telemetrySessionEnded = false;
   resetMovementSample();
-  logEvent('session_start', { mode, consent_research: state.research, day_seed: daySeed });
-  syncPublicWorld({ render: true });
+  logEvent('session_start', { mode, collection_policy: 'default', day_seed: daySeed });
+  syncPublicWorld({ render: true }).then(() => schedulePublicSpaceSnapshot());
   refreshNotifications({ announce: true });
+  scheduleBackgroundSync();
   setTimeout(() => { entry.hidden = true; }, 320);
   if (!state.guideIntroSeen && state.onboarding.status === 'new') {
     say('欢迎来到公域。可以直接自由走，也可以用大约三分钟完成第一次远行：看素材、回应需求，再让自己的地块发生一次变化。', '木秋', [
@@ -4002,9 +4429,13 @@ document.addEventListener('visibilitychange', () => {
   } else if (telemetryWorldEntered && !telemetrySessionEnded) {
     resetMovementSample();
     logEvent('session_resume', { duration_ms: Date.now() - telemetryStartedAt });
+    resumeBackgroundSync();
   }
 });
-window.addEventListener('pagehide', () => endTelemetrySession('pagehide'));
+window.addEventListener('pagehide', () => {
+  clearTimeout(backgroundSyncTimer);
+  endTelemetrySession('pagehide');
+});
 
 cottageExit.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -4078,7 +4509,7 @@ $('#logoutButton').addEventListener('click', () => {
   requestAnimationFrame(() => $('#loginForm').elements.identity.focus());
   logoutRequest
     .then(() => { $('#loginError').textContent = ''; })
-    .catch(() => { $('#loginError').textContent = '页面已退出；服务端会话清理失败，请刷新后再登录。'; })
+    .catch(() => { $('#loginError').textContent = '页面已退出，可以直接重新登录；旧会话会在服务恢复后自动过期。'; })
     .finally(() => {
       loginSubmit.disabled = false;
       logoutButton.disabled = false;
@@ -4106,7 +4537,8 @@ $('#dayStone').addEventListener('click', (event) => { event.stopPropagation(); a
 async function startApp() {
   const bootPromise = window.ZhereService.bootstrap();
   worldVideos.forEach((video) => Object.assign(video, state.assetOverrides[video.id] || {}));
-  worldStage.classList.toggle('event-muted', state.eventChoice === 'replace' || state.eventChoice === 'mix');
+  const currentEventChoice = state.worldEventChoices[state.homestead.day] || 'none';
+  worldStage.classList.toggle('event-muted', currentEventChoice === 'replace' || currentEventChoice === 'mix');
   if (!state.bottleState) spawnBottle();
   renderScreens();
   renderWorld();
@@ -4120,11 +4552,15 @@ async function startApp() {
     if (!boot.superseded && boot.authenticated) {
       if (boot.state) Object.assign(state, normalizeState(boot.state));
       state.rawEvents = Array.isArray(boot.events) ? boot.events.slice(-RAW_EVENT_CAP) : [];
+      importGrowthEvents(state.rawEvents);
       if (boot.user) {
         state.profile.nickname = boot.user.nickname || state.profile.nickname;
         state.profile.username = boot.user.username || state.profile.username;
         state.profile.spaceName = boot.user.spaceName || state.profile.spaceName;
-        state.research = Boolean(boot.user.research);
+        state.profile.bio = boot.user.bio || state.profile.bio;
+        state.profile.avatar = Number.isFinite(Number(boot.user.avatar)) ? Number(boot.user.avatar) : state.profile.avatar;
+        state.profile.avatarImage = boot.user.avatarImage || state.profile.avatarImage;
+        state.research = true;
       }
       $('#guestButton').textContent = '继续上次漫游';
       // Browser storage is only a one-time seed for accounts without a server
@@ -4148,7 +4584,8 @@ async function startApp() {
   }
 
   worldVideos.forEach((video) => Object.assign(video, state.assetOverrides[video.id] || {}));
-  worldStage.classList.toggle('event-muted', state.eventChoice === 'replace' || state.eventChoice === 'mix');
+  const hydratedEventChoice = state.worldEventChoices[state.homestead.day] || 'none';
+  worldStage.classList.toggle('event-muted', hydratedEventChoice === 'replace' || hydratedEventChoice === 'mix');
   if (!state.bottleState) spawnBottle();
   renderScreens();
   if (state.worldMode === 'cottage') {

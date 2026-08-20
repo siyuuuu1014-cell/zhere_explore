@@ -31,6 +31,7 @@ function showEntryDirtyGuard(targetPage) {
     guard.setAttribute('aria-labelledby', 'entryDirtyTitle');
     guard.innerHTML = `
       <div class="dirty-sheet-paper">
+        <button class="dirty-sheet-close" data-entry-dirty-close type="button" aria-label="关闭输入保护提示">关闭</button>
         <p class="purchase-success-kicker">输入保护</p>
         <h2 id="entryDirtyTitle">这页还有没填完的内容</h2>
         <p>继续编辑会保留当前输入；放弃后才会切换页面。</p>
@@ -40,14 +41,17 @@ function showEntryDirtyGuard(targetPage) {
         </div>
       </div>`;
     guard.addEventListener('keydown', (event) => trapFocusWithin(event, guard));
-    entry.append(guard);
-    $('[data-entry-dirty-continue]', guard).addEventListener('click', () => {
+    const dismissGuard = () => {
       const returnFocus = entryDirtyReturnFocus;
       entryDirtyTargetPage = null;
       entryDirtyReturnFocus = null;
       closeEntryDirtyGuard();
       requestAnimationFrame(() => returnFocus?.isConnected && returnFocus.focus?.());
-    });
+    };
+    guard.addEventListener('click', (event) => { if (event.target === guard) dismissGuard(); });
+    entry.append(guard);
+    $('[data-entry-dirty-continue]', guard).addEventListener('click', dismissGuard);
+    $('[data-entry-dirty-close]', guard).addEventListener('click', dismissGuard);
     $('[data-entry-dirty-discard]', guard).addEventListener('click', () => {
       const page = entryDirtyTargetPage;
       const current = $('.entry-page.is-active', entry);
@@ -83,17 +87,17 @@ const ENTRY_LEGAL_COPY = {
       ['公共世界与个人空间', '公共素材、需求和回应属于公共世界内容；其他玩家可以看见并按规则互动。你只能长期改造自己的小屋，不能删除或改变他人的公共内容。'],
       ['模拟报价与副本', '报价使用独立的模拟价格单位，不是真实支付，不扣除灵感币，也不能提现或兑换。报价成功获得的是一次视频素材授权对应的个人副本；公共原素材不会被移除。'],
       ['内容责任', '请勿上传违法、侵权、欺诈、骚扰、泄露隐私或不适合公共展示的内容。平台可以隐藏、限制或删除违规内容，并保留必要的操作记录。'],
-      ['测试版变更', '测试期间功能、地图和规则可能调整。涉及研究授权、数据删除和虚拟价格含义的关键规则会保持明确提示。'],
+      ['测试版变更', '测试期间功能、地图和规则可能调整。涉及数据采集、数据删除和虚拟价格含义的关键规则会保持明确提示。'],
     ],
   },
   privacy: {
     title: 'Zhere 隐私说明',
-    intro: '我们只按页面已说明的目的处理账户、游戏进度、视频资产和研究事件数据。研究授权可以随时关闭，关闭后账户和游戏进度仍然保留。',
+    intro: '我们只按页面已说明的目的处理账户、游戏进度、视频资产和研究事件数据。创建角色或进入访客体验后，页面活动会按本说明记录。',
     sections: [
       ['收集哪些数据', '包括账户标识与加密密码、角色资料、游戏进度、上传的视频文件与描述、公开素材和需求、评论回应、曝光观看、收藏标签、模拟报价、成交与副本布置等事件。'],
-      ['为什么收集', '数据用于提供登录与跨设备进度、保存公共内容、保障安全，以及在你自愿授权后研究推荐算法与智能定价方法。真实密码不会以明文保存。'],
+      ['为什么收集', '数据用于提供登录与跨设备进度、保存公共内容、保障安全，并研究推荐算法与智能定价方法。真实密码不会以明文保存。'],
       ['保存与可见范围', '数据默认长期保存。公开发布的素材、需求、回应和昵称可被其他玩家看到；邮箱、手机号、密码哈希和研究主体标识不会作为公共资料展示。'],
-      ['你的选择', '你可以在“数据与隐私”中退出研究、导出个人数据或申请匿名化。退出研究不会删除账户；匿名化后账户访问会被撤销，历史研究记录不再保留直接身份。'],
+      ['你的数据权利', '你可以在“数据与隐私”中导出个人数据或申请删除并匿名化。匿名化后账户访问会被撤销，历史研究记录不再保留直接身份。'],
       ['数据提供范围', '研究数据不提供给第三方训练模型。服务端可使用飞书多维表格与云空间保存业务和视频数据，浏览器不会持有飞书 App Secret。'],
     ],
   },
@@ -167,8 +171,7 @@ $('#entryLegal').addEventListener('click', (event) => { if (event.target === $('
     if (event.target.matches('input, textarea, select')) form.dataset.dirty = 'true';
   });
 });
-$('#guestButton').addEventListener('click', async () => {
-  const button = $('#guestButton');
+async function enterGuestWorld(button) {
   setPendingButton(button, true, '正在准备公域…');
   const noticeTimer = delayedAuthNotice(button);
   try {
@@ -179,6 +182,7 @@ $('#guestButton').addEventListener('click', async () => {
       applyPublicWorld(result.publicWorld, { render: false });
       applyPricingPurchases(result.purchases);
       state.notifications = result.notifications || [];
+      state.research = true;
     }
     serviceSessionAvailable = true;
     persist();
@@ -190,7 +194,30 @@ $('#guestButton').addEventListener('click', async () => {
     clearTimeout(noticeTimer);
     setPendingButton(button, false);
   }
-});
+}
+
+function showGuestDataNotice() {
+  const button = $('#guestButton');
+  entryLegalReturnFocus = button;
+  $('#entryLegalContent').innerHTML = `
+    <p class="purchase-success-kicker">访客体验说明</p>
+    <h2 id="entryLegalTitle">体验过程中会留下哪些记录？</h2>
+    <p>进入后会记录观看、互动、移动采样、发布、报价与家园操作，用于保存体验状态以及推荐与定价研究。</p>
+    <section><h3>会记录</h3><p>页面曝光、观看进度、点赞收藏、评论标签、需求回应、模拟报价、副本去向，以及采集、种植和建造等游戏行为。</p></section>
+    <section><h3>不会记录</h3><p>明文密码、未提交的表单内容、任意鼠标轨迹或与游戏无关的设备文件。你进入后仍可在“数据与隐私”中导出记录或申请删除并匿名化。</p></section>
+    <div class="media-actions"><button class="primary-button" id="guestDataContinue" type="button">理解并开始体验</button><button class="text-button" id="guestDataCancel" type="button">先返回</button></div>`;
+  $('#entryLegal').hidden = false;
+  $('.entry-book').inert = true;
+  $('.entry-book').setAttribute('aria-hidden', 'true');
+  $('#guestDataContinue').addEventListener('click', () => {
+    closeEntryLegal();
+    enterGuestWorld(button);
+  });
+  $('#guestDataCancel').addEventListener('click', closeEntryLegal);
+  $('#guestDataContinue').focus();
+}
+
+$('#guestButton').addEventListener('click', showGuestDataNotice);
 $('#loginForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -209,7 +236,7 @@ $('#loginForm').addEventListener('submit', async (event) => {
       state.profile.nickname = result.user.nickname || state.profile.nickname;
       state.profile.username = result.user.username || state.profile.username;
       state.profile.spaceName = result.user.spaceName || state.profile.spaceName;
-      state.research = Boolean(result.user.research);
+      state.research = true;
     }
     persist();
     logEvent('login', { method: 'password' });
@@ -243,7 +270,7 @@ $('#registerForm').addEventListener('submit', async (event) => {
     const result = await window.ZhereService.register({
       identity: data.get('identity'), nickname: data.get('nickname'), spaceName: data.get('spaceName'),
       password: data.get('password'), confirmPassword: data.get('confirmPassword'), ageConfirmed: data.get('age') === 'on',
-      agreeTerms: data.get('terms') === 'on', research: data.get('research') === 'on',
+      agreeTerms: data.get('terms') === 'on', research: true,
     });
     serviceSessionAvailable = true;
     if (result.state) Object.assign(state, normalizeState(result.state));
@@ -254,9 +281,9 @@ $('#registerForm').addEventListener('submit', async (event) => {
     state.profile.nickname = data.get('nickname') || state.profile.nickname;
     state.profile.username = result.user?.username || state.profile.username;
     state.profile.spaceName = data.get('spaceName') || state.profile.spaceName;
-    state.research = data.get('research') === 'on';
+    state.research = true;
     persist();
-    logEvent('register', { consent_research: state.research });
+    logEvent('register', { collection_policy: 'default' });
     enterWorld('server-register');
     hydrateSessionExtras().then(() => migrateLegacyPublicContent());
   } catch (error) {

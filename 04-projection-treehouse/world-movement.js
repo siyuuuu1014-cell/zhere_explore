@@ -140,6 +140,7 @@ function cancelPointerMove(reason = 'cancelled', savePosition = false) {
   delete worldStage.dataset.pointerMoveTarget;
   walkTarget.hidden = true;
   player.classList.remove('is-moving');
+  hideContextHint('interaction');
   if (previous.mode === 'overworld') flushMovementSample(reason);
   if (savePosition) persist();
   updateNearby();
@@ -172,6 +173,10 @@ function startPointerMove(mode, x, y, options = {}) {
     startedAt: Date.now(),
     replans: 0,
   };
+  if (pointerMoveTarget.source === 'ground') hideContextHint();
+  else if (pointerMoveTarget.label) {
+    showContextHint(`正在前往「${escapeHtml(pointerMoveTarget.label)}」`, { mode: 'interaction', duration: 2600, userInitiated: true });
+  }
   if (pointerMoveTarget.waypoints.length) advancePointerWaypoint(pointerMoveTarget);
   cottageExit.classList.remove('is-entering');
   closeContextWheel();
@@ -196,6 +201,8 @@ function approachWorldInteraction(node, options = {}) {
   const targetY = baseWy + Number(options.offsetY || 0);
   const arrivalDistance = Math.max(64, Number(options.arrivalDistance) || 116);
   const onArrival = typeof options.onArrival === 'function' ? options.onArrival : null;
+  const label = options.label || node.dataset.label || node.getAttribute('aria-label') || '可互动地点';
+  showContextHint(`已选择「${escapeHtml(label)}」`, { mode: 'interaction', duration: 2400, userInitiated: true });
   if (Math.hypot(state.wx - targetX, state.wy - targetY) <= arrivalDistance) {
     stopMovement(true);
     requestAnimationFrame(() => onArrival?.());
@@ -203,7 +210,7 @@ function approachWorldInteraction(node, options = {}) {
   }
   return startPointerMove('overworld', targetX, targetY, {
     source: options.source || 'world-interaction',
-    label: options.label || node.dataset.label || node.getAttribute('aria-label') || '',
+    label,
     stopDistance: Math.max(4, Number(options.stopDistance) || 8),
     onArrival,
   });
@@ -237,6 +244,7 @@ function finishPointerMove(target) {
   delete worldStage.dataset.pointerMoveTarget;
   walkTarget.hidden = true;
   player.classList.remove('is-moving');
+  hideContextHint('interaction');
   if (target.mode === 'overworld') flushMovementSample('click_arrived');
   persist();
   logEvent('move_click_arrived', {
@@ -324,6 +332,7 @@ function frame(now) {
     }
     player.classList.toggle('is-moving', Boolean(dx || dy));
     if (dx || dy) {
+      hideContextHint('intro');
       if (Math.abs(dx) >= Math.abs(dy) && dx) player.dataset.facing = dx < 0 ? 'left' : 'right';
       else if (dy) player.dataset.facing = dy < 0 ? 'up' : 'down';
       closeContextWheel();

@@ -14,6 +14,19 @@ let server;
 let dataDir;
 let repository;
 
+function fakeMp4(payload) {
+  return Buffer.concat([Buffer.from([0, 0, 0, 16]), Buffer.from('ftypisom'), Buffer.from(payload)]);
+}
+
+function personalDemand(overrides = {}) {
+  return {
+    title: '寻找雨夜街景', theme: '雨夜城市', description: '需要一段安静的雨夜素材',
+    durationSeconds: 30, aspectRatioPreset: '16:9', resolutionPreset: '1080p', priceAmount: 36,
+    startAt: '2026-09-01T10:00:00+08:00', endAt: '2026-09-10T18:00:00+08:00',
+    ...overrides,
+  };
+}
+
 before(async () => {
   dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhere-server-test-'));
   repository = new LocalRepository(dataDir);
@@ -42,6 +55,14 @@ test('Argon2id hashes do not contain the password and verify safely', () => {
   assert.equal(verifyPassword('wrong-password', hash), false);
 });
 
+test('public config exposes the server video limit to the browser', async () => {
+  const response = await fetch(`${baseUrl}/api/config`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.limits.maxVideoBytes, 1024 * 1024);
+  assert.equal(body.limits.maxVideoMegabytes, 1);
+});
+
 test('register issues an HttpOnly session cookie', async () => {
   const response = await fetch(`${baseUrl}/api/auth/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -57,6 +78,31 @@ test('register issues an HttpOnly session cookie', async () => {
   assert.match(setCookie, /SameSite=Lax/i);
   assert.doesNotMatch(setCookie, /; Secure/i);
   cookie = setCookie.split(';')[0];
+});
+
+test('guest entry defaults to disclosed research collection', async () => {
+  const response = await fetch(`${baseUrl}/api/auth/guest`, { method: 'POST' });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.user.guest, true);
+  assert.equal(body.user.research, true);
+});
+
+test('logout clears the browser cookie even when durable session cleanup fails', async () => {
+  const registration = await fetch(`${baseUrl}/api/auth/guest`, { method: 'POST' });
+  const guestCookie = registration.headers.get('set-cookie').split(';')[0];
+  const originalDeleteSession = repository.deleteSession.bind(repository);
+  repository.deleteSession = async () => { throw new Error('simulated-session-cleanup-failure'); };
+  try {
+    const response = await fetch(`${baseUrl}/api/auth/logout`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie: guestCookie }, body: '{}',
+    });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('set-cookie'), /zhere_session=;/);
+    assert.match(response.headers.get('set-cookie'), /Max-Age=0/i);
+  } finally {
+    repository.deleteSession = originalDeleteSession;
+  }
 });
 
 test('a completed registration cannot be replayed through the register endpoint', async () => {
@@ -110,6 +156,7 @@ test('register accepts an exact mainland phone number and creates the internal u
   assert.equal(response.status, 201);
   const body = await response.json();
   assert.match(body.user.username, /^user-[a-f0-9]{12}$/);
+  assert.equal(body.user.research, true);
   assert.equal(body.state, null);
   assert.equal(body.version, 0);
 });
@@ -198,35 +245,49 @@ test('research identity, consent history, and collection health are connected', 
   assert.equal(stored.researchSessions.some((item) => item.user_id === user.id && item.subject_id === subject.subject_id), true);
 });
 
-test('research opt-out is persisted and non-essential telemetry is acknowledged without storage', async () => {
+test('activity collection policy cannot be paused and all valid telemetry is stored', async () => {
   const consent = await fetch(`${baseUrl}/api/privacy/consent`, {
     method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ active: false }),
   });
-  assert.equal(consent.status, 200);
-  assert.equal((await consent.json()).user.research, false);
+  assert.equal(consent.status, 409);
+  assert.equal((await consent.json()).error.code, 'collection-policy-fixed');
 
-  const paused = await fetch(`${baseUrl}/api/privacy/research-status`, { headers: { cookie } }).then((item) => item.json());
-  assert.equal(paused.status, 'paused');
-  assert.equal(paused.collecting, false);
-  assert.equal(paused.consent_record_count >= 2, true);
+  const status = await fetch(`${baseUrl}/api/privacy/research-status`, { headers: { cookie } }).then((item) => item.json());
+  assert.equal(status.status, 'collecting');
+  assert.equal(status.collecting, true);
 
   const events = [
-    { event_id: 'evt-opted-out-move', raw_event: 'move_sample', details: { wx: 2 }, created_at: new Date().toISOString(), research_consent: false },
-    { event_id: 'evt-consent-off', raw_event: 'research_consent_change', details: { active: false }, created_at: new Date().toISOString(), research_consent: false },
-    { event_id: 'evt-opted-out-feedback', raw_event: 'feedback', details: { text: '按钮没有反应' }, created_at: new Date().toISOString(), research_consent: false },
+    { event_id: 'evt-policy-move', raw_event: 'move_sample', details: { wx: 2 }, created_at: new Date().toISOString(), research_consent: false },
+    { event_id: 'evt-policy-feedback', raw_event: 'feedback', details: { text: '按钮没有反应' }, created_at: new Date().toISOString(), research_consent: false },
   ];
   const response = await fetch(`${baseUrl}/api/events/batch`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ events }),
   });
   const result = await response.json();
-  assert.deepEqual(result.accepted, ['evt-consent-off', 'evt-opted-out-feedback']);
-  assert.deepEqual(result.acknowledged, ['evt-opted-out-move', 'evt-consent-off', 'evt-opted-out-feedback']);
+  assert.deepEqual(result.accepted, ['evt-policy-move', 'evt-policy-feedback']);
+  assert.deepEqual(result.acknowledged, ['evt-policy-move', 'evt-policy-feedback']);
   const recent = await fetch(`${baseUrl}/api/events/recent`, { headers: { cookie } }).then((item) => item.json());
-  assert.equal(recent.events.some((event) => event.event_id === 'evt-opted-out-move'), false);
+  const storedMove = recent.events.find((event) => event.event_id === 'evt-policy-move');
+  assert.equal(storedMove.research_consent, true);
+});
 
-  await fetch(`${baseUrl}/api/privacy/consent`, {
-    method: 'PUT', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ active: true }),
+test('login migrates a legacy paused account to the default collection policy', async () => {
+  const legacyUser = await repository.findUserByIdentity('player@example.com');
+  legacyUser.research = false;
+  await repository.updateUser(legacyUser);
+
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ identity: 'player@example.com', password: 'correct-horse' }),
   });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).user.research, true);
+
+  const migrated = await repository.findUserByIdentity('player@example.com');
+  assert.equal(migrated.research, true);
+  const consents = await repository.listResearchConsents(migrated.id);
+  assert.equal(consents.some((item) => item.reason === 'collection-policy-default' && item.research_allowed === true), true);
 });
 
 test('video upload returns a protected playable URL', async () => {
@@ -234,7 +295,8 @@ test('video upload returns a protected playable URL', async () => {
   form.set('assetId', 'u-test-video');
   form.set('title', '测试视频');
   form.set('description', '上传链路测试');
-  form.set('file', new File([Buffer.from('fake-mp4-data')], 'test.mp4', { type: 'video/mp4' }));
+  const videoBytes = fakeMp4('fake-mp4-data');
+  form.set('file', new File([videoBytes], 'test.mp4', { type: 'video/mp4' }));
   const uploaded = await fetch(`${baseUrl}/api/media`, { method: 'POST', headers: { cookie }, body: form });
   assert.equal(uploaded.status, 201);
   const body = await uploaded.json();
@@ -242,10 +304,10 @@ test('video upload returns a protected playable URL', async () => {
   const media = await fetch(`${baseUrl}${body.asset.mediaUrl}`, { headers: { cookie } });
   assert.equal(media.status, 200);
   assert.equal(media.headers.get('content-type'), 'video/mp4');
-  assert.equal(Buffer.from(await media.arrayBuffer()).toString(), 'fake-mp4-data');
-  const ranged = await fetch(`${baseUrl}${body.asset.mediaUrl}`, { headers: { cookie, range: 'bytes=0-3' } });
+  assert.deepEqual(Buffer.from(await media.arrayBuffer()), videoBytes);
+  const ranged = await fetch(`${baseUrl}${body.asset.mediaUrl}`, { headers: { cookie, range: 'bytes=12-15' } });
   assert.equal(ranged.status, 206);
-  assert.equal(ranged.headers.get('content-range'), 'bytes 0-3/13');
+  assert.equal(ranged.headers.get('content-range'), `bytes 12-15/${videoBytes.length}`);
   assert.equal(Buffer.from(await ranged.arrayBuffer()).toString(), 'fake');
 });
 
@@ -265,7 +327,7 @@ test('combined video upload and publication is idempotent and immediately public
     form.set('wx', '128');
     form.set('wy', '-44');
     form.set('zone', 'town');
-    form.set('file', new File([Buffer.from('combined-mp4-data')], 'combined.mp4', { type: 'video/mp4' }));
+    form.set('file', new File([fakeMp4('combined-mp4-data')], 'combined.mp4', { type: 'video/mp4' }));
     return form;
   };
   const first = await fetch(`${baseUrl}/api/public/assets/upload`, { method: 'POST', headers: { cookie }, body: makeForm() });
@@ -285,7 +347,7 @@ test('combined video upload and publication is idempotent and immediately public
   const world = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie } }).then((response) => response.json());
   assert.equal(world.assets.filter((asset) => asset.id === 'u-combined-video').length, 1);
   const media = await fetch(`${baseUrl}/api/media/u-combined-video`, { headers: { cookie } });
-  assert.equal(Buffer.from(await media.arrayBuffer()).toString(), 'combined-mp4-data');
+  assert.deepEqual(Buffer.from(await media.arrayBuffer()), fakeMp4('combined-mp4-data'));
 });
 
 test('combined publication resumes from an uploaded private file after a partial write failure', async () => {
@@ -296,7 +358,7 @@ test('combined publication resumes from an uploaded private file after a partial
     form.set('wx', '72');
     form.set('wy', '36');
     form.set('zone', 'shore');
-    form.set('file', new File([Buffer.from('resumable-video-data')], 'resumable.mp4', { type: 'video/mp4' }));
+    form.set('file', new File([fakeMp4('resumable-video-data')], 'resumable.mp4', { type: 'video/mp4' }));
     return form;
   };
   const original = repository.savePublicAsset.bind(repository);
@@ -347,7 +409,7 @@ test('public assets, public demands, and responses are shared across accounts wi
 
   const playableByOtherAccount = await fetch(`${baseUrl}/api/media/u-test-video`, { headers: { cookie: secondCookie } });
   assert.equal(playableByOtherAccount.status, 200);
-  assert.equal(Buffer.from(await playableByOtherAccount.arrayBuffer()).toString(), 'fake-mp4-data');
+  assert.deepEqual(Buffer.from(await playableByOtherAccount.arrayBuffer()), fakeMp4('fake-mp4-data'));
 
   const metadataOnlyPublish = await fetch(`${baseUrl}/api/public/assets`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie },
@@ -358,9 +420,16 @@ test('public assets, public demands, and responses are shared across accounts wi
 
   const createdDemand = await fetch(`${baseUrl}/api/public/demands`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie },
-    body: JSON.stringify({ id: 'n-public-test', title: '寻找雨夜街景', description: '需要一段安静的雨夜素材', wx: 52, wy: -16, zone: '镇中心' }),
+    body: JSON.stringify(personalDemand({ id: 'n-public-test', wx: 52, wy: -16, zone: '镇中心' })),
   });
   assert.equal(createdDemand.status, 201);
+  const createdDemandBody = await createdDemand.json();
+  assert.equal(createdDemandBody.demand.priceAmount, 36);
+  assert.equal(createdDemandBody.demand.priceRole, 'quote');
+  assert.equal(createdDemandBody.demand.priceUnit, 'inspiration_coin');
+  assert.equal(createdDemandBody.demand.pricingSignalEligible, true);
+  assert.equal(createdDemandBody.demand.aspectRatio, '16:9');
+  assert.equal(createdDemandBody.demand.resolution, '1080p');
 
   const publicWorldForSecond = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie: secondCookie } }).then((response) => response.json());
   assert.equal(publicWorldForSecond.assets.some((asset) => asset.id === 'u-test-video' && asset.owner === 'other'), true);
@@ -447,13 +516,50 @@ test('public assets, public demands, and responses are shared across accounts wi
   assert.equal(deleteOwnComment.status, 200);
 });
 
+test('enterprise demand fields are required and remain demand-side pricing signals', async () => {
+  const invalid = await fetch(`${baseUrl}/api/public/demands`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ id: 'n-enterprise-invalid', type: 'commerce', companyName: '文鳐网络' }),
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error.code, 'demand-activity-required');
+
+  const pricingBefore = await repository.listAllPricing();
+  const created = await fetch(`${baseUrl}/api/public/demands`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({
+      id: 'n-enterprise-valid', type: 'commerce', companyName: '文鳐网络', activityName: '城市影像计划',
+      cooperationScope: '短视频素材共创', region: '西安', priceAmount: 800,
+      skillRequirements: '能够拍摄稳定的城市生活镜头', cooperationDescription: '寻找可用于活动展示的原创素材',
+      startAt: '2026-10-01T09:00:00+08:00', endAt: '2026-10-20T18:00:00+08:00',
+    }),
+  });
+  assert.equal(created.status, 201);
+  const demand = (await created.json()).demand;
+  assert.equal(demand.title, '城市影像计划');
+  assert.equal(demand.priceRole, 'budget');
+  assert.equal(demand.priceUnit, 'inspiration_coin');
+  assert.equal(demand.pricingSignalEligible, true);
+  const pricingAfter = await repository.listAllPricing();
+  assert.equal(pricingAfter.bids.length, pricingBefore.bids.length);
+  assert.equal(pricingAfter.transactions.length, pricingBefore.transactions.length);
+});
+
 test('profile updates are reflected in later public authorship', async () => {
+  const avatarImage = 'data:image/webp;base64,UklGRgAAAAA=';
   const updated = await fetch(`${baseUrl}/api/profile`, {
     method: 'PUT', headers: { 'content-type': 'application/json', cookie },
-    body: JSON.stringify({ nickname: '新名字旅人', spaceName: '改名后的小窝' }),
+    body: JSON.stringify({ nickname: '新名字旅人', spaceName: '改名后的小窝', bio: '会收集风声', avatar: 3, avatarImage }),
   });
   assert.equal(updated.status, 200);
-  assert.equal((await updated.json()).user.nickname, '新名字旅人');
+  const updatedUser = (await updated.json()).user;
+  assert.equal(updatedUser.nickname, '新名字旅人');
+  assert.equal(updatedUser.bio, '会收集风声');
+  assert.equal(updatedUser.avatar, 3);
+  assert.equal(updatedUser.avatarImage, avatarImage);
+
+  const refreshedSession = await fetch(`${baseUrl}/api/auth/session`, { headers: { cookie } }).then((item) => item.json());
+  assert.equal(refreshedSession.user.avatarImage, avatarImage);
 
   const message = await fetch(`${baseUrl}/api/public/records`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie },
@@ -461,6 +567,13 @@ test('profile updates are reflected in later public authorship', async () => {
   });
   assert.equal(message.status, 201);
   assert.equal((await message.json()).record.name, '新名字旅人');
+
+  const invalidAvatar = await fetch(`${baseUrl}/api/profile`, {
+    method: 'PUT', headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ nickname: '新名字旅人', avatarImage: 'https://example.com/avatar.png' }),
+  });
+  assert.equal(invalidAvatar.status, 400);
+  assert.equal((await invalidAvatar.json()).error.code, 'avatar-invalid');
 });
 
 test('the public swap box is shared and only one concurrent claimant succeeds', async () => {
@@ -551,8 +664,14 @@ test('public interactions, ownership management, delta sync, and moderation are 
     body: JSON.stringify({ id: 'loose-tag-public-test', kind: 'loose_tag', payload: { tag: '雨停以后', wx: 318, wy: -204, zone: '镇中心' } }),
   });
   assert.equal(looseTag.status, 201);
+  const frameMessage = await fetch(`${baseUrl}/api/public/records`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie },
+    body: JSON.stringify({ id: 'frame-message-public-test', kind: 'frame_message', payload: { text: '这里好像缺一段海风', source: 'blank_frame' } }),
+  });
+  assert.equal(frameMessage.status, 201);
   const sharedLooseTag = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie } }).then((response) => response.json());
   assert.equal(sharedLooseTag.records.some((record) => record.id === 'loose-tag-public-test' && record.payload.tag === '雨停以后' && record.owner === 'other'), true);
+  assert.equal(sharedLooseTag.records.some((record) => record.id === 'frame-message-public-test' && record.payload.text === '这里好像缺一段海风'), true);
   const link = await fetch(`${baseUrl}/api/public/demands/n-public-test/links`, {
     method: 'PUT', headers: { 'content-type': 'application/json', cookie: secondCookie }, body: JSON.stringify({ assetId: 'u-test-video', active: true }),
   });
@@ -561,7 +680,7 @@ test('public interactions, ownership management, delta sync, and moderation are 
 
   const secondDemand = await fetch(`${baseUrl}/api/public/demands`, {
     method: 'POST', headers: { 'content-type': 'application/json', cookie },
-    body: JSON.stringify({ id: 'n-response-boundary-test', title: '另一张需求' }),
+    body: JSON.stringify(personalDemand({ id: 'n-response-boundary-test', title: '另一张需求' })),
   });
   assert.equal(secondDemand.status, 201);
   const wrongDemandResponseEdit = await fetch(`${baseUrl}/api/public/demands/n-response-boundary-test/responses/response-second`, {
@@ -601,6 +720,62 @@ test('public interactions, ownership management, delta sync, and moderation are 
   const worldAfterModeration = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie: secondCookie } }).then((response) => response.json());
   assert.equal(worldAfterModeration.assets.some((asset) => asset.id === 'u-test-video'), false);
   assert.equal(worldAfterModeration.deletedAssetIds.includes('u-test-video'), true);
+});
+
+test('ratings, neighbor shares, follows, guestbook notes, and built-in tags form durable cross-user records', async () => {
+  const targetSpaceResponse = await fetch(`${baseUrl}/api/public/records`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ id: 'space-feedback-target', kind: 'space_snapshot', payload: { nickname: '小风', spaceName: '风声小窝' } }),
+  });
+  assert.equal(targetSpaceResponse.status, 201);
+  const targetSpace = (await targetSpaceResponse.json()).record;
+  const visitorSpaceResponse = await fetch(`${baseUrl}/api/public/records`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie },
+    body: JSON.stringify({ id: 'space-feedback-visitor', kind: 'space_snapshot', payload: { nickname: '雨鸟', spaceName: '雨后小窝' } }),
+  });
+  assert.equal(visitorSpaceResponse.status, 201);
+  await visitorSpaceResponse.json();
+
+  const firstRating = await fetch(`${baseUrl}/api/public/records`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie },
+    body: JSON.stringify({ kind: 'content_rating', payload: { targetType: 'asset', targetId: 'v-built-in', rate: 3 } }),
+  }).then((response) => response.json());
+  const updatedRating = await fetch(`${baseUrl}/api/public/records`, {
+    method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie },
+    body: JSON.stringify({ kind: 'content_rating', payload: { targetType: 'asset', targetId: 'v-built-in', rate: 5 } }),
+  }).then((response) => response.json());
+  assert.equal(firstRating.record.id, updatedRating.record.id);
+  assert.equal(updatedRating.record.payload.rate, 5);
+
+  for (const payload of [
+    { kind: 'follow', payload: { targetSpaceId: targetSpace.id } },
+    { kind: 'content_share', payload: { targetType: 'asset', targetId: 'v-built-in', targetSpaceId: targetSpace.id } },
+    { kind: 'space_message', payload: { targetSpaceId: targetSpace.id, text: '窗边那段雨声很好听' } },
+    { kind: 'content_tag', payload: { targetType: 'asset', targetId: 'v-built-in', tag: '雨后散步' } },
+  ]) {
+    const response = await fetch(`${baseUrl}/api/public/records`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: secondCookie }, body: JSON.stringify(payload) });
+    assert.equal(response.status, 201);
+  }
+
+  const actorWorld = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie: secondCookie } }).then((response) => response.json());
+  const ownerWorld = await fetch(`${baseUrl}/api/public/world`, { headers: { cookie } }).then((response) => response.json());
+  assert.equal(actorWorld.records.filter((record) => record.kind === 'content_rating' && record.payload.targetId === 'v-built-in').length, 1);
+  assert.equal(actorWorld.records.find((record) => record.kind === 'content_rating' && record.payload.targetId === 'v-built-in').payload.rate, 5);
+  assert.equal(ownerWorld.records.some((record) => record.kind === 'content_rating' && record.payload.targetId === 'v-built-in'), false);
+  assert.equal(ownerWorld.records.some((record) => record.kind === 'follow' && record.payload.targetSpaceId === targetSpace.id), true);
+  assert.equal(ownerWorld.records.some((record) => record.kind === 'content_share' && record.payload.targetId === 'v-built-in'), true);
+  assert.equal(ownerWorld.records.some((record) => record.kind === 'space_message' && record.payload.text === '窗边那段雨声很好听'), true);
+  assert.equal(ownerWorld.records.some((record) => record.kind === 'content_tag' && record.payload.tag === '雨后散步'), true);
+  assert.equal(JSON.stringify(ownerWorld.records).includes('targetUserId'), false);
+
+  const notices = await fetch(`${baseUrl}/api/notifications`, { headers: { cookie } }).then((response) => response.json());
+  const followNotice = notices.notifications.find((notice) => notice.kind === 'follow');
+  const messageNotice = notices.notifications.find((notice) => notice.kind === 'space_message');
+  assert.equal(followNotice?.targetType, 'neighbor');
+  assert.match(followNotice?.targetId || '', /^space-/);
+  assert.equal(notices.notifications.some((notice) => notice.kind === 'content_share'), true);
+  assert.equal(messageNotice?.targetType, 'neighbor');
+  assert.equal(messageNotice?.targetId, followNotice?.targetId);
 });
 
 test('each account can buy a material once while ten different buyers form the base price', async () => {
@@ -692,7 +867,7 @@ test('each account can buy a material once while ten different buyers form the b
   const pricingForm = new FormData();
   pricingForm.set('assetId', 'u-pricing-public');
   pricingForm.set('title', '定价测试素材');
-  pricingForm.set('file', new File([Buffer.from('pricing-video')], 'pricing.mp4', { type: 'video/mp4' }));
+  pricingForm.set('file', new File([fakeMp4('pricing-video')], 'pricing.mp4', { type: 'video/mp4' }));
   const pricingUpload = await fetch(`${baseUrl}/api/media`, { method: 'POST', headers: { cookie }, body: pricingForm });
   assert.equal(pricingUpload.status, 201);
   const pricingAsset = await fetch(`${baseUrl}/api/public/assets`, {
@@ -769,7 +944,7 @@ test('account export returns complete server-side state, assets, and raw events'
   assert.equal(body.export.base_prices.some((pricing) => pricing.material_id === 'v-pricing-test' && pricing.base_price === 50), true);
   assert.equal(body.export.raw_events.some((event) => event.event_id === 'evt-0001'), true);
   assert.match(body.export.research_subject.subject_id, /^rs-/);
-  assert.equal(body.export.research_consents.length >= 3, true);
+  assert.equal(body.export.research_consents.length >= 1, true);
   assert.equal(body.export.research_consents.every((consent) => !('user_id' in consent)), true);
   assert.equal('passwordHash' in body.export.profile, false);
 });

@@ -10,7 +10,7 @@ const WORLD_GUIDE_ITEMS = [
   { id: 'journal', category: 'start', title: '探索手账', summary: '真正看过的素材、纸条、地点和素材关系会成为可回访的个人足迹。', how: '按 J 打开手账；可以置顶记录，或沿地点记录回到附近。', key: 'J', action: 'journal' },
   { id: 'home-loop', category: 'start', title: '探索与家园循环', summary: '公共世界负责发现和采集，只有自己的地块能被永久开荒、种植、建造和摆放。', how: '按 H 回地块；完成一天的劳动后按 R 进入明天。', key: 'H / R', action: 'home' },
 
-  { id: 'cottage', category: 'landmarks', title: '我的小屋', summary: '你唯一能够永久改变的空间，包含农田、建筑、制作和副本摆放。', how: '靠近门口按 E，或随时按 H 回去。', target: 'cottage' },
+  { id: 'cottage', category: 'landmarks', title: '我的小屋', summary: '你唯一能够永久改变的空间，包含农田、建筑、制作和副本摆放。', how: '在公域靠近小屋按 E，或随时按 H 回到私域；离开时走到左侧“公域”路牌旁按 E，或直接点击路牌。', key: 'E / H', target: 'cottage' },
   { id: 'board', category: 'landmarks', title: '公告树', summary: '世界里的需求与素材目录，也能管理自己的需求、草稿和已关闭纸条。', how: '靠近按 E；搜索结果可以直接打开，不受当天地图摆放限制。', target: 'board' },
   { id: 'workshop', category: 'landmarks', title: '共创台', summary: '把本地素材先放进背包的公共工作台；它不是唯一发布入口。', how: '靠近按 E 上传；之后走到喜欢的位置按 P 发布。', target: 'workshop' },
   { id: 'telescope', category: 'landmarks', title: '山坡望远镜', summary: '随机望见世界另一端的低曝光内容，帮助不常出现的素材被发现。', how: '靠近按 E；看到内容后可以直接打开。', target: 'telescope' },
@@ -114,7 +114,7 @@ function showWorldGuide(initialCategory = 'start', focusId = null) {
         <article class="guide-entry ${item.id === focusId ? 'is-focused' : ''}" data-guide-entry="${item.id}">
           <span class="guide-symbol guide-${item.category}" aria-hidden="true"><i></i></span>
           <div class="guide-entry-copy"><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.summary)}</p><dl><div><dt>怎么做</dt><dd>${escapeHtml(item.how)}</dd></div><div><dt>当前状态</dt><dd>${escapeHtml(guideStatus(item))}</dd></div></dl></div>
-          <div class="guide-entry-actions">${item.target ? `<button class="primary-button" type="button" data-guide-target="${item.target}">带我去</button>` : ''}${item.action ? `<button class="paper-button" type="button" data-guide-action="${item.action}">现在试试</button>` : ''}</div>
+          <div class="guide-entry-actions">${item.target ? `<button class="primary-button" type="button" data-guide-target="${item.target}">标记路线</button>` : ''}${item.action ? `<button class="paper-button" type="button" data-guide-action="${item.action}">现在试试</button>` : ''}</div>
         </article>
       `).join('') : '<div class="guide-empty"><b>没有找到这件东西</b><p>可以换一个更短的词，例如“视频”“地块”或“交换”。</p><button class="text-button" id="guideClearSearch" type="button">清空搜索</button></div>';
       $$('[data-guide-target]', sheet).forEach((button) => button.onclick = () => travelFromGuide(button.dataset.guideTarget));
@@ -139,15 +139,14 @@ function showWorldGuide(initialCategory = 'start', focusId = null) {
 function travelFromGuide(targetId) {
   const target = objectTargets[targetId];
   if (!target) return showToast('这处地点暂时无法导航');
-  closeSheet();
   if (targetId === 'cottage') return goToHomestead();
   if (state.worldMode === 'cottage') exitCottage();
-  state.wx = target.wx;
-  state.wy = target.wy + 72;
+  state.guidanceTarget = { wx: target.wx, wy: target.wy, label: target.label };
+  closeSheet();
   persist();
   renderWorld();
   logEvent('guide_travel', { target_id: targetId });
-  showToast(`沿着图鉴的路线，来到了「${target.label}」附近`);
+  showToast(`已在右上方标记「${target.label}」，可以自己走过去`);
 }
 
 function runGuideAction(action) {

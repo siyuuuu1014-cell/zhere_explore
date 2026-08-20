@@ -142,6 +142,12 @@ export class LocalRepository {
     return (await this.#read()).users.find((user) => user.id === id) || null;
   }
 
+  async listAllUsers() { return (await this.#read()).users || []; }
+
+  async listAllResearchSubjects() { return (await this.#read()).researchSubjects || []; }
+
+  async listAllWorldStates() { return Object.values((await this.#read()).worldStates || {}); }
+
   async createUser(user) {
     return this.#mutate((store) => {
       if (store.users.some((entry) => entry.identity === user.identity)) throw new Error('identity-exists');
@@ -265,14 +271,18 @@ export class LocalRepository {
     return (await this.#read()).worldStates[userId] || null;
   }
 
-  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes, mediaDurationSec = null, mediaWidth = null, mediaHeight = null, mediaBitrateKbps = null }) {
+  async saveMedia({ userId, assetId, title, description, fileName, mime, bytes = null, filePath = '', size = null, mediaDurationSec = null, mediaWidth = null, mediaHeight = null, mediaBitrateKbps = null }) {
     const safeId = String(assetId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
     const storageKey = `${userId}-${safeId}`;
     const target = path.join(this.mediaDir, storageKey);
-    await fs.writeFile(target, bytes);
+    const mediaSize = Number(size ?? bytes?.length);
+    if (!Number.isFinite(mediaSize) || mediaSize < 1) throw new Error('invalid-media-size');
+    if (filePath) await fs.copyFile(filePath, target);
+    else if (bytes) await fs.writeFile(target, bytes);
+    else throw new Error('media-source-required');
     return this.#mutate((store) => {
       const asset = {
-        id: assetId, userId, title, description, fileName, mime, size: bytes.length, storageKey, createdAt: new Date().toISOString(),
+        id: assetId, userId, title, description, fileName, mime, size: mediaSize, storageKey, createdAt: new Date().toISOString(),
         media_duration_sec: mediaDurationSec, media_width: mediaWidth, media_height: mediaHeight, media_bitrate_kbps: mediaBitrateKbps,
       };
       const index = store.assets.findIndex((entry) => entry.id === assetId && entry.userId === userId);

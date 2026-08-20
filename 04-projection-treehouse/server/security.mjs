@@ -74,7 +74,10 @@ export function publicUser(user) {
     username: user.username,
     nickname: user.nickname,
     spaceName: user.spaceName,
-    research: Boolean(user.research),
+    bio: user.bio || '',
+    avatar: Math.max(0, Math.min(12, Number(user.avatar) || 0)),
+    avatarImage: user.avatarImage || '',
+    research: true,
     guest: Boolean(user.guest),
     createdAt: user.createdAt,
   };

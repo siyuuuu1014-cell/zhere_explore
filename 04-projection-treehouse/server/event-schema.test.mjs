@@ -45,3 +45,35 @@ test('event schema validates recommendation request candidates and bid attempt e
   assert.equal(validValidationFailed.error, null);
   assert.equal(validateTelemetryEvent({ ...base, raw_event: 'bid_validation_failed', details: { asset_id: 'asset-1', reason: 'x'.repeat(81) } }).error, 'invalid-bid-validation-failed');
 });
+
+test('event schema validates dynamic location, zone event and npc story events', () => {
+  const validSpawn = validateTelemetryEvent({ ...base, raw_event: 'dynamic_location_spawn', details: { location_id: 'dl-theme-海边', kind: 'theme', zone_id: 'shore', item_count: 4 } });
+  assert.equal(validSpawn.error, null);
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'dynamic_location_spawn', details: { kind: 'theme' } }).error, 'invalid-dynamic-location-id');
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'dynamic_location_visit', details: { location_id: 'dl-camp', kind: '' } }).error, 'invalid-dynamic-location-kind');
+
+  const validSeen = validateTelemetryEvent({ ...base, raw_event: 'zone_event_seen', details: { zone_event_id: 'fe-forest-fog', zone_id: 'forest' } });
+  assert.equal(validSeen.error, null);
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'zone_event_seen', details: { zone_event_id: 'fe-forest-fog' } }).error, 'invalid-zone-event-seen');
+
+  const validEncounter = validateTelemetryEvent({ ...base, raw_event: 'npc_encounter', details: { npc_id: 'chiye', step: 1 } });
+  assert.equal(validEncounter.error, null);
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'npc_encounter', details: { npc_id: 'chiye', step: -1 } }).error, 'invalid-npc-event');
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'npc_encounter', details: {} }).error, 'invalid-npc-event');
+
+  const validStep = validateTelemetryEvent({ ...base, raw_event: 'npc_story_step', details: { npc_id: 'nanzhi', step: 2, choice: '交换一下喜欢' } });
+  assert.equal(validStep.error, null);
+  assert.equal(validateTelemetryEvent({ ...base, raw_event: 'npc_story_step', details: { npc_id: 'nanzhi', step: 2, choice: '' } }).error, 'invalid-npc-choice');
+
+  const validCompleted = validateTelemetryEvent({ ...base, raw_event: 'npc_story_completed', details: { npc_id: 'chiye', step: 4 } });
+  assert.equal(validCompleted.error, null);
+  assert.equal(validCompleted.event.derived_signals.positive_feedback, true);
+});
+
+test('event schema accepts bounded content ratings and internal shares', () => {
+  assert.equal(validateTelemetryEvent({ event_id: 'rate-asset-1', raw_event: 'asset_rate', created_at: new Date().toISOString(), details: { asset_id: 'asset-1', rate: 5 } }).error, null);
+  assert.equal(validateTelemetryEvent({ event_id: 'rate-demand-1', raw_event: 'demand_rate', created_at: new Date().toISOString(), details: { demand_id: 'demand-1', rate: 1 } }).error, null);
+  assert.equal(validateTelemetryEvent({ event_id: 'share-asset-1', raw_event: 'asset_share', created_at: new Date().toISOString(), details: { asset_id: 'asset-1', target_space_id: 'space-1' } }).error, null);
+  assert.equal(validateTelemetryEvent({ event_id: 'share-demand-1', raw_event: 'demand_share', created_at: new Date().toISOString(), details: { demand_id: 'demand-1', target_space_id: 'space-1' } }).error, null);
+  assert.equal(validateTelemetryEvent({ event_id: 'rate-invalid-1', raw_event: 'asset_rate', created_at: new Date().toISOString(), details: { asset_id: 'asset-1', rate: 6 } }).error, 'invalid-content-rating');
+});

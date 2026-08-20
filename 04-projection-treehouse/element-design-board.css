@@ -366,3 +366,27 @@ main { overflow: hidden; }
 @media (prefers-reduced-motion: reduce){
   html{scroll-behavior:auto}*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
+
+/* Typography identity: playful headings, readable handwritten body copy. */
+body,
+button,
+input,
+textarea,
+select {
+  font-family: var(--font-body);
+}
+
+.opening-copy h1,
+.chapter-heading h2,
+.landmark-state-matrix h3,
+.actor-state-board h3,
+.hud-notes h3,
+.dialogue-paper p,
+.sheet-specimen h3,
+.control-state-matrix h3,
+.coverage-total strong,
+.implementation-rules h3,
+.board-footer strong {
+  font-family: var(--font-display);
+  font-weight: 400;
+}

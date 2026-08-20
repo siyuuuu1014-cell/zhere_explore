@@ -1,5 +1,19 @@
 # 飞书生产 Repository 配置
 
+## 推荐研究九表
+
+推荐研究表是业务表的异步物化视图，不进入点赞、评论、登录和发布等在线请求链路，因此飞书汇总写入不会拖慢玩家操作。
+
+```powershell
+npm run feishu:recommendation:tables:audit
+npm run feishu:recommendation:tables:create
+# 将输出的 9 个 Table ID 写入 .env 后：
+npm run research:recommendation:sync:audit
+npm run research:recommendation:sync
+```
+
+建表和同步都可重复执行：建表只补缺失表/字段；同步按稳定主键新增或更新，不会重复造行。使用飞书 Repository 启动服务时，内置后台任务会在 30 秒后执行首轮同步，之后每 15 分钟同步；单轮未完成时不会重复启动，也不会阻塞玩家请求。可用 `ZHERE_RECOMMENDATION_SYNC_*` 环境变量调整或关闭。`npm run research:recommendation:sync` 仍可用于手动立即同步。详细字段和研究语义见 [recommendation-feishu-table-plan.md](../docs/recommendation-feishu-table-plan.md)。参考 CSV 仅用于定义字段，脚本不会导入参考样本。
+
 生产环境必须使用飞书 Repository。浏览器只访问本项目 `/api/*`，不能获得飞书 App Secret、tenant access token、表格 token 或云空间 token。
 
 ## 环境变量
@@ -33,12 +47,25 @@ FEISHU_TABLE_RESEARCH_SESSIONS=
 FEISHU_TABLE_RESEARCH_RECOMMENDATION_REQUESTS=
 FEISHU_TABLE_RESEARCH_RECOMMENDATION_CANDIDATES=
 FEISHU_TABLE_RESEARCH_RECOMMENDATION_IMPRESSIONS=
+FEISHU_TABLE_REC_HYBRID_USER_PROFILE=
+FEISHU_TABLE_REC_PUBLISHED_ASSET=
+FEISHU_TABLE_REC_PUBLISHED_PROMPT=
+FEISHU_TABLE_REC_PUBLISHED_COMMERCE=
+FEISHU_TABLE_REC_U2A_BEHAVIOR=
+FEISHU_TABLE_REC_U2P_BEHAVIOR=
+FEISHU_TABLE_REC_U2C_BEHAVIOR=
+FEISHU_TABLE_REC_U2U_BEHAVIOR=
+FEISHU_TABLE_REC_CONTENT_FEATURES=
 ZHERE_ADMIN_IDENTITIES=admin@example.com
 ZHERE_PUBLIC_WRITE_LIMIT=60
 ZHERE_PUBLIC_WORLD_CACHE_TTL_MS=3000
 ZHERE_SLOW_REQUEST_THRESHOLD_MS=1500
 FEISHU_READ_CACHE_TTL_MS=3000
 ZHERE_SESSION_COOKIE_SECURE=auto
+ZHERE_RECOMMENDATION_SYNC_ENABLED=auto
+ZHERE_RECOMMENDATION_SYNC_INITIAL_DELAY_MS=30000
+ZHERE_RECOMMENDATION_SYNC_INTERVAL_MS=900000
+ZHERE_RECOMMENDATION_SYNC_TIMEOUT_MS=1200000
 BASE_PRICE_TRANSACTION_COUNT=10
 RESEARCH_CONSENT_VERSION=research-v1
 ```
@@ -92,7 +119,35 @@ RESEARCH_CONSENT_VERSION=research-v1
 - `demand_id`
 - `owner_id`
 - `status`
+- `demand_type`
+- `title`
+- `theme`
+- `description`
+- `duration_seconds`（数字）
+- `aspect_ratio`
+- `aspect_ratio_preset`
+- `resolution`
+- `resolution_preset`
+- `price_amount`（数字；个人报价或企业预算的统一研究值）
+- `price_role`（`quote` / `budget`）
+- `price_unit`（固定为 `inspiration_coin`）
+- `pricing_signal_eligible`（复选框；需求侧智能定价信号，不等于成交）
+- `company_name`
+- `activity_name`
+- `cooperation_scope`
+- `region`
+- `skill_requirements`
+- `cooperation_description`
+- `start_at`（日期）
+- `end_at`（日期）
+- `timezone`
+- `created_at`（日期）
+- `updated_at`（日期）
 - `payload_json`
+
+需求发布时不会扣除或冻结灵感币，也不会直接写入 `Bid`、`Transaction` 或 `BasePrice`。`price_amount` 作为需求侧价格意愿参与后续智能定价研究；只有需求与具体 `material_id` 达成模拟成交后，才进入素材成交链路。
+
+个人玩法钱包保存在 `world_states.state_json` 的 `wallet` 与 `economy` 中；`economy.transactions` 保存最近 240 笔收入/消费流水，`growthStats.achievementKeys` 保存唯一成长键。它们不写入定价表，也不改变报价和需求价格字段。旧账户载入时会自动补齐结构，无需新增飞书字段。
 
 ### public_responses
 
@@ -252,7 +307,7 @@ RESEARCH_CONSENT_VERSION=research-v1
 
 ## 研究采集状态
 
-- 设置页读取 `/api/privacy/research-status`，显示“正常采集、等待首条事件、已暂停”状态。
+- 设置页读取 `/api/privacy/research-status`，显示“活动记录正常、等待首条事件、暂未就绪”状态。页面活动按隐私说明默认记录，不提供暂停开关；账户仍可导出或申请删除并匿名化。
 - 账户数据导出包含匿名研究主体与完整授权历史。
 - 管理员研究导出：`/api/admin/research/events.csv`（事件明细）、`/api/admin/research/recommendations.csv`（推荐三表 join 视图）、`/api/admin/research/snapshot`（带 sha256 前 16 位的可复现快照）、`/api/admin/research/health`（含推荐/报价/告警汇总）。
 - 本地开发不要同时启动两个指向同一 `ZHERE_DATA_DIR` 的服务；需要并行实例时，为每个进程配置不同的数据目录。
@@ -272,6 +327,7 @@ RESEARCH_CONSENT_VERSION=research-v1
 应用需要：
 
 - 多维表格记录读取、创建、更新和删除权限
+- 多维表格字段读取与管理权限（仅在运行字段迁移脚本时需要）
 - 云空间素材上传与下载权限
 - 对目标多维表格和目标云空间文件夹的访问权限
 
@@ -279,15 +335,16 @@ RESEARCH_CONSENT_VERSION=research-v1
 
 1. 在开发环境先运行 `node --test server/**/*.test.mjs`。
 2. 设置全部飞书环境变量。
-3. 启动 `node server/server.mjs`。
-4. 访问 `/api/health`，确认 `repository` 为 `feishu` 且返回 `ok: true`。服务启动时会逐一检查全部多维表和云空间文件夹；令牌失效、表格无权限或文件夹不可访问都会阻止生产服务以“看似正常”的状态运行。
-5. 注册测试账户，确认 `users`、`sessions` 生成记录。
-6. 移动并刷新页面，确认 `world_states` 能恢复。
-7. 上传短视频，确认云空间产生文件且 `assets` 写入 `file_token`。
-8. 发布素材和需求，确认 `public_assets`、`public_demands` 产生记录。
-9. 使用第二个账户留言、点赞、贴标签、建立素材关系并回应需求，确认公共快照对两个账户一致，且 `public_responses`、`public_records` 产生记录。
-10. 用普通账户举报一条公共内容，再用管理员账户确认 `reports` 出现记录并能隐藏目标内容。
-11. 等待 8 秒，确认 `events` 收到批量事件且重复 `event_id` 不会再次写入。
+3. 运行 `npm run feishu:schema:audit` 查看 `public_demands` 等表缺少或类型不符的独立字段；确认无误后运行 `npm run feishu:schema:migrate`。脚本会先备份现有表结构与记录，再创建缺失字段或迁移可安全转换的字段，并把已有需求的 `payload_json` 回填到对应独立列。无法解析的旧记录只会输出其 `record_id` 并跳过，不会覆盖原始 JSON。
+4. 在本目录运行 `npm start`；该命令会读取 `.env` 并启动网页、API 与后台定时同步。
+5. 访问 `/api/health`，确认 `repository` 为 `feishu` 且返回 `ok: true`。服务启动时会逐一检查全部多维表和云空间文件夹；令牌失效、表格无权限或文件夹不可访问都会阻止生产服务以“看似正常”的状态运行。
+6. 注册测试账户，确认 `users`、`sessions` 生成记录。
+7. 移动并刷新页面，确认 `world_states` 能恢复。
+8. 上传短视频，确认云空间产生文件且 `assets` 写入 `file_token`。
+9. 发布素材和需求，确认 `public_assets`、`public_demands` 产生记录。
+10. 使用第二个账户留言、点赞、贴标签、建立素材关系并回应需求，确认公共快照对两个账户一致，且 `public_responses`、`public_records` 产生记录。
+11. 用普通账户举报一条公共内容，再用管理员账户确认 `reports` 出现记录并能隐藏目标内容。
+12. 等待 8 秒，确认 `events` 收到批量事件且重复 `event_id` 不会再次写入。
 
 项目根目录提供 `.env.example` 作为变量清单。不要在仓库中创建包含真实密钥的 `.env`，生产环境优先使用部署平台的 Secret/环境变量管理功能。
 
@@ -297,5 +354,7 @@ RESEARCH_CONSENT_VERSION=research-v1
 - 用户、Session、世界状态、个人素材、报价与事件等点查使用多维表格服务端筛选；公共世界快照仍按分页读取并由接口生成增量 tombstone。
 - 世界状态按 `baseVersion` 校验；旧页面提交不会覆盖已经保存的新版本，客户端收到 `409 world-state-conflict` 后必须选择载入服务端进度或明确强制保留本页进度。
 - 视频读取转发 HTTP Range。飞书下载接口若返回完整文件，服务端会流式跳过无关字节后再响应所需区间，避免一次性分配整段视频 Buffer。
+- 视频上传上限由 `ZHERE_MAX_VIDEO_BYTES` 控制（示例配置为 `104857600`，即 100MB）。服务端先将请求流写入受控临时文件并验证视频文件头；不超过 20MB 使用飞书 `upload_all`，超过 20MB 从临时文件逐块读取并执行 `upload_prepare` → `upload_part` → `upload_finish`，不会把整个大视频常驻内存。并发上传数由 `ZHERE_MAX_CONCURRENT_VIDEO_UPLOADS` 控制。
+- `ZHERE_GUEST_CLEANUP_INTERVAL_MS` 和 `ZHERE_GUEST_CLEANUP_BATCH_SIZE` 控制过期游客访问权清理；关联研究数据会匿名化保留。反向代理部署时仅在代理会覆盖客户端转发头的前提下设置 `ZHERE_TRUST_PROXY=true`。
 - 同一 Node.js 进程内，对同一公共素材、需求或记录的写入会按业务键串行化，避免点赞、标签和回应互相覆盖。
-- 如果部署多个 Node.js 实例，仍建议先让请求通过同一实例，或在外层增加分布式锁；飞书多维表本身不提供本项目所需的跨实例事务。
+- 飞书多维表本身不提供本项目所需的跨实例事务。当前生产启动会校验 `ZHERE_PROCESS_COUNT=1`（使用 `WEB_CONCURRENCY` 的平台也必须设为 `1`），检测到多进程配置会直接拒绝启动。需要横向扩容时，必须先接入 Redis/数据库分布式锁并重新评估公共写入与基础价格计算，再解除这项硬约束。

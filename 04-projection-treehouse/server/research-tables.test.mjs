@@ -12,6 +12,10 @@ let server;
 let dataDir;
 let repository;
 
+function fakeMp4(payload) {
+  return Buffer.concat([Buffer.from([0, 0, 0, 16]), Buffer.from('ftypisom'), Buffer.from(payload)]);
+}
+
 before(async () => {
   dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zhere-research-tables-'));
   repository = new LocalRepository(dataDir);
@@ -151,7 +155,7 @@ test('media upload parses optional metadata and degrades to null without it', as
   form.set('media_width', '1920');
   form.set('media_height', '1080');
   form.set('media_bitrate_kbps', '4500');
-  form.set('file', new File([Buffer.from('meta-video-data')], 'meta.mp4', { type: 'video/mp4' }));
+  form.set('file', new File([fakeMp4('meta-video-data')], 'meta.mp4', { type: 'video/mp4' }));
   const uploaded = await fetch(`${baseUrl}/api/media`, { method: 'POST', headers: { cookie }, body: form });
   assert.equal(uploaded.status, 201);
   const asset = (await uploaded.json()).asset;
@@ -162,7 +166,7 @@ test('media upload parses optional metadata and degrades to null without it', as
 
   const noMetaForm = new FormData();
   noMetaForm.set('assetId', 'u-nometa-video');
-  noMetaForm.set('file', new File([Buffer.from('nometa-video-data')], 'nometa.mp4', { type: 'video/mp4' }));
+  noMetaForm.set('file', new File([fakeMp4('nometa-video-data')], 'nometa.mp4', { type: 'video/mp4' }));
   const noMeta = await fetch(`${baseUrl}/api/media`, { method: 'POST', headers: { cookie }, body: noMetaForm });
   assert.equal(noMeta.status, 201);
   const noMetaAsset = (await noMeta.json()).asset;

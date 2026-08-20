@@ -4,7 +4,8 @@
   const API = '/api';
   const EVENT_DB = 'zhere-service-queue';
   const EVENT_STORE = 'events';
-  const CRITICAL_EVENTS = new Set(['register', 'login', 'logout', 'publish_asset', 'upload_to_bag', 'bid_submit', 'bid_accepted', 'research_consent_change', 'deletion_request', 'feedback']);
+  const GUEST_DEVICE_KEY = 'zhere-guest-device-v1';
+  const CRITICAL_EVENTS = new Set(['register', 'login', 'logout', 'publish_asset', 'upload_to_bag', 'bid_submit', 'bid_accepted', 'deletion_request', 'feedback']);
   const pendingEvents = new Map();
   let authenticated = false;
   let currentUser = null;
@@ -15,6 +16,7 @@
   let worldVersion = 0;
   let worldConflict = null;
   let authEpoch = 0;
+  let runtimeLimits = { maxVideoBytes: 100 * 1024 * 1024, maxVideoMegabytes: 100 };
 
   class ServiceError extends Error {
     constructor(message, code, status, details = null) {
@@ -173,7 +175,11 @@
   async function bootstrap() {
     const epoch = authEpoch;
     await restoreEvents().catch(() => {});
-    const session = await request('/auth/session');
+    const [session, publicConfig] = await Promise.all([
+      request('/auth/session'),
+      request('/config').catch(() => ({ limits: runtimeLimits })),
+    ]);
+    runtimeLimits = { ...runtimeLimits, ...(publicConfig.limits || {}) };
     if (epoch !== authEpoch) return { authenticated: false, superseded: true, user: null, state: null, events: [] };
     authenticated = session.authenticated;
     currentUser = session.user;
@@ -204,6 +210,15 @@
     worldVersion = Number(world.version || 0);
     flushEvents().catch(() => {});
     return { ...body, state: world.state, version: world.version, events: recent.events || [] };
+  }
+
+  function guestDeviceKey() {
+    let key = localStorage.getItem(GUEST_DEVICE_KEY);
+    if (!key) {
+      key = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      localStorage.setItem(GUEST_DEVICE_KEY, key);
+    }
+    return key;
   }
 
   async function loadSessionExtras() {
@@ -243,9 +258,15 @@
       return conflict;
     }
     if (choice === 'local') {
-      worldVersion = Number(worldConflict.version || 0);
+      const conflict = worldConflict;
+      worldVersion = Number(conflict.version || 0);
       worldConflict = null;
-      return flushState({ force: true });
+      try {
+        return await flushState({ force: true });
+      } catch (error) {
+        worldConflict = conflict;
+        throw error;
+      }
     }
     return null;
   }
@@ -301,7 +322,7 @@
     form.set('description', description || '');
     appendMediaMetadata(form, metadata);
     form.set('file', file, file.name);
-    return request('/media', { method: 'POST', body: form });
+    return request('/media', { method: 'POST', body: form, timeoutMs: 300_000 });
   }
 
   async function uploadAndPublishAsset({ assetId, title, description, file, wx, wy, zone }) {
@@ -316,7 +337,7 @@
     appendMediaMetadata(form, metadata);
     form.set('file', file, file.name);
     // A stable asset id makes a timeout-safe retry idempotent on the server.
-    return request('/public/assets/upload', { method: 'POST', body: form, timeoutMs: 60_000, retries: 1 });
+    return request('/public/assets/upload', { method: 'POST', body: form, timeoutMs: 300_000, retries: 1 });
   }
 
   async function forgotPassword(payload) {
@@ -325,12 +346,6 @@
 
   async function updateProfile(payload) {
     const result = await request('/profile', { method: 'PUT', body: JSON.stringify(payload) });
-    currentUser = result.user;
-    return result;
-  }
-
-  async function updateResearchConsent(active) {
-    const result = await request('/privacy/consent', { method: 'PUT', body: JSON.stringify({ active: Boolean(active) }) });
     currentUser = result.user;
     return result;
   }
@@ -353,7 +368,7 @@
   }
 
   async function loadPublicWorld({ since = '' } = {}) {
-    const combined = { ok: true, mode: since ? 'delta' : 'full', assets: [], demands: [], records: [], deletedAssetIds: [], deletedDemandIds: [], deletedRecordIds: [], refreshedAt: '' };
+    const combined = { ok: true, mode: since ? 'delta' : 'full', assets: [], demands: [], records: [], deletedAssetIds: [], deletedDemandIds: [], deletedRecordIds: [], refreshedAt: '', worldClock: null };
     let cursor = 0;
     do {
       const query = new URLSearchParams({ cursor: String(cursor), limit: '100' });
@@ -361,6 +376,7 @@
       const page = await request(`/public/world?${query}`);
       for (const field of ['assets', 'demands', 'records', 'deletedAssetIds', 'deletedDemandIds', 'deletedRecordIds']) combined[field].push(...(page[field] || []));
       combined.refreshedAt = combined.refreshedAt || page.refreshedAt || '';
+      combined.worldClock ||= page.worldClock || null;
       cursor = page.nextCursor;
     } while (cursor != null);
     return combined;
@@ -428,7 +444,7 @@
     bootstrap,
     register: (payload) => authenticate('/auth/register', payload),
     login: (payload) => authenticate('/auth/login', payload),
-    guest: () => authenticate('/auth/guest', {}),
+    guest: () => authenticate('/auth/guest', { guest_key: guestDeviceKey() }),
     logout,
     forgotPassword,
     updateProfile,
@@ -441,8 +457,9 @@
     pricing,
     publicWorld, notifications,
     admin,
-    privacy: { updateConsent: updateResearchConsent, researchStatus: getResearchStatus, exportData: exportAccountData, anonymize: anonymizeAccount },
+    privacy: { researchStatus: getResearchStatus, exportData: exportAccountData, anonymize: anonymizeAccount },
     isAuthenticated: () => authenticated,
     user: () => currentUser,
+    limits: () => ({ ...runtimeLimits }),
   };
 })();

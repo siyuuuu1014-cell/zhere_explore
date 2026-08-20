@@ -6,8 +6,10 @@
     <meta name="description" content="Zhere 开放世界玩法与数据采集原型（V7）：视频、需求、评论、虚拟竞价与用户痕迹共同生长的公共世界" />
     <title>Zhere | 开放公域</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='27' fill='%238a9d7d' stroke='%2339423a' stroke-width='6'/%3E%3Cpath d='M22 38c12-2 18-10 20-20 3 12-2 24-17 28' fill='none' stroke='%23f7f4ea' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./styles.css?v=22" />
-    <link rel="stylesheet" href="./formal-v4.css?v=37" />
+    <link rel="preload" href="./assets/fonts/zcool-kuaile/zcool-kuaile-sc-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./cute-fonts.css?v=2" />
+    <link rel="stylesheet" href="./styles.css?v=29" />
+    <link rel="stylesheet" href="./formal-v4.css?v=44" />
   </head>
   <body>
     <!--
@@ -146,7 +148,7 @@
           <button class="cottage-exit" id="cottageExit" type="button" aria-label="沿左侧小径返回开放公域" hidden>
             <span class="exit-path" aria-hidden="true"><i></i><i></i><i></i></span>
             <span class="exit-sign" aria-hidden="true"><i></i><b>公域</b></span>
-            <small>沿小径离开</small>
+            <small><kbd>E</kbd> 或点击离开</small>
           </button>
 
           <button class="player" id="player" aria-label="打开身边行动盘" aria-expanded="false">
@@ -165,7 +167,7 @@
             <button type="button" data-context-action="tag"><kbd>T</kbd><span><b>插一枚标签</b><small>其他旅人可以捡走并贴到视频旁</small></span></button>
             <button type="button" data-context-action="journal"><kbd>J</kbd><span><b>翻开探索手账</b><small>回看素材、纸条和关系</small></span></button>
           </aside>
-          <div class="context-hint" id="contextHint">WASD 任意方向行走 · 世界没有边界</div>
+          <div class="context-hint" id="contextHint" hidden></div>
           <div class="wayfinder" id="wayfinder" aria-live="polite"></div>
         </div>
       </section>
@@ -216,7 +218,7 @@
             <button class="paper-button" data-entry-target="register">注册角色</button>
             <button class="text-button" id="guestButton">直接体验设计</button>
           </div>
-          <p class="entry-note">浏览与互动会被记录，用于推荐研究。灵感币是虚拟预算，没有现金价值。</p>
+          <p class="entry-note">浏览与互动会按隐私说明记录，用于提供游戏功能及推荐与定价研究。灵感币是虚拟预算，没有现金价值。</p>
         </div>
 
         <form class="entry-page" data-entry-page="login" id="loginForm" novalidate>
@@ -239,7 +241,7 @@
           </div>
           <label class="check-label"><input type="checkbox" name="age" required /><span>我已满 16 周岁</span></label>
           <div class="check-label"><input id="termsConsent" type="checkbox" name="terms" required /> <span><label for="termsConsent">我已阅读并同意</label><button class="legal-link" type="button" data-legal="terms">使用条款</button>与<button class="legal-link" type="button" data-legal="privacy">隐私说明</button></span></div>
-          <label class="check-label"><input type="checkbox" name="research" checked /><span>我愿意参与推荐与模型研究，可随时退出且保留账户</span></label>
+          <p class="entry-note register-collection-note">创建角色后，页面中的浏览与互动会按隐私说明记录；你可以在“数据与隐私”中导出记录或申请删除并匿名化。</p>
           <p class="form-error" id="registerError" role="alert"></p>
           <button class="primary-button" type="submit">创建并进入</button>
         </form>
@@ -289,17 +291,20 @@
     </aside>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-  <script src="./service-client.js?v=23"></script>
-  <script src="./world-foundation.js?v=2"></script>
-    <script src="./ui-shell.js?v=5"></script>
-  <script src="./telemetry-system.js?v=2"></script>
-  <script src="./public-content.js?v=1"></script>
+  <script src="./service-client.js?v=26"></script>
+  <script src="./world-foundation.js?v=4"></script>
+    <script src="./ui-shell.js?v=7"></script>
+  <script src="./telemetry-system.js?v=4"></script>
+  <script src="./public-content.js?v=2"></script>
   <script src="./pricing-system.js?v=2"></script>
-    <script src="./world-guide.js?v=1"></script>
-    <script src="./world-renderer.js?v=10"></script>
-    <script src="./world-movement.js?v=4"></script>
-  <script src="./homestead-system.js?v=2"></script>
-    <script src="./prototype.js?v=56"></script>
-  <script src="./entry-system.js?v=1"></script>
+    <script src="./world-guide.js?v=2"></script>
+  <script src="./world-events.js?v=2"></script>
+  <script src="./dynamic-locations.js?v=2"></script>
+  <script src="./npc-stories.js?v=1"></script>
+    <script src="./world-renderer.js?v=12"></script>
+    <script src="./world-movement.js?v=6"></script>
+  <script src="./homestead-system.js?v=7"></script>
+    <script src="./prototype.js?v=68"></script>
+  <script src="./entry-system.js?v=6"></script>
   </body>
 </html>

@@ -1,5 +1,7 @@
 // Extracted from prototype.js. Loaded as a classic script to share the game runtime.
 
+let lastSyncWarningAt = 0;
+
 function allWorldNotes() {
   const notes = new Map();
   [...systemNotes, ...state.notes, ...state.publicDemands].forEach((note) => notes.set(note.id, note));
@@ -12,10 +14,83 @@ function allUserWorldNotes() {
   return [...notes.values()].filter((note) => !note.archived);
 }
 
+function publicSpaces() {
+  return state.publicRecords.filter((record) => record.kind === 'space_snapshot' && record.status !== 'deleted');
+}
+
+function publicSpaceSignature() {
+  return JSON.stringify({
+    nickname: state.profile.nickname,
+    spaceName: state.profile.spaceName,
+    avatar: state.profile.avatar,
+    avatarImage: state.profile.avatarImage,
+    public: state.profile.spacePublic,
+    decor: state.homestead.decor,
+    stickers: state.homeStickers,
+    placed: state.placed.map((item) => item.assetId),
+    buildings: state.homestead.buildings,
+    day: state.homestead.day,
+  });
+}
+
+async function syncPublicSpaceSnapshot() {
+  if (!window.ZhereService?.isAuthenticated()) return null;
+  const user = window.ZhereService.user();
+  if (!user?.id || user.guest) return null;
+  const recordId = `space-${user.id}`;
+  const existing = state.publicRecords.find((record) => record.id === recordId);
+  if (!state.profile.spacePublic) {
+    if (existing) {
+      await window.ZhereService.publicWorld.deleteRecord(recordId);
+      state.publicRecords = state.publicRecords.filter((record) => record.id !== recordId);
+    }
+    lastPublishedSpaceSignature = publicSpaceSignature();
+    return null;
+  }
+  const payload = {
+    nickname: state.profile.nickname,
+    spaceName: state.profile.spaceName,
+    avatar: state.profile.avatar,
+    avatarImage: state.profile.avatarImage,
+    decor: [...state.homestead.decor],
+    stickers: [...state.homeStickers],
+    placedAssetIds: state.placed.map((item) => item.assetId),
+    buildings: Object.entries(state.homestead.buildings).filter(([, built]) => built).map(([id]) => id),
+    day: state.homestead.day,
+  };
+  const result = await window.ZhereService.publicWorld.saveRecord({
+    id: recordId,
+    kind: 'space_snapshot',
+    payload,
+  });
+  lastPublishedSpaceSignature = publicSpaceSignature();
+  state.publicRecords = [...state.publicRecords.filter((record) => record.id !== recordId), result.record];
+  return result.record;
+}
+
+function schedulePublicSpaceSnapshot() {
+  clearTimeout(spaceSnapshotTimer);
+  if (!window.ZhereService?.isAuthenticated() || window.ZhereService.user()?.guest) return;
+  const signature = publicSpaceSignature();
+  if (signature === lastPublishedSpaceSignature) return;
+  spaceSnapshotTimer = setTimeout(() => {
+    syncPublicSpaceSnapshot().catch((error) => console.warn('Public space snapshot failed', error));
+  }, 800);
+}
+
 function applyPublicWorld(publicWorld, { render = false } = {}) {
   if (!publicWorld) return;
+  const hasContentChanges = publicWorld.mode !== 'delta' || [
+    publicWorld.assets,
+    publicWorld.demands,
+    publicWorld.records,
+    publicWorld.deletedAssetIds,
+    publicWorld.deletedDemandIds,
+    publicWorld.deletedRecordIds,
+  ].some((items) => Array.isArray(items) && items.length > 0);
+  const previousWorldVersion = state.worldClock?.version || '';
   const normalizeAsset = (asset) => ({
-    likes: 0, comments: [], tags: [], source: 'user', spawn_source: '玩家发布', dur: '—', res: asset.hasMedia ? '已上传' : '示例', license: '个人', price: 0,
+    likes: 0, comments: [], tags: [], tagStats: [], source: 'user', spawn_source: '玩家发布', dur: '—', res: asset.hasMedia ? '已上传' : '示例', license: '个人', price: 0,
     ...asset,
   });
   const normalizeDemand = (demand) => ({ status: 'open', responses: [], ...demand });
@@ -36,6 +111,12 @@ function applyPublicWorld(publicWorld, { render = false } = {}) {
     state.publicRecords = publicWorld.records || [];
   }
   state.publicWorldUpdatedAt = publicWorld.refreshedAt || state.publicWorldUpdatedAt;
+  if (publicWorld.worldClock) state.worldClock = publicWorld.worldClock;
+  if ((state.worldClock?.version || '') !== previousWorldVersion) state.zoneEventsOfDay = null;
+  if (hasContentChanges) {
+    state.publicContentVersion += 1;
+    if (typeof refreshDynamicLocations === 'function') refreshDynamicLocations();
+  }
   if (render) {
     renderScreens();
     renderCreations();
@@ -45,17 +126,45 @@ function applyPublicWorld(publicWorld, { render = false } = {}) {
 
 async function syncPublicWorld({ render = true } = {}) {
   if (!window.ZhereService?.isAuthenticated()) return null;
+  publicSyncRenderRequested ||= render;
   if (publicSyncPromise) return publicSyncPromise;
   publicSyncPromise = (async () => { try {
     const publicWorld = await window.ZhereService.publicWorld.load({ since: state.publicWorldUpdatedAt });
-    applyPublicWorld(publicWorld, { render });
+    applyPublicWorld(publicWorld, { render: publicSyncRenderRequested });
     lastPublicSyncAt = Date.now();
     return publicWorld;
   } catch (error) {
     console.warn('Public world refresh failed', error);
+    if (telemetryWorldEntered && Date.now() - lastSyncWarningAt > 15000) {
+      lastSyncWarningAt = Date.now();
+      showToast('公共世界暂时没有同步上，稍后会自动重试');
+    }
     return null;
-  } finally { publicSyncPromise = null; } })();
+  } finally {
+    publicSyncPromise = null;
+    publicSyncRenderRequested = false;
+  } })();
   return publicSyncPromise;
+}
+
+function scheduleBackgroundSync(delay = PUBLIC_SYNC_INTERVAL_MS) {
+  clearTimeout(backgroundSyncTimer);
+  backgroundSyncTimer = setTimeout(async () => {
+    if (document.visibilityState === 'visible' && telemetryWorldEntered && window.ZhereService?.isAuthenticated()) {
+      await Promise.allSettled([
+        syncPublicWorld({ render: true }),
+        refreshNotifications({ announce: true }),
+      ]);
+    }
+    scheduleBackgroundSync(PUBLIC_SYNC_INTERVAL_MS + Math.round(Math.random() * 3000));
+  }, delay);
+}
+
+function resumeBackgroundSync() {
+  if (!telemetryWorldEntered || !window.ZhereService?.isAuthenticated()) return;
+  if (Date.now() - lastPublicSyncAt >= PUBLIC_SYNC_INTERVAL_MS) syncPublicWorld({ render: true });
+  if (Date.now() - lastNotificationSyncAt >= NOTIFICATION_SYNC_INTERVAL_MS) refreshNotifications({ announce: true });
+  scheduleBackgroundSync();
 }
 
 async function migrateLegacyPublicContent() {
@@ -118,6 +227,27 @@ function relatedNotesForVideo(videoId) {
   return allWorldNotes().filter((note) => linkedVideoIdsForNote(note).includes(videoId));
 }
 
+function worldInteractiveFootprints(excludeId = null) {
+  const dynamic = typeof visibleDynamicLocations === 'function' ? visibleDynamicLocations() : [];
+  const zoneEvents = typeof activeZoneEvents === 'function'
+    ? activeZoneEvents().map(({ zoneId, spot }) => ({ id: `zone-event-${zoneId}`, wx: spot.wx, wy: spot.wy }))
+    : [];
+  const npcs = typeof visibleNpcNodes === 'function'
+    ? visibleNpcNodes().map((item) => ({ id: `npc-${item.npcId}`, wx: item.wx, wy: item.wy }))
+    : [];
+  return [
+    ...Object.values(objectTargets),
+    ...allVideos(),
+    ...allUserWorldNotes(),
+    ...dynamic,
+    ...zoneEvents,
+    ...npcs,
+    ...publicLooseTags(),
+    ...WORLD_STICKERS.filter((sticker) => !state.stickers.includes(sticker.id)),
+    ...(state.activeGatherables || []),
+  ].filter((item) => Number.isFinite(Number(item.wx)) && Number.isFinite(Number(item.wy)) && (!excludeId || item.id !== excludeId));
+}
+
 function responseVideoCandidates(note) {
   const owned = new Set([
     ...state.published.map((video) => video.id),
@@ -139,11 +269,7 @@ function responseVideoCandidates(note) {
 }
 
 function findOpenWorldSpot(originWx, originWy, excludeId = null) {
-  const occupied = [
-    ...Object.values(objectTargets),
-    ...allVideos(),
-    ...allUserWorldNotes(),
-  ].filter((item) => !excludeId || item.id !== excludeId);
+  const occupied = worldInteractiveFootprints(excludeId);
   const offsets = [
     [110, 70], [-110, 70], [120, -90], [-120, -90],
     [190, 30], [-190, 30], [20, 190], [20, -190],
@@ -165,11 +291,7 @@ function findOpenWorldSpot(originWx, originWy, excludeId = null) {
 function repairCrowdedUserContent() {
   let changed = false;
   [...state.notes, ...state.published].forEach((item) => {
-    const occupied = [
-      ...Object.values(objectTargets),
-      ...allVideos(),
-      ...allUserWorldNotes(),
-    ].filter((candidate) => candidate.id !== item.id);
+    const occupied = worldInteractiveFootprints(item.id);
     const nearestDistance = occupied.length
       ? Math.min(...occupied.map((candidate) => Math.hypot(item.wx - candidate.wx, item.wy - candidate.wy)))
       : Infinity;

@@ -1,0 +1,30 @@
+@import url("./assets/fonts/lxgw-wenkai-screen/font.css");
+
+@font-face {
+  font-family: "ZCOOL KuaiLe";
+  src: url("./assets/fonts/zcool-kuaile/zcool-kuaile-sc-400.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --font-ui: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  --font-prose: "LXGW WenKai Screen", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-body: var(--font-ui);
+  --font-display: "ZCOOL KuaiLe", "LXGW WenKai Screen", "Microsoft YaHei", sans-serif;
+}
+
+html {
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: auto;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}

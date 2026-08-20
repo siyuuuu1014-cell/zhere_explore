@@ -1,7 +1,53 @@
 // Extracted from prototype.js. Loaded as a classic script to share the game runtime.
 
+const GAMEPLAY_PROGRESS_EVENTS = new Set([
+  'asset_open', 'bid_accepted', 'copy_placed_home', 'publish_asset', 'publish_demand',
+  'like', 'tag_add', 'homestead_crop_harvested', 'zone_discover', 'rare_discovery_found',
+]);
+
+function queueProgressPersist() {
+  if (eventPersistQueued) return;
+  eventPersistQueued = true;
+  queueMicrotask(() => {
+    eventPersistQueued = false;
+    persist();
+  });
+}
+
+function recordGameplayProgress(rawEvent, details = {}, eventId = '') {
+  if (!GAMEPLAY_PROGRESS_EVENTS.has(rawEvent)) return false;
+  const stats = state.growthStats;
+  if (eventId && stats.processedEventIds.includes(eventId)) return false;
+  const achievementKey = gameplayAchievementKey(rawEvent, details, eventId);
+  const uniqueAchievement = !achievementKey || !stats.achievementKeys.includes(achievementKey);
+  if (uniqueAchievement) {
+    stats.eventCounts[rawEvent] = (Number(stats.eventCounts[rawEvent]) || 0) + 1;
+    if (achievementKey) {
+      stats.achievementKeys.push(achievementKey);
+      stats.achievementKeys = stats.achievementKeys.slice(-2400);
+    }
+  }
+  if (rawEvent === 'asset_open' && details.asset_id && !stats.openedAssetIds.includes(details.asset_id)) {
+    stats.openedAssetIds.push(details.asset_id);
+  }
+  if (eventId) {
+    stats.processedEventIds.push(eventId);
+    stats.processedEventIds = stats.processedEventIds.slice(-1200);
+  }
+  stats.updatedAt = new Date().toISOString();
+  return uniqueAchievement || Boolean(eventId);
+}
+
+function importGrowthEvents(events = []) {
+  let changed = false;
+  events.forEach((event) => {
+    if (!event?.event_id || !GAMEPLAY_PROGRESS_EVENTS.has(event.raw_event)) return;
+    changed = recordGameplayProgress(event.raw_event, event.details || {}, event.event_id) || changed;
+  });
+  if (changed) queueProgressPersist();
+}
+
 function logEvent(rawEvent, details = {}) {
-  if (!state.research && !ESSENTIAL_EVENTS.has(rawEvent)) return null;
   const impression = details.asset_id ? state.lastImpressions.get(details.asset_id) : null;
   const attribution = impression && Date.now() - impression.at <= 30 * 60 * 1000 ? impression : null;
   if (impression && !attribution) state.lastImpressions.delete(details.asset_id);
@@ -19,25 +65,21 @@ function logEvent(rawEvent, details = {}) {
     schema_version: TELEMETRY_SCHEMA_VERSION,
     session_id: TELEMETRY_SESSION_ID,
     session_sequence: ++telemetrySequence,
-    research_consent: Boolean(state.research),
+    research_consent: true,
     experiment_id: 'open-world-v1',
     experiment_group: 'mixed-biome',
     derived_signals: {},
   };
+  recordGameplayProgress(rawEvent, details, event.event_id);
   state.rawEvents.push(event);
   if (state.rawEvents.length > RAW_EVENT_CAP) state.rawEvents = state.rawEvents.slice(-RAW_EVENT_CAP);
   window.ZhereService?.events.enqueue(event);
-  if (!eventPersistQueued) {
-    eventPersistQueued = true;
-    queueMicrotask(() => {
-      eventPersistQueued = false;
-      persist();
-    });
-  }
+  queueProgressPersist();
   return event;
 }
 
 function countEvent(name) {
+  if (GAMEPLAY_PROGRESS_EVENTS.has(name)) return Number(state.growthStats.eventCounts[name]) || 0;
   return state.rawEvents.filter((event) => event.raw_event === name).length;
 }
 

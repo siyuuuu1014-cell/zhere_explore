@@ -4,6 +4,14 @@ import { config } from '../server/config.mjs';
 
 const TYPE_NAMES = new Map([[1, '文本'], [2, '数字'], [5, '日期'], [7, '复选框']]);
 const EXPECTED = {
+  publicDemands: {
+    demand_id: 1, owner_id: 1, status: 1, demand_type: 1, title: 1, theme: 1, description: 1,
+    duration_seconds: 2, aspect_ratio: 1, aspect_ratio_preset: 1, resolution: 1, resolution_preset: 1,
+    price_amount: 2, price_role: 1, price_unit: 1, pricing_signal_eligible: 7,
+    company_name: 1, activity_name: 1, cooperation_scope: 1, region: 1,
+    skill_requirements: 1, cooperation_description: 1,
+    start_at: 5, end_at: 5, timezone: 1, created_at: 5, updated_at: 5, payload_json: 1,
+  },
   events: { created_at: 5 },
   bids: { bid_time: 5, bid_price: 2 },
   transactions: { transaction_time: 5, bid_price: 2, transaction_price: 2, is_valid: 7 },
@@ -32,6 +40,71 @@ function validForType(value, type) {
   if (type === 5) return !Number.isNaN(Date.parse(text)) || Number.isFinite(Number(text));
   if (type === 7) return ['true', 'false', '1', '0', '是', '否'].includes(text.toLowerCase());
   return true;
+}
+
+function demandBackfillFields(demand) {
+  const fields = {};
+  const assign = (field, value, type = 1) => {
+    if (value === undefined || value === null || value === '') return;
+    if (type === 2) {
+      const number = Number(value);
+      if (Number.isFinite(number)) fields[field] = number;
+      return;
+    }
+    if (type === 5) {
+      const timestamp = typeof value === 'number' ? value : Date.parse(value);
+      if (Number.isFinite(timestamp)) fields[field] = timestamp;
+      return;
+    }
+    if (type === 7) {
+      fields[field] = value === true;
+      return;
+    }
+    fields[field] = String(value);
+  };
+  assign('demand_id', demand.id);
+  assign('owner_id', demand.ownerId);
+  assign('status', demand.status);
+  assign('demand_type', demand.type);
+  assign('title', demand.title);
+  assign('theme', demand.theme);
+  assign('description', demand.description);
+  assign('duration_seconds', demand.durationSeconds, 2);
+  assign('aspect_ratio', demand.aspectRatio);
+  assign('aspect_ratio_preset', demand.aspectRatioPreset);
+  assign('resolution', demand.resolution);
+  assign('resolution_preset', demand.resolutionPreset);
+  assign('price_amount', demand.priceAmount, 2);
+  assign('price_role', demand.priceRole);
+  assign('price_unit', demand.priceUnit);
+  assign('pricing_signal_eligible', demand.pricingSignalEligible, 7);
+  assign('company_name', demand.companyName);
+  assign('activity_name', demand.activityName);
+  assign('cooperation_scope', demand.cooperationScope);
+  assign('region', demand.region);
+  assign('skill_requirements', demand.skillRequirements);
+  assign('cooperation_description', demand.cooperationDescription);
+  assign('start_at', demand.startAt, 5);
+  assign('end_at', demand.endAt, 5);
+  assign('timezone', demand.timezone);
+  assign('created_at', demand.createdAt, 5);
+  assign('updated_at', demand.updatedAt, 5);
+  return fields;
+}
+
+function demandNeedsBackfill(record) {
+  try {
+    const demand = JSON.parse(plain(record.fields?.payload_json) || '{}');
+    const expected = demandBackfillFields(demand);
+    return Object.entries(expected).some(([field, value]) => {
+      const current = record.fields?.[field];
+      if (current === undefined || current === null || plain(current).trim() === '') return true;
+      if (typeof value === 'boolean') return !['true', 'false', '1', '0', '是', '否'].includes(plain(current).trim().toLowerCase());
+      return false;
+    });
+  } catch {
+    return true;
+  }
 }
 
 async function main() {
@@ -89,20 +162,22 @@ async function main() {
     }
   }
 
-  if (!changes.length) {
-    console.log('飞书字段类型已符合研究数据规范，无需迁移。');
-    return;
-  }
-  for (const change of changes) {
-    console.log(`${change.tableKey}.${change.fieldName}: ${TYPE_NAMES.get(Number(change.field?.type)) || '缺失'} -> ${TYPE_NAMES.get(change.targetType)} [${change.status}]`);
-    if (change.invalid.length) console.log(`  无法转换的 record_id: ${change.invalid.slice(0, 10).join(', ')}${change.invalid.length > 10 ? ' ...' : ''}`);
+  if (!changes.length) console.log('飞书字段类型已符合研究数据规范，无需调整字段。');
+  else {
+    for (const change of changes) {
+      console.log(`${change.tableKey}.${change.fieldName}: ${TYPE_NAMES.get(Number(change.field?.type)) || '缺失'} -> ${TYPE_NAMES.get(change.targetType)} [${change.status}]`);
+      if (change.invalid.length) console.log(`  无法转换的 record_id: ${change.invalid.slice(0, 10).join(', ')}${change.invalid.length > 10 ? ' ...' : ''}`);
+    }
   }
   if (!apply) {
-    console.log('\n当前为只读审计。确认所有项目均为 ready 后，可运行 npm run feishu:schema:migrate。');
+    const demandCount = backup.tables.publicDemands.records.filter(demandNeedsBackfill).length;
+    console.log(`\n当前为只读审计。仍有 ${demandCount} 条历史需求需要从 payload_json 回填到独立字段。`);
+    if (demandCount || changes.length) console.log('确认变更清单正确、且没有 invalid-data 后，可运行 npm run feishu:schema:migrate；missing 字段会由迁移脚本自动创建。');
+    else console.log('字段结构与历史需求独立列均已同步完成，无需再次迁移。');
     return;
   }
-  const blocked = changes.filter((change) => change.status !== 'ready');
-  if (blocked.length) throw new Error(`存在 ${blocked.length} 个缺失字段或不可转换数据，已停止迁移。`);
+  const blocked = changes.filter((change) => change.status === 'invalid-data');
+  if (blocked.length) throw new Error(`存在 ${blocked.length} 组不可转换数据，已停止迁移。请先修正对应 record_id。`);
 
   const backupDir = path.resolve(config.dataDir, 'schema-backups');
   await fs.mkdir(backupDir, { recursive: true });
@@ -112,13 +187,38 @@ async function main() {
 
   for (const change of changes) {
     const body = { field_name: change.fieldName, type: change.targetType };
-    if (change.field.description) body.description = change.field.description;
-    await request(`/bitable/v1/apps/${feishu.bitableAppToken}/tables/${change.tableId}/fields/${change.field.field_id}`, {
-      method: 'PUT', body: JSON.stringify(body),
-    });
-    console.log(`已迁移 ${change.tableKey}.${change.fieldName}`);
+    if (change.field?.description) body.description = change.field.description;
+    if (change.status === 'missing') {
+      await request(`/bitable/v1/apps/${feishu.bitableAppToken}/tables/${change.tableId}/fields`, {
+        method: 'POST', body: JSON.stringify(body),
+      });
+      console.log(`已创建 ${change.tableKey}.${change.fieldName}`);
+    } else {
+      await request(`/bitable/v1/apps/${feishu.bitableAppToken}/tables/${change.tableId}/fields/${change.field.field_id}`, {
+        method: 'PUT', body: JSON.stringify(body),
+      });
+      console.log(`已迁移 ${change.tableKey}.${change.fieldName}`);
+    }
   }
-  console.log('迁移完成。请重启服务，再运行 npm run feishu:schema:audit 复核。');
+
+  const demandTable = backup.tables.publicDemands;
+  const demandUpdates = demandTable.records.flatMap((record) => {
+    try {
+      const demand = JSON.parse(plain(record.fields?.payload_json) || '{}');
+      const fields = demandBackfillFields(demand);
+      return Object.keys(fields).length ? [{ record_id: record.record_id, fields }] : [];
+    } catch {
+      console.warn(`跳过无法解析 payload_json 的需求记录：${record.record_id}`);
+      return [];
+    }
+  });
+  for (let index = 0; index < demandUpdates.length; index += 500) {
+    await request(`/bitable/v1/apps/${feishu.bitableAppToken}/tables/${demandTable.table_id}/records/batch_update`, {
+      method: 'POST', body: JSON.stringify({ records: demandUpdates.slice(index, index + 500) }),
+    });
+  }
+  console.log(`已回填 ${demandUpdates.length} 条历史需求的独立字段。`);
+  console.log('迁移与历史数据同步完成。请重启服务，再运行 npm run feishu:schema:audit 复核。');
 }
 
 main().catch((error) => { console.error(error.message); process.exitCode = 1; });

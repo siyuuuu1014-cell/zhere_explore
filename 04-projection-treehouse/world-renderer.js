@@ -1,7 +1,17 @@
+function refreshWorldViewportMetrics() {
+  const width = worldShell.clientWidth;
+  const height = worldShell.clientHeight;
+  if (width !== worldViewportMetrics.width || height !== worldViewportMetrics.height) {
+    worldViewportMetrics = { width, height, centerX: width / 2, anchorY: height * .52 };
+  }
+  return worldViewportMetrics;
+}
+
 function worldToScreen(wx, wy) {
+  const viewport = worldViewportMetrics.width ? worldViewportMetrics : refreshWorldViewportMetrics();
   return {
-    x: worldShell.clientWidth / 2 + wx - state.wx,
-    y: worldShell.clientHeight * .52 + wy - state.wy,
+    x: viewport.centerX + wx - state.wx,
+    y: viewport.anchorY + wy - state.wy,
   };
 }
 
@@ -9,10 +19,11 @@ function placeWorldNode(node, wx, wy) {
   const layoutDx = Number(node.dataset.layoutDx || 0);
   const layoutDy = Number(node.dataset.layoutDy || 0);
   const point = worldToScreen(wx + layoutDx, wy + layoutDy);
+  const viewport = worldViewportMetrics;
   const visible = point.x > -WORLD_NODE_OVERSCAN_X
-    && point.x < worldShell.clientWidth + WORLD_NODE_OVERSCAN_X
+    && point.x < viewport.width + WORLD_NODE_OVERSCAN_X
     && point.y > -WORLD_NODE_OVERSCAN_Y
-    && point.y < worldShell.clientHeight + WORLD_NODE_OVERSCAN_Y;
+    && point.y < viewport.height + WORLD_NODE_OVERSCAN_Y;
   if (!visible) {
     if (node.dataset.visible !== '') {
       node.style.visibility = 'hidden';
@@ -38,9 +49,33 @@ function placeWorldNode(node, wx, wy) {
   return { point, visible };
 }
 
+function hideWorldNode(node) {
+  if (node.dataset.visible !== '') {
+    node.style.visibility = 'hidden';
+    node.dataset.visible = '';
+  }
+}
+
+// 区域事件只在玩家当前区域出现；动态地点和 NPC 仍按普通世界坐标显示。
+// 三类节点共用这一条逐帧定位链，避免角色移动时节点停在屏幕上、随后突然跳位。
+function placeContextWorldNode(node) {
+  const wx = Number(node.dataset.wx);
+  const wy = Number(node.dataset.wy);
+  if (!Number.isFinite(wx) || !Number.isFinite(wy)) {
+    hideWorldNode(node);
+    return { point: null, visible: false };
+  }
+  if (node.matches('[data-zone-event]') && node.dataset.zoneEvent !== zoneAt(state.wx, state.wy).id) {
+    hideWorldNode(node);
+    return { point: worldToScreen(wx, wy), visible: false };
+  }
+  return placeWorldNode(node, wx, wy);
+}
+
 function renderTerrainBands(fragment) {
-  const padX = worldShell.clientWidth / 2 + TERRAIN_OVERSCAN_X;
-  const padY = worldShell.clientHeight / 2 + TERRAIN_OVERSCAN_Y;
+  const viewport = worldViewportMetrics;
+  const padX = viewport.centerX + TERRAIN_OVERSCAN_X;
+  const padY = viewport.height / 2 + TERRAIN_OVERSCAN_Y;
   const minX = state.wx - padX;
   const maxX = state.wx + padX;
   const minY = state.wy - padY;
@@ -60,7 +95,7 @@ function renderTerrainBands(fragment) {
   bands.forEach((band) => {
     const a = worldToScreen(band.x, band.y);
     const b = worldToScreen(band.x + band.w, band.y + band.h);
-    if (b.x < -TERRAIN_OVERSCAN_X || a.x > worldShell.clientWidth + TERRAIN_OVERSCAN_X || b.y < -TERRAIN_OVERSCAN_Y || a.y > worldShell.clientHeight + TERRAIN_OVERSCAN_Y) return;
+    if (b.x < -TERRAIN_OVERSCAN_X || a.x > viewport.width + TERRAIN_OVERSCAN_X || b.y < -TERRAIN_OVERSCAN_Y || a.y > viewport.height + TERRAIN_OVERSCAN_Y) return;
     const div = document.createElement('div');
     div.className = `terrain-band ${band.cls}`;
     div.style.left = `${Math.round(a.x)}px`;
@@ -72,6 +107,7 @@ function renderTerrainBands(fragment) {
 }
 
 function renderWorldObstacles(fragment) {
+  const viewport = worldViewportMetrics;
   WORLD_OBSTACLES.forEach((obstacle) => {
     const a = worldToScreen(obstacle.from[0], obstacle.from[1]);
     const b = worldToScreen(obstacle.to[0], obstacle.to[1]);
@@ -79,7 +115,7 @@ function renderWorldObstacles(fragment) {
     const maxX = Math.max(a.x, b.x);
     const minY = Math.min(a.y, b.y);
     const maxY = Math.max(a.y, b.y);
-    if (maxX < -TERRAIN_OVERSCAN_X || minX > worldShell.clientWidth + TERRAIN_OVERSCAN_X || maxY < -TERRAIN_OVERSCAN_Y || minY > worldShell.clientHeight + TERRAIN_OVERSCAN_Y) return;
+    if (maxX < -TERRAIN_OVERSCAN_X || minX > viewport.width + TERRAIN_OVERSCAN_X || maxY < -TERRAIN_OVERSCAN_Y || minY > viewport.height + TERRAIN_OVERSCAN_Y) return;
     const node = document.createElement('span');
     node.className = `world-obstacle obstacle-${obstacle.kind}`;
     node.dataset.obstacle = obstacle.id;
@@ -94,7 +130,7 @@ function renderWorldObstacles(fragment) {
   });
   WORLD_CROSSINGS.forEach((crossing) => {
     const point = worldToScreen(crossing.x, crossing.y);
-    if (point.x < -TERRAIN_OVERSCAN_X || point.x > worldShell.clientWidth + TERRAIN_OVERSCAN_X || point.y < -TERRAIN_OVERSCAN_Y || point.y > worldShell.clientHeight + TERRAIN_OVERSCAN_Y) return;
+    if (point.x < -TERRAIN_OVERSCAN_X || point.x > viewport.width + TERRAIN_OVERSCAN_X || point.y < -TERRAIN_OVERSCAN_Y || point.y > viewport.height + TERRAIN_OVERSCAN_Y) return;
     const node = document.createElement('span');
     node.className = `world-crossing crossing-${crossing.kind}`;
     node.setAttribute('aria-label', crossing.label);
@@ -107,6 +143,7 @@ function renderWorldObstacles(fragment) {
 }
 
 function renderWorldConnections(fragment) {
+  const viewport = worldViewportMetrics;
   WORLD_TRAILS.forEach((trail) => {
     const a = worldToScreen(trail.from[0], trail.from[1]);
     const b = worldToScreen(trail.to[0], trail.to[1]);
@@ -114,7 +151,7 @@ function renderWorldConnections(fragment) {
     const maxX = Math.max(a.x, b.x);
     const minY = Math.min(a.y, b.y);
     const maxY = Math.max(a.y, b.y);
-    if (maxX < -TERRAIN_OVERSCAN_X || minX > worldShell.clientWidth + TERRAIN_OVERSCAN_X || maxY < -TERRAIN_OVERSCAN_Y || minY > worldShell.clientHeight + TERRAIN_OVERSCAN_Y) return;
+    if (maxX < -TERRAIN_OVERSCAN_X || minX > viewport.width + TERRAIN_OVERSCAN_X || maxY < -TERRAIN_OVERSCAN_Y || minY > viewport.height + TERRAIN_OVERSCAN_Y) return;
     const path = document.createElement('span');
     path.className = `world-trail trail-${trail.type}`;
     path.style.left = `${Math.round(a.x)}px`;
@@ -126,7 +163,7 @@ function renderWorldConnections(fragment) {
   renderWorldObstacles(fragment);
   WORLD_SCENERY.forEach((scenery) => {
     const point = worldToScreen(scenery.wx, scenery.wy);
-    if (point.x < -TERRAIN_OVERSCAN_X || point.x > worldShell.clientWidth + TERRAIN_OVERSCAN_X || point.y < -TERRAIN_OVERSCAN_Y || point.y > worldShell.clientHeight + TERRAIN_OVERSCAN_Y) return;
+    if (point.x < -TERRAIN_OVERSCAN_X || point.x > viewport.width + TERRAIN_OVERSCAN_X || point.y < -TERRAIN_OVERSCAN_Y || point.y > viewport.height + TERRAIN_OVERSCAN_Y) return;
     const node = document.createElement('span');
     node.className = `world-scenery scenery-${scenery.type}`;
     node.innerHTML = '<i></i><i></i><i></i>';
@@ -136,7 +173,7 @@ function renderWorldConnections(fragment) {
   });
   WORLD_REGION_MARKERS.forEach((marker) => {
     const point = worldToScreen(marker.wx, marker.wy);
-    if (point.x < -TERRAIN_OVERSCAN_X || point.x > worldShell.clientWidth + TERRAIN_OVERSCAN_X || point.y < -TERRAIN_OVERSCAN_Y || point.y > worldShell.clientHeight + TERRAIN_OVERSCAN_Y) return;
+    if (point.x < -TERRAIN_OVERSCAN_X || point.x > viewport.width + TERRAIN_OVERSCAN_X || point.y < -TERRAIN_OVERSCAN_Y || point.y > viewport.height + TERRAIN_OVERSCAN_Y) return;
     const node = document.createElement('span');
     node.className = `world-region-marker region-${marker.zone}`;
     node.innerHTML = `<small>${marker.eyebrow}</small><b>${marker.title}</b><em>${marker.note}</em>`;
@@ -146,50 +183,108 @@ function renderWorldConnections(fragment) {
   });
 }
 
+function ensureTerrainLayers() {
+  if (terrainLayers?.staticLayer.isConnected && terrainLayers.chunkLayer.isConnected) return terrainLayers;
+  const staticLayer = document.createElement('div');
+  staticLayer.className = 'terrain-static-layer';
+  const chunkLayer = document.createElement('div');
+  chunkLayer.className = 'terrain-chunk-layer';
+  terrainLayer.replaceChildren(staticLayer, chunkLayer);
+  terrainLayers = { staticLayer, chunkLayer };
+  return terrainLayers;
+}
+
+function createTerrainChunk(cx, cy, chunkW, chunkH) {
+  const node = document.createElement('span');
+  node.className = 'terrain-chunk';
+  node.dataset.chunkKey = `${cx}:${cy}`;
+  node.style.width = `${chunkW}px`;
+  node.style.height = `${chunkH}px`;
+  const centerZone = zoneAt(cx * chunkW, cy * chunkH);
+  if (centerZone.id === 'sea') return node;
+  const count = hash2d(cx, cy, 9) > .6 ? 2 : 1;
+  for (let i = 0; i < count; i += 1) {
+    const mark = document.createElement('span');
+    const roll = hash2d(cx, cy, 30 + i);
+    mark.dataset.zone = centerZone.id;
+    if (centerZone.id === 'forest') mark.className = `terrain-mark ${roll > .72 ? 'is-tree-cluster' : roll < .24 ? 'is-forest-rock' : 'is-bush'}`;
+    else if (centerZone.id === 'hill') mark.className = `terrain-mark ${roll > .68 ? 'is-pine' : roll < .25 ? 'is-forest-rock' : 'is-windgrass'}`;
+    else if (centerZone.id === 'shore') mark.className = `terrain-mark ${roll > .76 ? 'is-reed' : roll < .22 ? 'is-shell' : 'is-dune'}`;
+    else if (centerZone.id === 'street') mark.className = `terrain-mark ${roll > .68 ? 'is-planter' : 'is-cobble'}`;
+    else mark.className = `terrain-mark ${roll < .2 ? 'is-flower-patch' : roll > .78 ? 'is-footpath' : 'is-bush is-small'}`;
+    const localX = 70 + hash2d(cx, cy, 50 + i) * (chunkW - 140);
+    const localY = 60 + hash2d(cx, cy, 70 + i) * (chunkH - 120);
+    mark.style.left = `${Math.round(localX)}px`;
+    mark.style.top = `${Math.round(localY)}px`;
+    if (!mark.classList.contains('is-shell')) mark.style.transform = `translate(-50%, -50%) rotate(${Math.round(hash2d(cx, cy, 90 + i) * 14 - 7)}deg)`;
+    node.append(mark);
+  }
+  return node;
+}
+
+function pruneTerrainChunkCache(activeKeys) {
+  if (terrainChunkCache.size <= TERRAIN_CHUNK_CACHE_LIMIT) return;
+  const disposable = [...terrainChunkCache.entries()]
+    .filter(([key]) => !activeKeys.has(key))
+    .sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+  while (terrainChunkCache.size > TERRAIN_CHUNK_CACHE_LIMIT && disposable.length) {
+    const [key, entry] = disposable.shift();
+    entry.node.remove();
+    terrainChunkCache.delete(key);
+  }
+}
+
 function rebuildTerrain() {
+  const startedAt = performance.now();
   terrainRenderPending = false;
   terrainRenderHandle = null;
   if (state.worldMode === 'cottage') return;
-  const viewportWidth = worldShell.clientWidth;
-  const viewportHeight = worldShell.clientHeight;
-  const fragment = document.createDocumentFragment();
-  renderTerrainBands(fragment);
-  renderWorldConnections(fragment);
+  const viewport = refreshWorldViewportMetrics();
+  const { staticLayer, chunkLayer } = ensureTerrainLayers();
+  const staticFragment = document.createDocumentFragment();
+  renderTerrainBands(staticFragment);
+  renderWorldConnections(staticFragment);
+  staticLayer.replaceChildren(staticFragment);
   const chunkW = 640;
   const chunkH = 480;
-  const minX = Math.floor((state.wx - viewportWidth / 2 - TERRAIN_OVERSCAN_X) / chunkW);
-  const maxX = Math.floor((state.wx + viewportWidth / 2 + TERRAIN_OVERSCAN_X) / chunkW);
-  const minY = Math.floor((state.wy - viewportHeight / 2 - TERRAIN_OVERSCAN_Y) / chunkH);
-  const maxY = Math.floor((state.wy + viewportHeight / 2 + TERRAIN_OVERSCAN_Y) / chunkH);
+  const minX = Math.floor((state.wx - viewport.width / 2 - TERRAIN_OVERSCAN_X) / chunkW);
+  const maxX = Math.floor((state.wx + viewport.width / 2 + TERRAIN_OVERSCAN_X) / chunkW);
+  const minY = Math.floor((state.wy - viewport.height / 2 - TERRAIN_OVERSCAN_Y) / chunkH);
+  const maxY = Math.floor((state.wy + viewport.height / 2 + TERRAIN_OVERSCAN_Y) / chunkH);
+  const activeKeys = new Set();
+  let created = 0;
+  let reused = 0;
   for (let cy = minY; cy <= maxY; cy += 1) {
     for (let cx = minX; cx <= maxX; cx += 1) {
-      const centerZone = zoneAt(cx * chunkW, cy * chunkH);
-      if (centerZone.id === 'sea') continue;
-      const count = hash2d(cx, cy, 9) > .6 ? 2 : 1;
-      for (let i = 0; i < count; i += 1) {
-        const mark = document.createElement('span');
-        const roll = hash2d(cx, cy, 30 + i);
-        mark.dataset.zone = centerZone.id;
-        if (centerZone.id === 'forest') mark.className = `terrain-mark ${roll > .72 ? 'is-tree-cluster' : roll < .24 ? 'is-forest-rock' : 'is-bush'}`;
-        else if (centerZone.id === 'hill') mark.className = `terrain-mark ${roll > .68 ? 'is-pine' : roll < .25 ? 'is-forest-rock' : 'is-windgrass'}`;
-        else if (centerZone.id === 'shore') mark.className = `terrain-mark ${roll > .76 ? 'is-reed' : roll < .22 ? 'is-shell' : 'is-dune'}`;
-        else if (centerZone.id === 'street') mark.className = `terrain-mark ${roll > .68 ? 'is-planter' : 'is-cobble'}`;
-        else mark.className = `terrain-mark ${roll < .2 ? 'is-flower-patch' : roll > .78 ? 'is-footpath' : 'is-bush is-small'}`;
-        const wx = cx * chunkW + 70 + hash2d(cx, cy, 50 + i) * (chunkW - 140);
-        const wy = cy * chunkH + 60 + hash2d(cx, cy, 70 + i) * (chunkH - 120);
-        const sx = worldShell.clientWidth / 2 + wx - state.wx;
-        const sy = worldShell.clientHeight * .52 + wy - state.wy;
-        mark.style.left = `${Math.round(sx)}px`;
-        mark.style.top = `${Math.round(sy)}px`;
-        if (!mark.classList.contains('is-shell')) mark.style.transform = `translate(-50%, -50%) rotate(${Math.round(hash2d(cx, cy, 90 + i) * 14 - 7)}deg)`;
-        fragment.append(mark);
+      const key = `${cx}:${cy}`;
+      activeKeys.add(key);
+      let entry = terrainChunkCache.get(key);
+      if (!entry) {
+        entry = { node: createTerrainChunk(cx, cy, chunkW, chunkH), lastUsed: 0 };
+        terrainChunkCache.set(key, entry);
+        created += 1;
+      } else {
+        reused += 1;
       }
+      entry.lastUsed = ++terrainChunkUseClock;
+      const point = worldToScreen(cx * chunkW, cy * chunkH);
+      entry.node.style.left = `${Math.round(point.x)}px`;
+      entry.node.style.top = `${Math.round(point.y)}px`;
+      if (entry.node.parentNode !== chunkLayer) chunkLayer.append(entry.node);
     }
   }
-  terrainLayer.replaceChildren(fragment);
+  [...chunkLayer.children].forEach((node) => {
+    if (!activeKeys.has(node.dataset.chunkKey)) node.remove();
+  });
+  pruneTerrainChunkCache(activeKeys);
   terrainLayer.style.transform = 'translate3d(0, 0, 0)';
   terrainLayer.dataset.renderVersion = String(++terrainRenderVersion);
-  terrainRenderOrigin = { wx: state.wx, wy: state.wy, width: viewportWidth, height: viewportHeight };
+  terrainLayer.dataset.activeChunks = String(activeKeys.size);
+  terrainLayer.dataset.cachedChunks = String(terrainChunkCache.size);
+  terrainLayer.dataset.createdChunks = String(created);
+  terrainLayer.dataset.reusedChunks = String(reused);
+  terrainLayer.dataset.rebuildMs = (performance.now() - startedAt).toFixed(2);
+  terrainRenderOrigin = { wx: state.wx, wy: state.wy, width: viewport.width, height: viewport.height };
 }
 
 function cancelTerrainRebuild() {
@@ -209,20 +304,20 @@ function renderTerrain() {
   if (state.worldMode === 'cottage') {
     cancelTerrainRebuild();
     if (terrainLayer.childElementCount) terrainLayer.replaceChildren();
+    terrainLayers = null;
     terrainLayer.style.transform = '';
     terrainRenderOrigin = null;
     return;
   }
-  const viewportWidth = worldShell.clientWidth;
-  const viewportHeight = worldShell.clientHeight;
+  const viewport = refreshWorldViewportMetrics();
   if (!terrainRenderOrigin) {
     rebuildTerrain();
     return;
   }
-  const sameViewport = terrainRenderOrigin.width === viewportWidth && terrainRenderOrigin.height === viewportHeight;
+  const sameViewport = terrainRenderOrigin.width === viewport.width && terrainRenderOrigin.height === viewport.height;
   const withinBuffer = sameViewport
-    && Math.abs(state.wx - terrainRenderOrigin.wx) < TERRAIN_OVERSCAN_X * .42
-    && Math.abs(state.wy - terrainRenderOrigin.wy) < TERRAIN_OVERSCAN_Y * .42;
+    && Math.abs(state.wx - terrainRenderOrigin.wx) < TERRAIN_OVERSCAN_X * .5
+    && Math.abs(state.wy - terrainRenderOrigin.wy) < TERRAIN_OVERSCAN_Y * .5;
   terrainLayer.style.transform = `translate3d(${(terrainRenderOrigin.wx - state.wx).toFixed(2)}px, ${(terrainRenderOrigin.wy - state.wy).toFixed(2)}px, 0)`;
   if (!withinBuffer) scheduleTerrainRebuild();
 }
@@ -236,12 +331,13 @@ function resourceTypeFor(zoneId, roll) {
 }
 
 function generateNearbyGatherables() {
+  const viewport = refreshWorldViewportMetrics();
   const chunkW = 520;
   const chunkH = 400;
-  const minX = Math.floor((state.wx - worldShell.clientWidth / 2 - 180) / chunkW);
-  const maxX = Math.floor((state.wx + worldShell.clientWidth / 2 + 180) / chunkW);
-  const minY = Math.floor((state.wy - worldShell.clientHeight / 2 - 140) / chunkH);
-  const maxY = Math.floor((state.wy + worldShell.clientHeight / 2 + 140) / chunkH);
+  const minX = Math.floor((state.wx - viewport.width / 2 - WORLD_NODE_OVERSCAN_X) / chunkW);
+  const maxX = Math.floor((state.wx + viewport.width / 2 + WORLD_NODE_OVERSCAN_X) / chunkW);
+  const minY = Math.floor((state.wy - viewport.height / 2 - WORLD_NODE_OVERSCAN_Y) / chunkH);
+  const maxY = Math.floor((state.wy + viewport.height / 2 + WORLD_NODE_OVERSCAN_Y) / chunkH);
   const resources = [];
   for (let cy = minY; cy <= maxY; cy += 1) {
     for (let cx = minX; cx <= maxX; cx += 1) {
@@ -263,15 +359,15 @@ function generateNearbyGatherables() {
   }
   STARTER_GATHERABLES.forEach((starter) => {
     const gatheredDay = state.homestead.forageDays[starter.id] || 0;
-    const nearViewport = Math.abs(starter.wx - state.wx) < worldShell.clientWidth / 2 + 180
-      && Math.abs(starter.wy - state.wy) < worldShell.clientHeight / 2 + 140;
+    const nearViewport = Math.abs(starter.wx - state.wx) < viewport.width / 2 + WORLD_NODE_OVERSCAN_X
+      && Math.abs(starter.wy - state.wy) < viewport.height / 2 + WORLD_NODE_OVERSCAN_Y;
     if (nearViewport && state.homestead.day - gatheredDay >= RESOURCE_RESPAWN_DAYS) resources.push({ ...starter, zone: zoneAt(starter.wx, starter.wy).id, ...RESOURCE_META[starter.type] });
   });
   return resources;
 }
 
 function gatherRenderKeyForPosition() {
-  return `${Math.floor(state.wx / 260)}:${Math.floor(state.wy / 200)}:${state.homestead.day}`;
+  return `${Math.floor(state.wx / 520)}:${Math.floor(state.wy / 400)}:${state.homestead.day}`;
 }
 
 function renderGatherables({ positionNodes = true } = {}) {
@@ -297,6 +393,7 @@ function renderGatherables({ positionNodes = true } = {}) {
         event.stopPropagation();
         startPointerMove('overworld', item.wx, item.wy + 58, {
           source: 'resource',
+          label: item.label,
           onArrival: () => gatherResource(item),
         });
       });
@@ -667,7 +764,6 @@ function renderStaticDecos() {
     gull.className = `deco seagull gull-${index}`;
     gull.style.left = '0';
     gull.style.top = '0';
-    gull.style.transition = 'transform 110ms linear';
     gull.dataset.gull = String(index);
     decoLayer.append(gull);
     ambientLifeNodes.gulls.push(gull);
@@ -676,7 +772,6 @@ function renderStaticDecos() {
   cat.type = 'button';
   cat.className = 'deco cat';
   cat.id = 'worldCat';
-  cat.style.transition = 'transform 110ms linear';
   cat.title = '镇上的猫';
   cat.setAttribute('aria-label', '摸摸镇上的猫');
   cat.addEventListener('click', (event) => {
@@ -734,6 +829,7 @@ function updateAmbientCritters(now = performance.now()) {
 function updateAmbientLife(now = performance.now(), force = false) {
   if (!force && now - lastAmbientUpdateAt < AMBIENT_UPDATE_INTERVAL_MS) return;
   lastAmbientUpdateAt = now;
+  refreshWorldViewportMetrics();
   updateCat(now);
   updateGulls(now);
   updateAmbientCritters(now);
@@ -829,6 +925,7 @@ function renderAuras() {
 function renderWorld() {
   worldStage.scrollTop = 0;
   worldStage.scrollLeft = 0;
+  refreshWorldViewportMetrics();
   updatePlayer();
   if (state.worldMode === 'cottage') renderHomestead();
   renderTerrain();
@@ -874,6 +971,9 @@ function renderWorld() {
   renderBidPlants();
   renderDecos();
   renderNameless();
+  if (typeof renderZoneEventMarkers === 'function') renderZoneEventMarkers();
+  if (typeof renderDynamicLocations === 'function') renderDynamicLocations();
+  if (typeof renderNpcStoryNodes === 'function') renderNpcStoryNodes();
   updateWalkTargetMarker();
   updateNearby();
   updateWayfinder();
@@ -914,6 +1014,14 @@ function updateWorldDeclutterLayout(registry) {
       const item = registry.gatherablesById.get(node.dataset.resourceId);
       return item && { node, wx: item.wx, wy: item.wy, width: 82, height: 88 };
     }),
+    ...$$('[data-dynamic-location], [data-zone-event], [data-npc]', decoLayer).map((node) => ({
+      node,
+      wx: Number(node.dataset.wx),
+      wy: Number(node.dataset.wy),
+      width: node.matches('[data-dynamic-location]') ? 176 : 112,
+      height: node.matches('[data-dynamic-location]') ? 132 : 112,
+      context: true,
+    })),
   ].filter(Boolean);
   const placed = reserved.map((item) => ({
     left: item.wx - item.width / 2 - 14,
@@ -953,7 +1061,8 @@ function updateWorldDeclutterLayout(registry) {
     item.node.dataset.layoutDx = String(selected[0]);
     item.node.dataset.layoutDy = String(selected[1]);
     item.node.classList.toggle('is-decluttered', selected[0] !== 0 || selected[1] !== 0);
-    placeWorldNode(item.node, item.wx, item.wy);
+    if (item.context) placeContextWorldNode(item.node);
+    else placeWorldNode(item.node, item.wx, item.wy);
   });
 }
 
@@ -979,6 +1088,7 @@ function refreshWorldFrameRegistry() {
     nameless: NAMELESS_REGIONS.map((region) => ({ region, node: $(`[data-nameless="${region.id}"]`, decoLayer) })).filter((entry) => entry.node),
     auras: $$('.aura', auraLayer),
     bottle: $('.bottle', decoLayer),
+    contextNodes: $$('[data-dynamic-location], [data-zone-event], [data-npc]', decoLayer),
   };
   updateWorldDeclutterLayout(worldFrameRegistry);
   return worldFrameRegistry;
@@ -987,6 +1097,7 @@ function refreshWorldFrameRegistry() {
 function updateWorldMovementFrame(now = performance.now()) {
   worldStage.scrollTop = 0;
   worldStage.scrollLeft = 0;
+  refreshWorldViewportMetrics();
   updatePlayer();
   if (state.worldMode === 'cottage') {
     updateNearby();
@@ -1035,6 +1146,7 @@ function updateWorldMovementFrame(now = performance.now()) {
     const video = registry.videosById.get(node.dataset.videoId);
     if (video) placeWorldNode(node, video.wx, video.wy + 10);
   });
+  registry.contextNodes.forEach((node) => placeContextWorldNode(node));
   updateWalkTargetMarker();
   if (now - lastWorldContextUpdateAt >= WORLD_CONTEXT_INTERVAL_MS) {
     lastWorldContextUpdateAt = now;
