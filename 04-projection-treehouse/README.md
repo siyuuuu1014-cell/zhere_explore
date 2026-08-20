@@ -121,12 +121,12 @@ npm.cmd start
 
 ## 文档
 
-- `v7-experience-coverage.md` — 历史功能与数据事件对照表
+- `docs/coverage/v7-experience-coverage.md` — 历史功能与数据事件对照表
 - `server/FEISHU.md` — 飞书 Repository、表字段、生产环境配置与端到端验证记录
 - `qa/audit-2026-08-10/audit.md` — 正式界面 4 功能完整性与体验审查
-- `playability-report.md` — 可玩性测试报告
+- `docs/reports/playability-report.md` — 可玩性测试报告
 - `DESIGN.md` — 设计说明（部分内容已被 v7 取代）
-- `direction.md` — 早期视觉与交互方向
-- `generation-prompts.md` — AI 图像生成记录
+- `docs/design/direction.md` — 早期视觉与交互方向
+- `docs/design/generation-prompts.md` — AI 图像生成记录
 - `qa/` — 按日期归档的功能审查、P0/P1/P2 验收与修复截图（`qa/mobile-harness.html` 为移动端 QA 外壳）
 - `scripts/feishu-e2e-verify.mjs` — 飞书生产环境端到端验证脚本（`npm run feishu:e2e`）

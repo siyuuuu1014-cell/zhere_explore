@@ -12,7 +12,7 @@ npm run research:recommendation:sync:audit
 npm run research:recommendation:sync
 ```
 
-建表和同步都可重复执行：建表只补缺失表/字段；同步按稳定主键新增或更新，不会重复造行。使用飞书 Repository 启动服务时，内置后台任务会在 30 秒后执行首轮同步，之后每 15 分钟同步；单轮未完成时不会重复启动，也不会阻塞玩家请求。可用 `ZHERE_RECOMMENDATION_SYNC_*` 环境变量调整或关闭。`npm run research:recommendation:sync` 仍可用于手动立即同步。详细字段和研究语义见 [recommendation-feishu-table-plan.md](../docs/recommendation-feishu-table-plan.md)。参考 CSV 仅用于定义字段，脚本不会导入参考样本。
+建表和同步都可重复执行：建表只补缺失表/字段；同步按稳定主键新增或更新，不会重复造行。使用飞书 Repository 启动服务时，内置后台任务会在 30 秒后执行首轮同步，之后每 15 分钟同步；单轮未完成时不会重复启动，也不会阻塞玩家请求。可用 `ZHERE_RECOMMENDATION_SYNC_*` 环境变量调整或关闭。`npm run research:recommendation:sync` 仍可用于手动立即同步。详细字段和研究语义见 [recommendation-feishu-table-plan.md](../docs/research/recommendation-feishu-table-plan.md)。参考 CSV 仅用于定义字段，脚本不会导入参考样本。
 
 生产环境必须使用飞书 Repository。浏览器只访问本项目 `/api/*`，不能获得飞书 App Secret、tenant access token、表格 token 或云空间 token。
 

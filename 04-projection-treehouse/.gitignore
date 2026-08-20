@@ -8,5 +8,5 @@ node_modules/
 .audit-data-*/
 .tmp-*/
 *.log
-coverage/
+/coverage/
 upload-tmp/
